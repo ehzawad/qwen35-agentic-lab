@@ -50,7 +50,10 @@ def main() -> None:
         warmup_ratio=0.03,
         beta=args.beta,
         max_length=1536,
-        max_prompt_length=768,
+        # TRL v1 dropped max_prompt_length; truncation_mode decides which end of
+        # an over-long prompt is cut. keep_end preserves the most recent turns,
+        # which is what you want for chat data.
+        truncation_mode="keep_end",
         bf16=True,
         gradient_checkpointing=True,
         logging_steps=10,
