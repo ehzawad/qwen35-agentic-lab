@@ -19,6 +19,13 @@ import time
 
 from . import env, trace
 from .chat import boxed_answer, run_agent_loop
+from .grpo import (
+    REWARD_NAMES,
+    REWARD_WEIGHTS,
+    correctness_reward,
+    format_reward,
+    tool_use_reward,
+)
 from .data import build_eval
 from .tools import tool_schemas
 
@@ -56,7 +63,19 @@ def evaluate(model, proc, n: int, max_turns: int, max_new_tokens: int,
         ok = got is not None and want is not None and abs(got - want) < 1e-4
         correct += ok
         if episode is not None:
-            episode.finish(final or "", ok=bool(ok), predicted=got, expected=want)
+            # Score with the ACTUAL GRPO reward functions rather than stuffing
+            # predicted/expected into a field labelled "rewards". This is what
+            # makes an eval trace comparable with a training trace.
+            comp = [m for m in convo if m.get("role") in ("assistant", "tool")]
+            rewards = {
+                "correctness": correctness_reward([comp], [ex["ground_truth"]])[0],
+                "tool_use": tool_use_reward([comp])[0],
+                "format": format_reward([comp])[0],
+            }
+            rewards["total"] = round(
+                sum(w * rewards[n] for n, w in zip(REWARD_NAMES, REWARD_WEIGHTS)), 4
+            )
+            episode.finish(final or "", ok=bool(ok), predicted=got, expected=want, **rewards)
 
         calls = [m for m in convo if m.get("role") == "assistant" and m.get("tool_calls")]
         results = [m for m in convo if m.get("role") == "tool"]

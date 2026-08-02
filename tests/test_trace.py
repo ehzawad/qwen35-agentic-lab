@@ -93,3 +93,50 @@ class TestRender:
         with traced.open("a") as fh:
             fh.write("not json at all\n")
         assert "episodes        1" in trace.render(traced)
+
+
+class TestRolloutRendering:
+    """GRPO emits `rollout` records; rendering only `episode` made it write-only."""
+
+    def test_grpo_rollouts_render_instead_of_reporting_nothing(self, traced, monkeypatch):
+        from agentlab import grpo
+
+        comps = [
+            [{"role": "assistant", "tool_calls": [
+                {"type": "function", "function": {"name": "calculator", "arguments": {}}}]},
+             {"role": "tool", "name": "calculator", "content": "250"},
+             {"role": "assistant", "content": r"\boxed{250}"}],
+            [{"role": "assistant", "content": "no answer"}],
+        ]
+        gt = ["250", "250"]
+        # All three must fire before anything is written.
+        grpo.correctness_reward(comps, gt)
+        assert not traced.exists() or traced.read_text() == ""
+        grpo.tool_use_reward(comps)
+        grpo.format_reward(comps)
+
+        from agentlab import trace as tr
+
+        out = tr.render(traced)
+        assert "no episodes" not in out
+        assert "rollouts        2" in out
+        assert "accuracy        0.500" in out
+
+    def test_every_reward_component_is_recorded(self, traced):
+        import json
+
+        from agentlab import grpo
+
+        comps = [[{"role": "assistant", "content": r"\boxed{7}"}]]
+        grpo.correctness_reward(comps, ["7"])
+        grpo.tool_use_reward(comps)
+        grpo.format_reward(comps)
+        rec = json.loads(traced.read_text().strip())
+        assert set(rec["rewards"]) == set(grpo.REWARD_NAMES)
+        assert rec["rewards"]["correctness"] == 1.0
+        assert "total" in rec
+
+    def test_weights_are_a_single_source_of_truth(self):
+        from agentlab import grpo
+
+        assert len(grpo.REWARD_WEIGHTS) == len(grpo.REWARD_NAMES)

@@ -98,7 +98,7 @@ def render(file: str | pathlib.Path, limit: int = 5) -> str:
     if not p.exists():
         return f"no trace at {p}"
 
-    episodes, out = [], []
+    episodes, rollouts, out = [], [], []
     for line in p.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -109,9 +109,17 @@ def render(file: str | pathlib.Path, limit: int = 5) -> str:
             continue
         if rec.get("kind") == "episode":
             episodes.append(rec)
+        elif rec.get("kind") == "rollout":
+            rollouts.append(rec)
+
+    # GRPO emits `rollout` records, eval emits `episode` records. Rendering only
+    # one of them made `make trace-grpo` write a perfectly good file and then
+    # report "no episodes recorded".
+    if rollouts and not episodes:
+        return _render_rollouts(rollouts, limit)
 
     if not episodes:
-        return f"{p}: no episodes recorded"
+        return f"{p}: no episodes or rollouts recorded"
 
     for ep in episodes[:limit]:
         mark = {True: "PASS", False: "FAIL", None: "----"}[ep.get("ok")]
@@ -147,6 +155,35 @@ def render(file: str | pathlib.Path, limit: int = 5) -> str:
     out.append(f"tool_error_rate {errs/n:.3f}")
     out.append(f"mean_turns      {sum(e.get('n_turns',0) for e in episodes)/n:.2f}")
     out.append(f"mean_calls      {sum(e.get('n_calls',0) for e in episodes)/n:.2f}")
+    return "\n".join(out)
+
+
+def _render_rollouts(rollouts: list[dict], limit: int) -> str:
+    """View for GRPO training rollouts (one per sampled completion)."""
+    out = []
+    for r in rollouts[:limit]:
+        mark = "PASS" if r.get("correct") else "FAIL"
+        out.append("=" * 78)
+        out.append(f"[{mark}] ground_truth={r.get('ground_truth')}  boxed={r.get('boxed')}")
+        out.append(f"  tools_called: {r.get('tools_called') or '(none)'}"
+                   + ("  TOOL ERROR" if r.get("tool_error") else ""))
+        if r.get("rewards"):
+            out.append("  rewards: " + ", ".join(f"{k}={v}" for k, v in r["rewards"].items()))
+        out.append(f"  completion tail: {str(r.get('completion',''))[-300:]}")
+
+    n = len(rollouts)
+    used = sum(1 for r in rollouts if r.get("tools_called"))
+    errs = sum(1 for r in rollouts if r.get("tool_error"))
+    out.append("=" * 78)
+    out.append(f"rollouts        {n}" + (f"  (showing first {limit})" if n > limit else ""))
+    out.append(f"accuracy        {sum(1 for r in rollouts if r.get('correct'))/n:.3f}")
+    out.append(f"tool_use_rate   {used/n:.3f}")
+    out.append(f"tool_error_rate {errs/n:.3f}")
+    if any(r.get("rewards") for r in rollouts):
+        keys = sorted({k for r in rollouts for k in (r.get("rewards") or {})})
+        for k in keys:
+            vals = [r["rewards"][k] for r in rollouts if k in (r.get("rewards") or {})]
+            out.append(f"mean {k:<11}{sum(vals)/len(vals):+.3f}")
     return "\n".join(out)
 
 

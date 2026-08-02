@@ -99,6 +99,52 @@ def _tool_errored(completion) -> bool:
 
 
 # --------------------------------------------------------------------------
+# reward tracing
+# --------------------------------------------------------------------------
+
+# TRL calls each reward function separately on the same batch, so no single one
+# of them can see the full breakdown. Each deposits its scores here and the last
+# to arrive writes one record per rollout carrying every component. Keyed by
+# batch identity so concurrent batches cannot blend into each other.
+REWARD_NAMES = ("correctness", "tool_use", "format")
+_REWARD_BUF: dict[int, dict] = {}
+
+
+def _record(name: str, completions, scores, ground_truth=None) -> None:
+    if not trace.enabled():
+        return
+    key = id(completions)
+    slot = _REWARD_BUF.setdefault(key, {"scores": {}, "gt": None})
+    slot["scores"][name] = list(scores)
+    if ground_truth is not None:
+        slot["gt"] = list(ground_truth)
+    if set(slot["scores"]) != set(REWARD_NAMES):
+        return
+
+    gt = slot["gt"] or [None] * len(completions)
+    for i, comp in enumerate(completions):
+        text = _as_text(comp)
+        rewards = {n: slot["scores"][n][i] for n in REWARD_NAMES}
+        trace.emit(
+            "rollout",
+            ground_truth=gt[i],
+            correct=bool(slot["scores"]["correctness"][i]),
+            boxed=(_BOXED_RE.findall(text) or [None])[-1],
+            tools_called=_tool_names(comp),
+            tool_error=_tool_errored(comp),
+            rewards=rewards,
+            total=round(sum(w * rewards[n] for n, w in zip(REWARD_NAMES, REWARD_WEIGHTS)), 4),
+            completion=text[-1500:],
+        )
+    _REWARD_BUF.pop(key, None)
+
+
+# Single source of truth: grpo.py passes these to GRPOConfig and the trace uses
+# them for the weighted total, so the two cannot drift apart.
+REWARD_WEIGHTS = (1.0, 0.3, 0.2)
+
+
+# --------------------------------------------------------------------------
 # reward functions
 # --------------------------------------------------------------------------
 
@@ -123,22 +169,7 @@ def correctness_reward(completions, ground_truth, **kwargs) -> list[float]:
     if log_metric:
         log_metric("accuracy", sum(out) / max(len(out), 1))
 
-    # One record per rollout when AGENTLAB_TRACE is set, so a training run leaves
-    # inspectable evidence of what the reward actually paid for rather than only
-    # a scalar mean.
-    if trace.enabled():
-        for comp, gt, score in zip(completions, ground_truth, out):
-            names = _tool_names(comp)
-            text = _as_text(comp)
-            trace.emit(
-                "rollout",
-                ground_truth=gt,
-                correct=bool(score),
-                boxed=(_BOXED_RE.findall(text) or [None])[-1],
-                tools_called=names,
-                tool_error=_tool_errored(comp),
-                completion=text[-1500:],
-            )
+    _record("correctness", completions, out, ground_truth=ground_truth)
     return out
 
 
@@ -167,12 +198,15 @@ def tool_use_reward(completions, **kwargs) -> list[float]:
     if log_metric:
         log_metric("tool_use_rate", used / max(len(completions), 1))
         log_metric("tool_error_rate", errored / max(len(completions), 1))
+    _record("tool_use", completions, out)
     return out
 
 
 def format_reward(completions, **kwargs) -> list[float]:
     """Shaping: the answer must be extractable at all."""
-    return [0.1 if _BOXED_RE.search(_as_text(c)) else -0.1 for c in completions]
+    out = [0.1 if _BOXED_RE.search(_as_text(c)) else -0.1 for c in completions]
+    _record("format", completions, out)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -299,7 +333,7 @@ def main() -> None:
         vllm_max_model_length=args.vllm_max_len,
         # reward_weights lives on the config, not on GRPOTrainer -- `tools` and
         # `environment_factory` are the trainer kwargs, these are not.
-        reward_weights=[1.0, 0.3, 0.2] if args.mode == "tools" else None,
+        reward_weights=list(REWARD_WEIGHTS) if args.mode == "tools" else None,
         # How many tool round-trips one rollout may take before it is cut off.
         max_tool_calling_iterations=args.max_tool_iters,
     )

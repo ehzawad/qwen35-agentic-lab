@@ -35,7 +35,7 @@ class TestSFT:
     def test_prompt_completion_shape_not_messages(self, sft):
         # Decides whether SFT loss lands on the tool call or on the schema
         # preamble: TRL enables completion_only_loss ONLY for prompt/completion.
-        assert set(sft.column_names) == {"prompt", "completion", "tools"}
+        assert set(sft.column_names) == {"prompt", "completion", "tools", "chat_template_kwargs"}
 
     def test_rows_survived_conversion(self, sft):
         assert len(sft) > 0, "every xlam row was dropped by the converter"
@@ -75,7 +75,8 @@ class TestSFT:
         tok = env.get_tokenizer(proc)
         row = sft[0]
         msgs = list(row["prompt"]) + list(row["completion"])
-        text = tok.apply_chat_template(msgs, tools=row["tools"], tokenize=False)
+        kw = row.get("chat_template_kwargs") or {}
+        text = tok.apply_chat_template(msgs, tools=row["tools"], tokenize=False, **kw)
         assert row["completion"][-1]["tool_calls"][0]["function"]["name"] in text
 
 
@@ -226,3 +227,40 @@ class TestDPOAlignment:
 
         ds = build_preference(n=4, explicit_prompt=True)
         assert ds[0]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+class TestSFTAlignment:
+    """SFTTrainer's completion mask depends on the same prefix property as DPO."""
+
+    def test_prompt_is_a_token_prefix_of_prompt_plus_completion(self):
+        from agentlab import env
+        from agentlab.data import build_sft
+
+        tok = env.get_tokenizer(env.load_processor())
+        for row in build_sft(n=8):
+            kw = row.get("chat_template_kwargs") or {}
+            p = tok.apply_chat_template(row["prompt"], tools=row["tools"], tokenize=False,
+                                        add_generation_prompt=True, **kw)
+            f = tok.apply_chat_template(list(row["prompt"]) + list(row["completion"]),
+                                        tools=row["tools"], tokenize=False, **kw)
+            pi, fi = tok(p).input_ids, tok(f).input_ids
+            assert fi[:len(pi)] == pi, "completion_mask boundary would be wrong"
+
+    def test_trained_tokens_are_the_tool_call_and_nothing_else(self):
+        # The template always renders a hollow <think></think> for an assistant
+        # turn with no reasoning_content. What matters is which side of the mask
+        # boundary it lands on: it must sit in the PROMPT (masked out), so the
+        # model is never trained to emit an empty reasoning block before a call.
+        from agentlab import env
+        from agentlab.data import build_sft
+
+        tok = env.get_tokenizer(env.load_processor())
+        row = build_sft(n=4)[0]
+        kw = row.get("chat_template_kwargs") or {}
+        p = tok.apply_chat_template(row["prompt"], tools=row["tools"], tokenize=False,
+                                    add_generation_prompt=True, **kw)
+        f = tok.apply_chat_template(list(row["prompt"]) + list(row["completion"]),
+                                    tools=row["tools"], tokenize=False, **kw)
+        trained = tok.decode(tok(f).input_ids[len(tok(p).input_ids):])
+        assert "<tool_call>" in trained
+        assert "<think>" not in trained, "the hollow thinking block leaked into the loss"

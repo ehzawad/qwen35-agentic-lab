@@ -92,6 +92,18 @@ def build_sft(n: int = 4000, seed: int = 0) -> Dataset:
     obvious alternative, `assistant_only_loss=True`, is not available: TRL raises
     "Assistant-only loss is not yet supported for vision-language models" and
     Qwen3.5 is detected as one.
+
+    `chat_template_kwargs={"enable_thinking": False}` is needed for the same
+    reason it is on the preference rows. SFTTrainer builds the loss mask as
+
+        completion_mask = [0]*len(prompt_ids) + [1]*(len(prompt_completion_ids)-len(prompt_ids))
+
+    so a prompt render that is not a token prefix of the joint render puts the
+    mask boundary in the wrong place: 8/8 rows misaligned with thinking on, 0/8
+    with it off. It also stops every target rendering a hollow `<think></think>`
+    pair, which would otherwise teach the model to open and immediately close
+    its reasoning before each tool call. xlam carries no reasoning traces, so
+    nothing is lost by turning it off for this stage.
     """
     raw = load_dataset("Salesforce/xlam-function-calling-60k", split="train")
     raw = raw.shuffle(seed=seed).select(range(min(n, len(raw))))
@@ -120,6 +132,7 @@ def build_sft(n: int = 4000, seed: int = 0) -> Dataset:
                 "prompt": [{"role": "user", "content": ex["query"]}],
                 "completion": [{"role": "assistant", "tool_calls": tool_calls}],
                 "tools": [_xlam_tool_to_schema(t) for t in tools if isinstance(t, dict)],
+                "chat_template_kwargs": {"enable_thinking": False},
             }
         )
 
