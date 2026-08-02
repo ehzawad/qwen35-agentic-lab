@@ -77,6 +77,27 @@ def _numeric(s: str):
         return None
 
 
+# A failed tool reaches us in two different shapes and both must be penalised:
+#   1. our own tools return the string "error: ..."  (tools.call_tool)
+#   2. a tool that RAISES is wrapped by TRL itself as {"error": str(e)}, which
+#      stringifies to "{'error': '...'}" -- no "error:" substring anywhere.
+# TRL calls the raw functions, not call_tool, so a bad-argument TypeError takes
+# path 2. Matching only "error:" paid +0.2 for a call that had crashed.
+# (trl/trainer/grpo_trainer.py: `result = {"error": str(e)}`)
+_TOOL_ERROR_RE = re.compile(r"^\s*error:|['\"]error['\"]\s*:", re.IGNORECASE)
+
+
+def _tool_errored(completion) -> bool:
+    """True when any tool result in this rollout represents a failure."""
+    if isinstance(completion, str):
+        return bool(_TOOL_ERROR_RE.search(completion))
+    for msg in completion:
+        if isinstance(msg, dict) and msg.get("role") == "tool":
+            if _TOOL_ERROR_RE.search(str(msg.get("content", ""))):
+                return True
+    return False
+
+
 # --------------------------------------------------------------------------
 # reward functions
 # --------------------------------------------------------------------------
@@ -115,7 +136,7 @@ def correctness_reward(completions, ground_truth, **kwargs) -> list[float]:
                 correct=bool(score),
                 boxed=(_BOXED_RE.findall(text) or [None])[-1],
                 tools_called=names,
-                tool_error="error:" in text,
+                tool_error=_tool_errored(comp),
                 completion=text[-1500:],
             )
     return out
@@ -128,22 +149,24 @@ def tool_use_reward(completions, **kwargs) -> list[float]:
     using tools, never pay it to spam calls it does not need.
     """
     log_metric = kwargs.get("log_metric")
-    out, used = [], 0
+    out, used, errored = [], 0, 0
     for comp in completions:
         names = _tool_names(comp)
-        text = _as_text(comp)
         score = 0.0
         if names:
             used += 1
             score += 0.2
         if "calculator" in names:
             score += 0.1
-        # A tool that returned "error: ..." means the model built a bad call.
-        if "error:" in text:
-            score -= 0.2
+        # A failed tool means the model built a bad call. The penalty must
+        # outweigh the +0.2/+0.1 it just earned, or crashing still pays.
+        if _tool_errored(comp):
+            errored += 1
+            score -= 0.4
         out.append(score)
     if log_metric:
         log_metric("tool_use_rate", used / max(len(completions), 1))
+        log_metric("tool_error_rate", errored / max(len(completions), 1))
     return out
 
 

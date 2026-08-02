@@ -14,7 +14,18 @@ import os
 # would also reach into the vision tower, which we never train here, so the
 # vision modules are excluded explicitly.
 DEFAULT_TARGETS = os.environ.get("LORA_TARGETS", "all-linear")
-EXCLUDE = ["vision", "visual", "image_", "patch_embed", "merger", "lm_head"]
+
+# MUST be a regex string, not a list. PEFT (tuners_utils._check_exclude, ~L1907)
+# matches a *list* only by exact key or `key.endswith(f".{entry}")`, so "visual"
+# never matches `model.visual.blocks.0.attn.proj` and the whole vision tower was
+# silently getting LoRA. A *string* is applied with re.fullmatch instead, which
+# is the only form that can express "anything under the vision tower".
+#
+# This was invisible because PEFT only warns when exclude_modules matched
+# NOTHING -- and "lm_head" did match, so the warning never fired while 16.7% of
+# every adapter (196 of 692 tensors, 13.1M params) trained on a vision stack
+# that never sees an image in this pipeline.
+EXCLUDE = r".*\.(visual|vision_tower|vision_model)\..*|.*\.(patch_embed|merger)\..*|lm_head"
 
 
 def lora_config(r: int = 32, alpha: int | None = None, dropout: float = 0.05,
@@ -30,6 +41,8 @@ def lora_config(r: int = 32, alpha: int | None = None, dropout: float = 0.05,
         lora_dropout=dropout,
         target_modules=targets,
         exclude_modules=EXCLUDE if targets == "all-linear" else None,
+        # LoRA on a vision tower that never sees an image would also be merged
+        # into the served checkpoint, so this is wasted VRAM at inference too.
         bias="none",
         task_type=task_type,
     )

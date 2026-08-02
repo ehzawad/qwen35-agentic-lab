@@ -116,13 +116,34 @@ class TestStageConfigs:
         )
         assert cfg.vllm_max_model_length == 4096
 
-    def test_lora_config_excludes_the_vision_tower(self):
+    def test_lora_config_shape(self):
         from agentlab.peft_cfg import lora_config
 
         cfg = lora_config(r=32)
         assert cfg.r == 32 and cfg.lora_alpha == 64
         assert cfg.target_modules == "all-linear"
-        assert any("vision" in m for m in cfg.exclude_modules)
+
+    def test_exclude_modules_is_a_regex_string_not_a_list(self):
+        # Load-bearing. PEFT matches a LIST only by exact key or
+        # key.endswith(f".{entry}"), so a list entry "visual" can never match
+        # `model.visual.blocks.0.attn.proj` and the entire vision tower gets
+        # LoRA. Only a STRING is applied with re.fullmatch. This regressed once
+        # and cost 16.7% of every adapter.
+        import re
+
+        from agentlab.peft_cfg import lora_config
+
+        cfg = lora_config(r=8)
+        assert isinstance(cfg.exclude_modules, str), "a list cannot exclude nested modules"
+        assert re.fullmatch(cfg.exclude_modules, "model.visual.blocks.0.attn.proj")
+        assert re.fullmatch(cfg.exclude_modules, "lm_head")
+        # ...and must not swallow the language stack it is supposed to train
+        for keep in (
+            "model.language_model.layers.0.self_attn.q_proj",
+            "model.language_model.layers.3.mlp.gate_proj",
+            "model.language_model.layers.7.linear_attn.in_proj_qkv",
+        ):
+            assert not re.fullmatch(cfg.exclude_modules, keep), f"excluded {keep}"
 
 
 class TestRewardFunctions:
@@ -228,3 +249,46 @@ class TestBudgetEnv:
         for _ in range(5):
             env.spend(1)
         assert env.spend(1).startswith("error:")
+
+
+class TestToolErrorDetection:
+    """Both failure shapes must be penalised, not just our own."""
+
+    @staticmethod
+    def _with_result(content):
+        return [
+            {"role": "assistant", "tool_calls": [
+                {"type": "function", "function": {"name": "calculator", "arguments": {}}}]},
+            {"role": "tool", "name": "calculator", "content": content},
+            {"role": "assistant", "content": r"\boxed{1}"},
+        ]
+
+    def test_our_own_error_string_is_detected(self):
+        from agentlab.grpo import _tool_errored
+
+        assert _tool_errored(self._with_result("error: division by zero"))
+
+    def test_trl_wrapped_exception_is_detected(self):
+        # TRL renders a raising tool as {"error": str(e)} -- no "error:" here.
+        from agentlab.grpo import _tool_errored
+
+        assert _tool_errored(self._with_result("{'error': 'unexpected keyword argument'}"))
+        assert _tool_errored(self._with_result('{"error": "boom"}'))
+
+    def test_successful_result_is_not_flagged(self):
+        from agentlab.grpo import _tool_errored
+
+        assert not _tool_errored(self._with_result("1016702"))
+
+    def test_the_word_error_in_prose_is_not_flagged(self):
+        from agentlab.grpo import _tool_errored
+
+        assert not _tool_errored(self._with_result("no error occurred, result is 4"))
+
+    def test_a_crashed_call_scores_below_no_call_at_all(self):
+        # The property that was broken: crashing must not out-earn abstaining.
+        from agentlab.grpo import tool_use_reward
+
+        crashed = tool_use_reward([self._with_result("{'error': 'boom'}")])[0]
+        no_call = tool_use_reward([[{"role": "assistant", "content": r"\boxed{1}"}]])[0]
+        assert crashed < no_call, f"crashing paid {crashed} vs {no_call} for not calling"
