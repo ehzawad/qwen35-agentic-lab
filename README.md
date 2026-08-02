@@ -106,6 +106,24 @@ tool use, never pay the model to spam calls it does not need.
 state across the rollout, exposes its public methods as tools, and scores itself
 via `get_reward()` — the shape you need for a sandbox, a game, or a booking flow.
 
+### Watch `completions/clipped_ratio`
+
+The single most useful number in the GRPO logs. Thinking mode is on by default
+and spends a large share of the completion budget before the tool call appears,
+so a budget that looks generous truncates most rollouts. Truncated rollouts are
+dropped by `mask_truncated_completions=True`, and a step where *every* completion
+clipped teaches nothing at all:
+
+```
+clipped_ratio: 1     -> loss: 0, grad_norm: 0, frac_reward_zero_std: 1
+clipped_ratio: 0     -> loss: -0.0048, grad_norm: 0.029, accuracy: 0.75
+```
+
+Both lines are from the same smoke run. If `clipped_ratio` sits high, raise
+`--max-completion-length` before you touch the learning rate — you are not
+looking at a policy that will not learn, you are looking at a policy whose
+rollouts never finished.
+
 ## Three things that will bite you
 
 All three were found by running this, not by reading docs.
@@ -161,8 +179,10 @@ Measured on this box, 4B policy, LoRA r=32 (78.0M trainable, 1.69% of 4.6B),
 
 | | |
 |---|---|
-| SFT | ~8.0 s/step at 8 samples/step, ~23 GB resident |
+| SFT | ~8.4 s/step at 8 samples/step, ~23 GB resident |
+| SFT, 32 steps | train_loss 0.492, eval_loss 0.344, token accuracy 91.4% |
 | SFT, default `--n 4000` | ~250 steps, so budget ~35 min |
+| GRPO (tools, 4 generations, vLLM colocate) | ~24 s/step, card saturated at ~47 GB |
 | base model generation | ~14-16 tok/s in thinking mode |
 
 Thinking mode is on by default and spends a large share of a small token budget
