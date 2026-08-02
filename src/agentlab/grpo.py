@@ -22,7 +22,7 @@ import argparse
 import random
 import re
 
-from . import env
+from . import env, trace
 from .data import build_grpo
 from .peft_cfg import describe, policy_and_peft
 from .tools import TOOLS, calculator, kb_lookup, unit_convert
@@ -101,6 +101,23 @@ def correctness_reward(completions, ground_truth, **kwargs) -> list[float]:
             out.append(1.0 if hits[-1].strip() == str(gt).strip() else 0.0)
     if log_metric:
         log_metric("accuracy", sum(out) / max(len(out), 1))
+
+    # One record per rollout when AGENTLAB_TRACE is set, so a training run leaves
+    # inspectable evidence of what the reward actually paid for rather than only
+    # a scalar mean.
+    if trace.enabled():
+        for comp, gt, score in zip(completions, ground_truth, out):
+            names = _tool_names(comp)
+            text = _as_text(comp)
+            trace.emit(
+                "rollout",
+                ground_truth=gt,
+                correct=bool(score),
+                boxed=(_BOXED_RE.findall(text) or [None])[-1],
+                tools_called=names,
+                tool_error="error:" in text,
+                completion=text[-1500:],
+            )
     return out
 
 

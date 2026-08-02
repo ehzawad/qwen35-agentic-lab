@@ -17,8 +17,8 @@ import argparse
 import json
 import time
 
-from . import env
-from .chat import boxed_answer, parse_tool_calls, run_agent_loop
+from . import env, trace
+from .chat import boxed_answer, run_agent_loop
 from .data import build_eval
 from .tools import tool_schemas
 
@@ -40,16 +40,23 @@ def evaluate(model, proc, n: int, max_turns: int, max_new_tokens: int,
     t0 = time.time()
 
     for i, ex in enumerate(ds):
+        episode = (
+            trace.Episode(ex["prompt"][-1]["content"], index=i, ground_truth=ex["ground_truth"])
+            if trace.enabled()
+            else None
+        )
         convo, final = run_agent_loop(
             model, proc, list(ex["prompt"]), schemas,
             max_turns=max_turns, max_new_tokens=max_new_tokens,
-            enable_thinking=enable_thinking, verbose=False,
+            enable_thinking=enable_thinking, verbose=False, episode=episode,
             temperature=0.7, top_p=0.8, top_k=20,
         )
 
         got, want = _numeric(boxed_answer(final or "")), _numeric(ex["ground_truth"])
         ok = got is not None and want is not None and abs(got - want) < 1e-4
         correct += ok
+        if episode is not None:
+            episode.finish(final or "", ok=bool(ok), predicted=got, expected=want)
 
         calls = [m for m in convo if m.get("role") == "assistant" and m.get("tool_calls")]
         results = [m for m in convo if m.get("role") == "tool"]

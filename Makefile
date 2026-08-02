@@ -20,7 +20,8 @@ DPO     := out/$(SLUG)-dpo-lora
 GRPO    := out/$(SLUG)-grpo-lora
 MERGED  := out/$(SLUG)-merged
 
-.PHONY: help setup gpu smoke data inspect sft dpo reward grpo grpo-env \
+.PHONY: help setup gpu smoke data inspect sft dpo reward grpo grpo-env grpo-from-base \
+        verify verify-v trace-eval trace-grpo trace-view \
         eval-base eval-sft eval-grpo merge serve clean
 
 help:
@@ -38,6 +39,10 @@ help:
 	@echo "  grpo        stage 3: GRPO with real tool execution (gsm8k)"
 	@echo "  grpo-env    stage 3': GRPO with an environment-owned reward"
 	@echo
+	@echo "  verify      CPU-only test suite (parsing, rewards, data, every stage config)"
+	@echo "  trace-eval  run eval with tracing, then render the per-problem trace"
+	@echo "  trace-view  render an existing trace file (FILE=..., LIMIT=...)"
+	@echo ""
 	@echo "  eval-base   stage 4: agentic eval, base model"
 	@echo "  eval-sft    stage 4: agentic eval, after SFT"
 	@echo "  eval-grpo   stage 4: agentic eval, after GRPO"
@@ -107,3 +112,27 @@ serve:
 
 clean:
 	rm -rf out/qwen35-*-lora out/qwen35-*-merged out/eval-*.json
+
+# ---- verify + trace ---------------------------------------------------------
+# `verify` is CPU-only and fast: it constructs every stage config, so a TRL
+# upgrade that moves an argument fails here in seconds instead of after the
+# model has loaded onto the card.
+verify:
+	$(PY) -m pytest tests/ -q
+
+verify-v:
+	$(PY) -m pytest tests/ -v
+
+TRACE ?= out/trace.jsonl
+FILE  ?= $(TRACE)
+
+# Run the eval with tracing on, then show what actually happened per problem.
+trace-eval:
+	AGENTLAB_TRACE=$(TRACE) $(PY) -m agentlab.eval --model $(MODEL) --n $(or $(N),8) --tag trace
+	@$(MAKE) --no-print-directory trace-view FILE=$(TRACE)
+
+trace-grpo:
+	AGENTLAB_TRACE=$(TRACE) $(PY) -m agentlab.grpo --model $(MODEL) --mode tools --adapter $(SFT) --out $(GRPO)
+
+trace-view:
+	@$(PY) -m agentlab.trace $(FILE) $(or $(LIMIT),5)

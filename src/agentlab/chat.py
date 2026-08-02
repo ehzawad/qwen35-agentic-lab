@@ -122,11 +122,14 @@ def render(proc, messages: list[dict], tools: list[dict] | None = None,
 def run_agent_loop(model, proc, messages: list[dict], tools_schemas: list[dict],
                    max_turns: int = 4, max_new_tokens: int = 768,
                    enable_thinking: bool = True, verbose: bool = True,
-                   **gen_kw) -> tuple[list[dict], str]:
+                   episode=None, **gen_kw) -> tuple[list[dict], str]:
     """Generate, execute any tool calls, feed results back, repeat.
 
     Returns the full transcript and the final assistant text. Stops as soon as a
     turn produces no tool calls, or after max_turns.
+
+    Pass `episode` (a trace.Episode) to record each turn's thinking, calls and
+    tool results. It is optional and costs nothing when absent.
     """
     import torch
 
@@ -154,6 +157,8 @@ def run_agent_loop(model, proc, messages: list[dict], tools_schemas: list[dict],
         if not calls:
             final = strip_thinking(completion)
             convo.append({"role": "assistant", "content": final})
+            if episode is not None:
+                episode.turn(thinking=extract_thinking(completion), text=final)
             break
 
         convo.append(
@@ -165,11 +170,16 @@ def run_agent_loop(model, proc, messages: list[dict], tools_schemas: list[dict],
                 ],
             }
         )
+        results = []
         for c in calls:
             result = call_tool(c["name"], c["arguments"])
+            results.append(result)
             if verbose:
                 print(f"    -> {c['name']}({c['arguments']}) = {result}")
             convo.append({"role": "tool", "name": c["name"], "content": result})
+
+        if episode is not None:
+            episode.turn(thinking=extract_thinking(completion), calls=calls, results=results)
 
     return convo, final
 
