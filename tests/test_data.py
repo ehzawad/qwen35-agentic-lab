@@ -32,17 +32,24 @@ def grpo():
 class TestSFT:
     """SFTTrainer language-modeling type, plus the `tools` column."""
 
-    def test_columns(self, sft):
-        assert set(sft.column_names) == {"messages", "tools"}
+    def test_prompt_completion_shape_not_messages(self, sft):
+        # Decides whether SFT loss lands on the tool call or on the schema
+        # preamble: TRL enables completion_only_loss ONLY for prompt/completion.
+        assert set(sft.column_names) == {"prompt", "completion", "tools"}
 
     def test_rows_survived_conversion(self, sft):
         assert len(sft) > 0, "every xlam row was dropped by the converter"
 
-    def test_assistant_turn_is_a_tool_call(self, sft):
-        msgs = sft[0]["messages"]
-        assert msgs[0]["role"] == "user"
-        assert msgs[-1]["role"] == "assistant"
-        assert msgs[-1]["tool_calls"], "the SFT target must be a tool call, not prose"
+    def test_completion_is_a_tool_call(self, sft):
+        assert sft[0]["prompt"][0]["role"] == "user"
+        comp = sft[0]["completion"]
+        assert comp[-1]["role"] == "assistant"
+        assert comp[-1]["tool_calls"], "the SFT target must be a tool call, not prose"
+
+    def test_completion_only_loss_would_be_enabled(self, sft):
+        # Mirrors TRL: completion_only_loss = "prompt" in s and "completion" in s
+        s = sft[0]
+        assert "prompt" in s and "completion" in s
 
     def test_tool_schemas_are_openai_shaped(self, sft):
         for tool in sft[0]["tools"]:
@@ -58,7 +65,7 @@ class TestSFT:
         # model to hallucinate tools rather than to use the ones it was given.
         for row in sft.select(range(min(16, len(sft)))):
             offered = {t["function"]["name"] for t in row["tools"]}
-            called = {tc["function"]["name"] for tc in row["messages"][-1]["tool_calls"]}
+            called = {tc["function"]["name"] for tc in row["completion"][-1]["tool_calls"]}
             assert called <= offered, f"{called - offered} called but not offered"
 
     def test_renders_through_the_real_chat_template(self, sft):
@@ -67,8 +74,9 @@ class TestSFT:
         proc = env.load_processor()
         tok = env.get_tokenizer(proc)
         row = sft[0]
-        text = tok.apply_chat_template(row["messages"], tools=row["tools"], tokenize=False)
-        assert row["messages"][-1]["tool_calls"][0]["function"]["name"] in text
+        msgs = list(row["prompt"]) + list(row["completion"])
+        text = tok.apply_chat_template(msgs, tools=row["tools"], tokenize=False)
+        assert row["completion"][-1]["tool_calls"][0]["function"]["name"] in text
 
 
 class TestPreference:
@@ -142,3 +150,48 @@ class TestToolSuite:
             assert fn["description"], f"{fn['name']} has no description for the model to read"
             for name, spec in fn["parameters"]["properties"].items():
                 assert spec.get("description"), f"{fn['name']}.{name} undocumented"
+
+
+class TestXlamSchemaConversion:
+    """Optionality and types must survive the xlam -> JSON Schema conversion."""
+
+    def test_optional_suffix_in_type_is_honoured(self):
+        from agentlab.data import _xlam_tool_to_schema
+
+        s = _xlam_tool_to_schema({
+            "name": "f", "description": "d",
+            "parameters": {
+                "must": {"type": "str", "description": "x"},
+                "maybe": {"type": "str, optional", "description": "y"},
+            },
+        })
+        req = s["function"]["parameters"]["required"]
+        assert "must" in req and "maybe" not in req
+
+    def test_supplied_default_marks_optional_even_when_falsy(self):
+        from agentlab.data import _xlam_tool_to_schema
+
+        s = _xlam_tool_to_schema({
+            "name": "f", "description": "d",
+            "parameters": {
+                "a": {"type": "int", "description": "x", "default": 0},
+                "b": {"type": "str", "description": "y", "default": ""},
+                "c": {"type": "str", "description": "z"},
+            },
+        })
+        req = s["function"]["parameters"]["required"]
+        assert req == ["c"], f"empty/zero defaults are still defaults, got {req}"
+
+    def test_container_types_map_to_array(self):
+        from agentlab.data import _json_type
+
+        for t in ("list", "List[int]", "tuple", "Tuple[str, int]", "set"):
+            assert _json_type(t) == "array", t
+
+    def test_scalar_types(self):
+        from agentlab.data import _json_type
+
+        assert _json_type("int") == "integer"
+        assert _json_type("float") == "number"
+        assert _json_type("bool") == "boolean"
+        assert _json_type("str") == "string"

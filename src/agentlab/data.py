@@ -25,8 +25,8 @@ _TYPE_MAP = {
     "int": "integer", "integer": "integer",
     "float": "number", "number": "number",
     "bool": "boolean", "boolean": "boolean",
-    "list": "array", "array": "array",
-    "dict": "object", "object": "object",
+    "list": "array", "array": "array", "tuple": "array", "set": "array",
+    "dict": "object", "object": "object", "any": "string",
 }
 
 
@@ -35,6 +35,22 @@ def _json_type(raw: str) -> str:
     base = str(raw).split(",")[0].strip().lower()
     base = re.sub(r"\[.*", "", base).strip()  # "List[int]" -> "list"
     return _TYPE_MAP.get(base, "string")
+
+
+def _is_optional(pspec: dict) -> bool:
+    """Whether an xlam parameter is optional.
+
+    xlam marks this two ways and the `, optional` suffix inside the type string
+    is the primary one. Keying only on `default` mislabels a large share of
+    optional parameters as required, which teaches the model that it must invent
+    a value for every argument rather than omitting the ones it does not need.
+    """
+    if "optional" in str(pspec.get("type", "")).lower():
+        return True
+    default = pspec.get("default", None)
+    # A supplied default marks optionality -- including an empty string or 0,
+    # which are legitimate defaults rather than "no default given".
+    return "default" in pspec and default is not None
 
 
 def _xlam_tool_to_schema(tool: dict) -> dict:
@@ -47,8 +63,7 @@ def _xlam_tool_to_schema(tool: dict) -> dict:
             "type": _json_type(pspec.get("type", "string")),
             "description": pspec.get("description", "") or "",
         }
-        # xlam marks optionality by supplying a default; no default => required.
-        if pspec.get("default", "") in ("", None):
+        if not _is_optional(pspec):
             required.append(pname)
     return {
         "type": "function",
@@ -65,6 +80,18 @@ def build_sft(n: int = 4000, seed: int = 0) -> Dataset:
 
     This is the stage that teaches schema adherence -- emitting a syntactically
     valid call against the *provided* tool list rather than inventing a function.
+
+    Emitted as **prompt/completion**, not as a single `messages` column, and that
+    distinction decides what stage 1 actually learns. TRL sets
+
+        completion_only_loss = "prompt" in sample and "completion" in sample
+
+    so the `messages` form silently trains on the whole sequence -- and here the
+    sequence is dominated by the rendered tool-schema preamble and the user turn,
+    leaving only a small fraction of the loss on the tool call itself. The
+    obvious alternative, `assistant_only_loss=True`, is not available: TRL raises
+    "Assistant-only loss is not yet supported for vision-language models" and
+    Qwen3.5 is detected as one.
     """
     raw = load_dataset("Salesforce/xlam-function-calling-60k", split="train")
     raw = raw.shuffle(seed=seed).select(range(min(n, len(raw))))
@@ -90,10 +117,8 @@ def build_sft(n: int = 4000, seed: int = 0) -> Dataset:
             continue
         rows.append(
             {
-                "messages": [
-                    {"role": "user", "content": ex["query"]},
-                    {"role": "assistant", "tool_calls": tool_calls},
-                ],
+                "prompt": [{"role": "user", "content": ex["query"]}],
+                "completion": [{"role": "assistant", "tool_calls": tool_calls}],
                 "tools": [_xlam_tool_to_schema(t) for t in tools if isinstance(t, dict)],
             }
         )
