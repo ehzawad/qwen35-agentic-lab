@@ -59,11 +59,27 @@ def main() -> None:
         report_to=[],
     )
 
+    # Build the scoring model explicitly rather than passing a model id. A
+    # sequence-classification head carries no pad_token_id of its own, and
+    # without one the trainer cannot tell where a sequence ends:
+    #   ValueError: Cannot handle batch sizes > 1 if no padding token is defined.
+    import torch
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(args.model)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        args.model, num_labels=1, dtype=torch.bfloat16
+    )
+    if model.config.pad_token_id is None:
+        model.config.pad_token_id = tok.pad_token_id or tok.eos_token_id
+        print(f"[reward] set pad_token_id = {model.config.pad_token_id}")
+
     trainer = RewardTrainer(
-        model=args.model,
+        model=model,
         args=cfg,
         train_dataset=split["train"],
         eval_dataset=split["test"],
+        processing_class=tok,
         peft_config=lora_config(r=args.rank, task_type="SEQ_CLS"),
     )
     describe(trainer.model)
