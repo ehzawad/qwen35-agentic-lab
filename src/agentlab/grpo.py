@@ -37,9 +37,15 @@ _BOXED_RE = re.compile(r"\\boxed\{([^{}]*)\}")
 def _as_text(completion) -> str:
     """Flatten a completion to text.
 
-    With tools in play a completion is a list of messages (assistant turns, tool
-    calls, tool results), not a string -- so every reward function normalises here
-    first rather than assuming one shape.
+    TRL hands a reward function either a plain string or a list of messages,
+    decided by `is_conversational(prompt)` and NOT by whether tools were passed
+    (grpo_trainer.py:2176-2189), so every reward function normalises here first.
+
+    Deliberately does not read `reasoning_content`. When a rollout never closes
+    its `</think>`, TRL's `parse_response` puts the whole completion under that
+    key; folding it in would let a `\boxed{}` written inside the chain of thought
+    collect `correctness_reward` without the model ever committing to an answer.
+    Excluding it is the reward-hacking guard, not an oversight.
     """
     if isinstance(completion, str):
         return completion
@@ -56,17 +62,40 @@ def _as_text(completion) -> str:
 
 
 def _tool_names(completion) -> list[str]:
-    """Names of the tools actually invoked in this rollout."""
+    """Names of the tools actually invoked in this rollout.
+
+    Both shapes TRL 1.9.2 can hand a reward function are handled, and the text
+    forms delegate to `chat.parse_tool_calls` rather than re-implementing the
+    wire format. The previous regex here matched only `_as_text`'s own synthetic
+    render -- neither real Qwen XML nor the JSON form -- so a genuine tool call
+    arriving as text counted as no call at all and scored 0.0.
+
+    Which shape you get is decided purely by `is_conversational(prompt)`
+    (grpo_trainer.py:2176-2189), NOT by whether `tools=` was passed:
+      * non-conversational prompt      -> list[str], the raw decoded completion
+      * conversational, tools set      -> list[dict] with structured `tool_calls`
+      * conversational, no tools       -> list[dict] whose `content` is raw text,
+                                          which may still contain tool-call XML
+    """
+    from .chat import parse_tool_calls
+
     if isinstance(completion, str):
-        return re.findall(r"<tool_call>\s*(\w+)", completion)
+        return [c["name"] for c in parse_tool_calls(completion)]
+
     names = []
     for msg in completion:
         if not isinstance(msg, dict):
             continue
-        for tc in msg.get("tool_calls") or []:
+        structured = msg.get("tool_calls") or []
+        for tc in structured:
             fn = tc.get("function", tc)
             if fn.get("name"):
                 names.append(fn["name"])
+        # No structured calls: the model may still have emitted XML into content
+        # (the conversational-without-tools branch). Deliberately does NOT read
+        # `reasoning_content` -- see _as_text.
+        if not structured and msg.get("content"):
+            names.extend(c["name"] for c in parse_tool_calls(str(msg["content"])))
     return names
 
 
@@ -86,11 +115,20 @@ def _numeric(s: str):
 # (trl/trainer/grpo_trainer.py: `result = {"error": str(e)}`)
 _TOOL_ERROR_RE = re.compile(r"^\s*error:|['\"]error['\"]\s*:", re.IGNORECASE)
 
+# Same pattern, MULTILINE, for a whole transcript arriving as one string -- there
+# the failure sits on some interior line, so an ^ anchored to the start of the
+# string never matches. Kept separate on purpose: adding MULTILINE to the shared
+# regex would widen the per-message path, where "42\nerror: none" would newly
+# count as a failure.
+_TOOL_ERROR_TEXT_RE = re.compile(
+    r"^\s*error:|['\"]error['\"]\s*:", re.IGNORECASE | re.MULTILINE
+)
+
 
 def _tool_errored(completion) -> bool:
     """True when any tool result in this rollout represents a failure."""
     if isinstance(completion, str):
-        return bool(_TOOL_ERROR_RE.search(completion))
+        return bool(_TOOL_ERROR_TEXT_RE.search(completion))
     for msg in completion:
         if isinstance(msg, dict) and msg.get("role") == "tool":
             if _TOOL_ERROR_RE.search(str(msg.get("content", ""))):

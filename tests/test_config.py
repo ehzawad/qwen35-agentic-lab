@@ -218,7 +218,9 @@ class TestRewardFunctions:
         assert scored["clean"] > scored["errored"] > scored["wrong"] > scored["silent"]
 
     def test_rewards_accept_plain_string_completions(self):
-        # Without tools TRL hands back strings, not message lists.
+        # The shape is decided by is_conversational(prompt), NOT by whether tools
+        # were passed (grpo_trainer.py:2176-2189): a non-conversational prompt
+        # yields list[str] even with a model emitting tool-call XML.
         from agentlab.grpo import correctness_reward
 
         assert correctness_reward([r"\boxed{7}"], ["7"]) == [1.0]
@@ -292,3 +294,85 @@ class TestToolErrorDetection:
         crashed = tool_use_reward([self._with_result("{'error': 'boom'}")])[0]
         no_call = tool_use_reward([[{"role": "assistant", "content": r"\boxed{1}"}]])[0]
         assert crashed < no_call, f"crashing paid {crashed} vs {no_call} for not calling"
+
+
+class TestRewardInputShapes:
+    """Both shapes TRL 1.9.2 can produce must be handled identically.
+
+    Which one arrives is decided by is_conversational(prompt), not by tools=
+    (grpo_trainer.py:2176-2189). A non-conversational prompt yields list[str]
+    carrying raw Qwen XML, and a conversational prompt without tools= yields
+    messages whose `content` is that same raw XML.
+    """
+
+    XML = ("<tool_call>\n<function=calculator>\n<parameter=expression>\n"
+           "2+2\n</parameter>\n</function>\n</tool_call>")
+    XML_TRUNCATED = ("<tool_call>\n<function=calculator>\n<parameter=expression>\n2+2")
+    JSON = '<tool_call>{"name": "calculator", "arguments": {}}</tool_call>'
+
+    def test_raw_xml_string_is_counted(self):
+        from agentlab.grpo import _tool_names
+
+        assert _tool_names(self.XML) == ["calculator"]
+
+    def test_truncated_xml_string_is_counted(self):
+        from agentlab.grpo import _tool_names
+
+        assert _tool_names(self.XML_TRUNCATED) == ["calculator"]
+
+    def test_json_form_string_is_counted(self):
+        from agentlab.grpo import _tool_names
+
+        assert _tool_names(self.JSON) == ["calculator"]
+
+    def test_xml_inside_message_content_is_counted(self):
+        # conversational + no tools=: raw XML lands in content, no tool_calls key
+        from agentlab.grpo import _tool_names
+
+        assert _tool_names([{"role": "assistant", "content": self.XML}]) == ["calculator"]
+
+    def test_structured_tool_calls_still_win(self):
+        from agentlab.grpo import _tool_names
+
+        msgs = [{"role": "assistant", "tool_calls": [
+            {"type": "function", "function": {"name": "unit_convert", "arguments": {}}}]}]
+        assert _tool_names(msgs) == ["unit_convert"]
+
+    def test_string_path_agrees_with_the_parser(self):
+        # Anti-drift: _tool_names must stay a thin wrapper over parse_tool_calls.
+        from agentlab.chat import parse_tool_calls
+        from agentlab.grpo import _tool_names
+
+        for text in (self.XML, self.XML_TRUNCATED, self.JSON, "no call here", ""):
+            assert _tool_names(text) == [c["name"] for c in parse_tool_calls(text)]
+
+    def test_tool_use_reward_pays_for_a_string_xml_call(self):
+        from agentlab.grpo import tool_use_reward
+
+        assert tool_use_reward([self.XML])[0] > 0.0
+
+    def test_error_on_an_interior_line_of_a_transcript_is_detected(self):
+        # The whole transcript arrives as one string, so the failure is never on
+        # line 1 and a start-anchored regex misses it.
+        from agentlab.grpo import _tool_errored
+
+        assert _tool_errored("<tool_call>x</tool_call>\nerror: boom") is True
+        assert _tool_errored("result 42\n{'error': 'bad'}") is True
+
+    def test_prose_mentioning_error_is_not_flagged_in_either_shape(self):
+        from agentlab.grpo import _tool_errored
+
+        assert _tool_errored("no error occurred, result is 4") is False
+        assert _tool_errored(
+            [{"role": "tool", "name": "calculator", "content": "42\nerror: none"}]
+        ) is False
+
+    def test_reasoning_content_is_excluded_on_purpose(self):
+        # Reward-hacking guard: an unterminated <think> puts everything under
+        # reasoning_content. Folding it into _as_text would let a \boxed{} in the
+        # chain of thought earn correctness_reward. Do not "fix" this.
+        from agentlab.grpo import _as_text, correctness_reward
+
+        msgs = [{"role": "assistant", "content": "", "reasoning_content": r"maybe \boxed{7}"}]
+        assert "boxed" not in _as_text(msgs)
+        assert correctness_reward([msgs], ["7"]) == [0.0]
