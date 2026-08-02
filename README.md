@@ -183,7 +183,19 @@ Measured on this box, 4B policy, LoRA r=32 (78.0M trainable, 1.69% of 4.6B),
 | SFT, 32 steps | train_loss 0.492, eval_loss 0.344, token accuracy 91.4% |
 | SFT, default `--n 4000` | ~250 steps, so budget ~35 min |
 | GRPO (tools, 4 generations, vLLM colocate) | ~24 s/step, card saturated at ~47 GB |
+| eval, agent loop | ~90 s per problem — see the caveat below |
 | base model generation | ~14-16 tok/s in thinking mode |
+
+Base-model reference from `make eval-base` (8 held-out problems, thinking on):
+`accuracy 0.75, tool_use_rate 1.00, tool_error_rate 0.125, mean_turns 2.75`.
+
+> **Eval is the slow part and it is not vLLM-backed.** `eval.py` drives the agent
+> loop through `transformers.generate`, which at ~15 tok/s in thinking mode costs
+> roughly 90 s per problem — so the default `--n 100` is a ~2.5 hour job, not a
+> coffee break. For anything larger than a sanity check, serve the checkpoint
+> (`make serve`) and evaluate against the OpenAI endpoint instead; vLLM batches
+> the rollouts and turns hours into minutes. The in-process path is kept because
+> it needs no server and shares exactly the parsing code the training stages use.
 
 Thinking mode is on by default and spends a large share of a small token budget
 before the tool call appears — which is why the agent loop and eval default to
