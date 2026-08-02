@@ -1,10 +1,12 @@
 SHELL := /bin/bash
 
 # CUDA_VISIBLE_DEVICES indexes in CUDA order, which defaults to FASTEST_FIRST and
-# does NOT match nvidia-smi. On this box that inverts the cards, so PCI_BUS_ID is
-# what makes "1" mean the A6000. env.require_single_gpu() asserts it stuck.
-export CUDA_DEVICE_ORDER := PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES ?= 1
+# need NOT match the order nvidia-smi prints. PCI_BUS_ID makes them agree, so an
+# index read off nvidia-smi selects the card you actually meant.
+export CUDA_DEVICE_ORDER ?= PCI_BUS_ID
+# Deliberately not forced: a single-GPU machine should just work. On a multi-GPU
+# box pick explicitly, e.g. `CUDA_VISIBLE_DEVICES=1 make smoke`, and optionally
+# set EXPECT_GPU=A6000 to make a wrong pin fail loudly instead of silently.
 export PYTHONPATH := src
 export TOKENIZERS_PARALLELISM := false
 

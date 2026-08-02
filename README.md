@@ -26,20 +26,22 @@ frontier feature set, which is what makes the path worth walking:
 | License | Apache-2.0 |
 | Architecture | hybrid: 24 Gated DeltaNet layers + 8 full-attention layers |
 
-It will not match a frontier model on correctness. It is not supposed to — it
-shows you the whole path at a size where each stage is a coffee break.
+It will not match a frontier model on correctness. It is not supposed to — the
+point is to walk the whole path at a size where each stage finishes in minutes
+to hours rather than weeks.
 
 The pipeline is size-agnostic. Swap in a sibling for faster iteration:
 
 ```bash
 make smoke MODEL=Qwen/Qwen3.5-0.8B     # 0.87B
 make sft   MODEL=Qwen/Qwen3.5-2B       # 2.3B
-make grpo  MODEL=Qwen/Qwen3.5-9B       # 9.7B, still fits the A6000 with LoRA
+make grpo  MODEL=Qwen/Qwen3.5-9B       # 9.7B (untested here; expect to lower --vllm-mem)
 ```
 
 ## The stack
 
-Version-locked because the constraints genuinely bind:
+Pinned where the constraints genuinely bind. This is an observed working
+environment, not a lockfile — only vLLM and TRL are pinned exactly:
 
 | Package | Version | Why this one |
 |---|---|---|
@@ -70,14 +72,15 @@ stage 3'  grpo-env     GRPO, environment-owned reward      BudgetEnv
 stage 4   eval/merge/serve
 ```
 
-All three datasets are already in the local HF cache, so every stage runs offline.
+All three datasets come from the Hub and are cached after the first run;
+subsequent runs are offline. The base model is a ~9 GB download.
 
-Every stage above has been run end to end on this box at smoke scale. Those runs
-prove the **plumbing** — that the data shape, the tool parsing, the trainer
-arguments and the checkpoint round-trip all work. They prove nothing about model
-quality: 15 GRPO steps on 16 prompts, or 15 reward-model steps on 62 pairs, is
-far too little to move a policy. Treat the numbers in this README as smoke
-evidence, not results.
+Every stage except `grpo-env` has been run end to end at smoke scale. Those runs
+prove the **plumbing** — data shape, tool parsing, trainer arguments, checkpoint
+round-trip. They prove nothing about model quality: a handful of GRPO steps on a
+handful of prompts is not evidence that a policy improved, and the reward-model
+smoke finished at chance accuracy. Run `make verify` for the invariants, and
+measure quality yourself before believing any of it.
 
 ```bash
 make sft        # teach schema adherence — GRPO assumes this already works
@@ -88,10 +91,11 @@ make eval-base  # then eval-sft / eval-grpo to see whether it moved
 
 ### Why SFT before GRPO
 
-GRPO can only reinforce behaviour the policy already emits sometimes. If the
-model never produces a parseable tool call, every rollout in the group scores the
-same zero, the advantage is zero, and the gradient is noise. Stage 1 buys the
-non-zero baseline that stage 3 amplifies.
+GRPO's advantage is the *spread* of reward within a sampled group. If every
+rollout in a group scores the same, the advantage is zero and the step teaches
+nothing — so the policy has to already produce the target behaviour *sometimes*
+for RL to have anything to reinforce. Stage 1 buys that variance, and
+`make grpo` continues the SFT adapter rather than restarting from base.
 
 ### What GRPO actually does here
 
@@ -136,12 +140,13 @@ rollouts never finished.
 All three were found by running this, not by reading docs.
 
 **1. `CUDA_VISIBLE_DEVICES` does not index in `nvidia-smi` order.**
-CUDA defaults to `FASTEST_FIRST`; `nvidia-smi` lists by PCI bus ID. On this box
-that *inverts* the two cards, so `CUDA_VISIBLE_DEVICES=1` lands on the 24 GB
-A5000 while you think you are on the 48 GB A6000 — and a 48 GB-shaped run OOMs
-with no hint why. The Makefile exports `CUDA_DEVICE_ORDER=PCI_BUS_ID`, and
-`env.require_single_gpu()` asserts the card is actually an A6000 and dies with
-the fix if not.
+CUDA defaults to `CUDA_DEVICE_ORDER=FASTEST_FIRST`; `nvidia-smi` lists by PCI bus
+ID. On a heterogeneous multi-GPU machine those orderings can disagree, so the
+index you read off `nvidia-smi` selects a *different* card — and a run sized for
+the bigger one then OOMs on the smaller one with no hint why. This cost real
+debugging time here. The Makefile exports `CUDA_DEVICE_ORDER=PCI_BUS_ID`; set
+`EXPECT_GPU=<substring>` and `env.require_single_gpu()` will refuse to start on
+the wrong card instead of failing later and obscurely.
 
 **2. Qwen3.5 does not emit JSON tool calls.** It uses an XML form — the one vLLM
 parses with `--tool-call-parser qwen3_coder`:
@@ -179,35 +184,33 @@ is what `scripts/setup.sh` deliberately leaves you with. Minimal repro if you
 want to retest on a newer torch: LoRA-wrap the model, one forward with
 `labels=`, watch it die before it prints the loss.
 
-## What to expect on one A6000
+## What to expect
 
-Measured on this box, 4B policy, LoRA r=32 (78.0M trainable, 1.69% of 4.6B),
-`max_length=2048`, gradient checkpointing on, torch fallback (no fast path):
+Rough shape on a single 48 GB card, `Qwen3.5-4B`, LoRA r=32, `max_length=2048`,
+gradient checkpointing, torch fallback (no fast-path kernels):
 
 | | |
 |---|---|
-| SFT | ~8.4 s/step at 8 samples/step, ~23 GB resident |
-| SFT, 32 steps | train_loss 0.492, eval_loss 0.344, token accuracy 91.4% |
-| SFT, default `--n 4000` | ~250 steps, so budget ~35 min |
-| GRPO (tools, 4 generations, vLLM colocate) | ~24 s/step, card saturated at ~47 GB |
-| eval, agent loop | ~90 s per problem — see the caveat below |
-| base model generation | ~14-16 tok/s in thinking mode |
+| SFT | seconds per step, tens of GB resident |
+| GRPO with tools, vLLM colocate | tens of seconds per step; the card saturates |
+| generation, thinking mode | low tens of tokens/s |
+| eval through the agent loop | ~a minute-plus per problem |
 
-Base-model reference from `make eval-base` (8 held-out problems, thinking on):
-`accuracy 0.75, tool_use_rate 1.00, tool_error_rate 0.125, mean_turns 2.75`.
-
-> **Eval is the slow part and it is not vLLM-backed.** `eval.py` drives the agent
-> loop through `transformers.generate`, which at ~15 tok/s in thinking mode costs
-> roughly 90 s per problem — so the default `--n 100` is a ~2.5 hour job, not a
-> coffee break. For anything larger than a sanity check, serve the checkpoint
-> (`make serve`) and evaluate against the OpenAI endpoint instead; vLLM batches
-> the rollouts and turns hours into minutes. The in-process path is kept because
-> it needs no server and shares exactly the parsing code the training stages use.
+Deliberately no precise figures here. The numbers this repo *did* measure were
+taken before the fixes in `git log` — vision-tower LoRA, SFT loss landing on the
+prompt, DPO slicing at the wrong offset — so quoting them now would be quoting
+a different program. Run `make verify`, then measure your own.
 
 Thinking mode is on by default and spends a large share of a small token budget
-before the tool call appears — which is why the agent loop and eval default to
-`max_new_tokens=1024` rather than 512. At 512 the model reliably gets truncated
-*mid-tool-call*, which looks exactly like "the model refused to use the tool".
+before the tool call appears, which is why the agent loop and eval default to
+`max_new_tokens=1024`. At 512 the model gets truncated *mid-tool-call*, which
+looks exactly like "the model refused to use the tool".
+
+> **Eval is slow and not vLLM-backed.** `eval.py` drives the agent loop through
+> `transformers.generate`, so the default `--n 100` is a long job rather than a
+> coffee break. For anything beyond a sanity check, serve the checkpoint and
+> evaluate against the endpoint. The in-process path is kept because it needs no
+> server and shares exactly the parsing code the training stages use.
 
 ## Serving
 
@@ -233,24 +236,28 @@ So an OpenAI-compatible client gets structured tool calls with no Qwen-specific
 parsing on your side — the XML handling in `chat.py` is only needed for the
 in-process training and eval paths, which never go through the server.
 
-> Startup is slower than it looks like it should be: the engine sits at a few
-> hundred MB of VRAM for several minutes while FlashInfer JITs its kernels,
-> before it allocates the KV cache. That is not a hang.
+> Startup is slower than it looks: the engine can sit at a few hundred MB of
+> VRAM for minutes — compiling and capturing CUDA graphs — before it allocates
+> the KV cache. That is not a hang.
 
 ## Hardware
 
-Pinned to the **A6000** (48 GB, PCI `AF:00.0`). The box is shared — the A5000 is
-left alone. Everything runs LoRA, so the 4B policy at bf16 plus vLLM colocate
-rollouts sits comfortably inside the card.
+Developed on a single **48 GB** card. Everything is LoRA, so the 4B policy at
+bf16 plus vLLM colocate rollouts fits comfortably; smaller cards will need a
+lower `--vllm-mem` and `--max-completion-length`, and the 0.8B/2B siblings.
+
+Nothing forces a device. On a multi-GPU machine pick one explicitly, and set
+`EXPECT_GPU` if you want a wrong pin to fail loudly instead of silently:
 
 ```bash
-make gpu       # what is on the cards right now
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 EXPECT_GPU=A6000 make smoke
+make gpu     # what is on the cards right now
 ```
 
 For GRPO, vLLM runs *inside* the trainer process (`vllm_mode="colocate"`) and
-takes `--vllm-mem` of the card (0.25 by default). Drop it if you hit contention,
-or pass `--no-vllm` to generate with transformers instead — slower, but it removes
-vLLM from the picture when you are debugging a reward function.
+takes `--vllm-mem` of the card. Drop it on contention, or pass `--no-vllm` to
+generate with transformers instead — slower, but it removes vLLM from the
+picture while you are debugging a reward function.
 
 ## Layout
 

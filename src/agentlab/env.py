@@ -31,19 +31,21 @@ GRPO_DIR = OUT / f"{SLUG}-grpo-lora"
 MERGED_DIR = OUT / f"{SLUG}-merged"
 
 
-# The box is shared and heterogeneous: A5000 (24 GB, bus 3B:00.0) and A6000
-# (48 GB, bus AF:00.0). We want the A6000.
-EXPECT_GPU = os.environ.get("EXPECT_GPU", "A6000")
+# Optional. Set EXPECT_GPU to a substring of the card you intend to use (e.g.
+# "A6000") if you share a heterogeneous machine and want a wrong pin to fail
+# loudly. Unset by default so a normal single-GPU box just works.
+EXPECT_GPU = os.environ.get("EXPECT_GPU") or None
 
 
 def require_single_gpu(expect: str | None = EXPECT_GPU) -> str:
     """Assert exactly one GPU is visible, that it is the intended one, and name it.
 
     Worth being strict here. CUDA_VISIBLE_DEVICES indexes in *CUDA* order, which
-    defaults to FASTEST_FIRST -- not the PCI order nvidia-smi prints. On this box
-    that inverts the two cards, so CUDA_VISIBLE_DEVICES=1 lands on the A5000 and
-    a 48 GB-shaped run OOMs at 24 GB with no hint as to why. Setting
-    CUDA_DEVICE_ORDER=PCI_BUS_ID makes the two orderings agree.
+    defaults to FASTEST_FIRST -- NOT the PCI order that nvidia-smi prints. On a
+    heterogeneous multi-GPU machine those two orderings can disagree, so the
+    index you read off nvidia-smi can select a different card than you meant,
+    and a run sized for the bigger card then OOMs on the smaller one with no
+    hint as to why. Export CUDA_DEVICE_ORDER=PCI_BUS_ID to make them agree.
     """
     import torch
 
@@ -52,8 +54,8 @@ def require_single_gpu(expect: str | None = EXPECT_GPU) -> str:
     n = torch.cuda.device_count()
     if n != 1:
         sys.exit(
-            f"expected exactly 1 visible GPU, found {n}. "
-            f"Set CUDA_VISIBLE_DEVICES=1 (with CUDA_DEVICE_ORDER=PCI_BUS_ID) to pin the A6000."
+            f"expected exactly 1 visible GPU, found {n}.\n"
+            f"  Expose one, e.g.: CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<index> make smoke"
         )
 
     warn_fast_path()
@@ -71,8 +73,8 @@ def require_single_gpu(expect: str | None = EXPECT_GPU) -> str:
         sys.exit(
             f"pinned the wrong GPU: wanted {expect}, got {name}.\n"
             f"  CUDA_VISIBLE_DEVICES indexes in CUDA order, not nvidia-smi order.\n"
-            f"  Fix: export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1\n"
-            f"  Or set EXPECT_GPU= to disable this check."
+            f"  Fix: export CUDA_DEVICE_ORDER=PCI_BUS_ID and pick the right index.\n"
+            f"  Or unset EXPECT_GPU to disable this check."
         )
     return name
 
