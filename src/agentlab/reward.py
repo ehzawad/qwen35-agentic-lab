@@ -70,9 +70,16 @@ def main() -> None:
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model, num_labels=1, dtype=torch.bfloat16
     )
-    if model.config.pad_token_id is None:
-        model.config.pad_token_id = tok.pad_token_id or tok.eos_token_id
-        print(f"[reward] set pad_token_id = {model.config.pad_token_id}")
+    # Qwen3.5 ships a *composite* multimodal config, which has no pad_token_id
+    # attribute at all (not even None) -- reading it raises AttributeError, and
+    # the real id lives on the nested text config. Set it in both places.
+    pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+    if getattr(model.config, "pad_token_id", None) is None:
+        model.config.pad_token_id = pad_id
+    text_cfg = getattr(model.config, "text_config", None)
+    if text_cfg is not None and getattr(text_cfg, "pad_token_id", None) is None:
+        text_cfg.pad_token_id = pad_id
+    print(f"[reward] pad_token_id = {pad_id}")
 
     trainer = RewardTrainer(
         model=model,

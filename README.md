@@ -202,6 +202,34 @@ before the tool call appears — which is why the agent loop and eval default to
 `max_new_tokens=1024` rather than 512. At 512 the model reliably gets truncated
 *mid-tool-call*, which looks exactly like "the model refused to use the tool".
 
+## Serving
+
+```bash
+make serve                              # base model
+bash scripts/serve.sh out/qwen35-4b-merged   # a merged checkpoint
+PORT=8077 MAXLEN=8192 bash scripts/serve.sh  # pick your own port
+```
+
+`--tool-call-parser qwen3_coder` turns Qwen's XML back into OpenAI-shaped
+`tool_calls`, and `--reasoning-parser qwen3` splits the chain of thought into its
+own `reasoning` field instead of leaving it in `content`. A verified response:
+
+```json
+"content": null,
+"tool_calls": [{"type": "function", "function": {
+    "name": "calculator", "arguments": "{\"expression\": \"4871 * 209 - 1337\"}"}}],
+"reasoning": "The user wants me to calculate 4871 * 209 minus 1337...",
+"finish_reason": "tool_calls"
+```
+
+So an OpenAI-compatible client gets structured tool calls with no Qwen-specific
+parsing on your side — the XML handling in `chat.py` is only needed for the
+in-process training and eval paths, which never go through the server.
+
+> Startup is slower than it looks like it should be: the engine sits at a few
+> hundred MB of VRAM for several minutes while FlashInfer JITs its kernels,
+> before it allocates the KV cache. That is not a hang.
+
 ## Hardware
 
 Pinned to the **A6000** (48 GB, PCI `AF:00.0`). The box is shared — the A5000 is
