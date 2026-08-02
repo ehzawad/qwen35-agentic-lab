@@ -207,6 +207,8 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-6)
     ap.add_argument("--beta", type=float, default=0.0, help="KL coefficient; 0 disables the ref model")
     ap.add_argument("--max-completion-length", type=int, default=1024)
+    ap.add_argument("--max-tool-iters", type=int, default=4,
+                    help="tool round-trips allowed per rollout")
     ap.add_argument("--rank", type=int, default=32)
     ap.add_argument("--loss-type", default="dapo", choices=["grpo", "dr_grpo", "dapo", "sapo"])
     ap.add_argument("--no-vllm", action="store_true", help="generate with transformers instead of vLLM")
@@ -247,6 +249,11 @@ def main() -> None:
         use_vllm=not args.no_vllm,
         vllm_mode="colocate",
         vllm_gpu_memory_utilization=args.vllm_mem,
+        # reward_weights lives on the config, not on GRPOTrainer -- `tools` and
+        # `environment_factory` are the trainer kwargs, these are not.
+        reward_weights=[1.0, 0.3, 0.2] if args.mode == "tools" else None,
+        # How many tool round-trips one rollout may take before it is cut off.
+        max_tool_calling_iterations=args.max_tool_iters,
     )
 
     common = dict(
@@ -262,7 +269,6 @@ def main() -> None:
         trainer = GRPOTrainer(
             train_dataset=ds,
             reward_funcs=[correctness_reward, tool_use_reward, format_reward],
-            reward_weights=[1.0, 0.3, 0.2],
             tools=[calculator, unit_convert, kb_lookup],
             **common,
         )
