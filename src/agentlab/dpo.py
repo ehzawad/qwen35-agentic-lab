@@ -14,7 +14,7 @@ import argparse
 
 from . import env
 from .data import build_preference
-from .peft_cfg import describe, lora_config
+from .peft_cfg import describe, policy_and_peft
 
 
 def main() -> None:
@@ -65,12 +65,14 @@ def main() -> None:
 
     # With a PEFT policy, TRL uses the adapter-disabled base as the implicit
     # reference model -- so no second full copy of the weights on the card.
+    # --adapter chains stage 1 into stage 2b; without it DPO starts from raw base.
+    policy, peft = policy_and_peft(args.model, args.adapter, rank=args.rank)
     trainer = DPOTrainer(
-        model=args.model,
+        model=policy,
         args=cfg,
         train_dataset=split["train"],
         eval_dataset=split["test"],
-        peft_config=lora_config(r=args.rank),
+        peft_config=peft,
     )
     describe(trainer.model)
 

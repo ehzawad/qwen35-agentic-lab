@@ -35,6 +35,50 @@ def lora_config(r: int = 32, alpha: int | None = None, dropout: float = 0.05,
     )
 
 
+def policy_and_peft(model_id: str, adapter: str | None, rank: int = 32):
+    """Return the (model, peft_config) pair a TRL trainer should be given.
+
+    This is what makes the stages an actual pipeline rather than four
+    independent runs from base.
+
+      adapter is None -> (model_id, LoraConfig)   TRL attaches a fresh adapter
+      adapter given   -> (PeftModel, None)        continue training that adapter
+
+    The second form must pass `peft_config=None`. TRL 1.9.2 raises outright if a
+    PeftModel arrives alongside a peft_config:
+
+        "You passed a `PeftModel` instance together with a `peft_config` to the
+         trainer. Please first merge and unload the existing adapter, save the
+         resulting base model, and then pass that base model along with the new
+         `peft_config` to the trainer."
+
+    So continuing the same adapter (here) and merge-then-new-adapter (via
+    `merge.py`) are the only two legal chainings. Continuing is the default
+    because it keeps one lineage of weights and costs no 8.5 GB merge per stage;
+    merge first if you need to change the rank between stages.
+
+    `is_trainable=True` is load-bearing -- PeftModel.from_pretrained defaults it
+    to False, which loads the adapter frozen and would train nothing at all.
+    """
+    if adapter is None:
+        return model_id, lora_config(r=rank)
+
+    from peft import PeftModel
+
+    from . import env
+
+    base = env.load_model(model_id)
+    model = PeftModel.from_pretrained(base, adapter, is_trainable=True)
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    if trainable == 0:
+        raise RuntimeError(
+            f"adapter {adapter} loaded with zero trainable parameters -- "
+            f"is_trainable did not take effect, the run would be a no-op"
+        )
+    print(f"[chain] continuing adapter {adapter} ({trainable/1e6:.1f}M trainable)")
+    return model, None
+
+
 def describe(model) -> None:
     """Print the trainable-parameter split, so a silently-frozen run is obvious."""
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)

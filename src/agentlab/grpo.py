@@ -24,7 +24,7 @@ import re
 
 from . import env
 from .data import build_grpo
-from .peft_cfg import describe, lora_config
+from .peft_cfg import describe, policy_and_peft
 from .tools import TOOLS, calculator, kb_lookup, unit_convert
 
 _BOXED_RE = re.compile(r"\\boxed\{([^{}]*)\}")
@@ -264,10 +264,13 @@ def main() -> None:
         max_tool_calling_iterations=args.max_tool_iters,
     )
 
+    # --adapter is what chains stage 1 into stage 3. Without it the policy starts
+    # from raw base and the "SFT -> GRPO" path is decorative.
+    policy, peft = policy_and_peft(args.model, args.adapter, rank=args.rank)
     common = dict(
-        model=args.model,
+        model=policy,
         args=cfg,
-        peft_config=lora_config(r=args.rank),
+        peft_config=peft,
     )
 
     if args.mode == "tools":

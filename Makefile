@@ -68,15 +68,26 @@ sft:
 reward:
 	$(PY) -m agentlab.reward
 
-dpo:
-	$(PY) -m agentlab.dpo --model $(MODEL) --out $(DPO)
+dpo: $(SFT)
+	$(PY) -m agentlab.dpo --model $(MODEL) --adapter $(SFT) --out $(DPO)
 
 # ---- stage 3 ----------------------------------------------------------------
-grpo:
-	$(PY) -m agentlab.grpo --model $(MODEL) --mode tools --out $(GRPO)
+# GRPO continues the SFT adapter: RL can only reinforce behaviour the policy
+# already emits sometimes, and stage 1 is what buys that non-zero baseline.
+grpo: $(SFT)
+	$(PY) -m agentlab.grpo --model $(MODEL) --mode tools --adapter $(SFT) --out $(GRPO)
+
+# The same stage without the chain, to see what RL alone does from base.
+grpo-from-base:
+	$(PY) -m agentlab.grpo --model $(MODEL) --mode tools --out $(GRPO)-frombase
 
 grpo-env:
-	$(PY) -m agentlab.grpo --model $(MODEL) --mode env --out out/qwen35-4b-grpo-env
+	$(PY) -m agentlab.grpo --model $(MODEL) --mode env --out out/$(SLUG)-grpo-env
+
+# Guard: `make dpo` / `make grpo` depend on this, so the chain cannot silently
+# fall back to base just because stage 1 was never run.
+$(SFT):
+	@echo "missing $(SFT) -- run 'make sft' first (stages chain through the adapter)"; exit 1
 
 # ---- stage 4 ----------------------------------------------------------------
 eval-base:
