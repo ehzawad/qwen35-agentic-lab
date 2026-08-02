@@ -72,6 +72,13 @@ stage 4   eval/merge/serve
 
 All three datasets are already in the local HF cache, so every stage runs offline.
 
+Every stage above has been run end to end on this box at smoke scale. Those runs
+prove the **plumbing** — that the data shape, the tool parsing, the trainer
+arguments and the checkpoint round-trip all work. They prove nothing about model
+quality: 15 GRPO steps on 16 prompts, or 15 reward-model steps on 62 pairs, is
+far too little to move a policy. Treat the numbers in this README as smoke
+evidence, not results.
+
 ```bash
 make sft        # teach schema adherence — GRPO assumes this already works
 make dpo        # RLHF leg: preferences straight into the policy loss
