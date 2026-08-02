@@ -10,10 +10,15 @@ export TOKENIZERS_PARALLELISM := false
 
 PY      := .venv/bin/python
 MODEL   ?= Qwen/Qwen3.5-4B
-SFT     := out/qwen35-4b-sft-lora
-DPO     := out/qwen35-4b-dpo-lora
-GRPO    := out/qwen35-4b-grpo-lora
-MERGED  := out/qwen35-4b-merged
+
+# Derive the artifact slug from MODEL rather than hardcoding it, so
+# `make sft MODEL=Qwen/Qwen3.5-2B` cannot overwrite the 4B adapter.
+# Matches env.SLUG: basename, dots stripped, lowercased.
+SLUG    := $(shell echo '$(notdir $(MODEL))' | tr -d '.' | tr 'A-Z' 'a-z')
+SFT     := out/$(SLUG)-sft-lora
+DPO     := out/$(SLUG)-dpo-lora
+GRPO    := out/$(SLUG)-grpo-lora
+MERGED  := out/$(SLUG)-merged
 
 .PHONY: help setup gpu smoke data inspect sft dpo reward grpo grpo-env \
         eval-base eval-sft eval-grpo merge serve clean
