@@ -214,6 +214,8 @@ def main() -> None:
     ap.add_argument("--no-vllm", action="store_true", help="generate with transformers instead of vLLM")
     ap.add_argument("--vllm-mem", type=float, default=0.25,
                     help="fraction of the card vLLM may take in colocate mode")
+    ap.add_argument("--vllm-max-len", type=int, default=4096,
+                    help="rollout context cap; the model's native 262144 will not fit a colocated KV cache")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -249,6 +251,12 @@ def main() -> None:
         use_vllm=not args.no_vllm,
         vllm_mode="colocate",
         vllm_gpu_memory_utilization=args.vllm_mem,
+        # Without this vLLM sizes the KV cache for the model's *native* 262144
+        # context and refuses to start: 8.06 GiB needed vs 3.79 GiB available at
+        # 0.30 utilization. A rollout here is a prompt plus a bounded completion,
+        # nowhere near 262K, so cap it rather than surrendering the card to a KV
+        # cache we will never fill.
+        vllm_max_model_length=args.vllm_max_len,
         # reward_weights lives on the config, not on GRPOTrainer -- `tools` and
         # `environment_factory` are the trainer kwargs, these are not.
         reward_weights=[1.0, 0.3, 0.2] if args.mode == "tools" else None,
