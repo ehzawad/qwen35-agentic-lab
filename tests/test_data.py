@@ -84,7 +84,7 @@ class TestPreference:
         from agentlab.data import build_preference
 
         ds = build_preference(n=16, explicit_prompt=True)
-        assert set(ds.column_names) == {"prompt", "chosen", "rejected"}
+        assert set(ds.column_names) == {"prompt", "chosen", "rejected", "chat_template_kwargs"}
         row = ds[0]
         assert row["prompt"][0]["role"] == "user"
         # chosen/rejected must be completions only, else the prompt is duplicated
@@ -195,3 +195,34 @@ class TestXlamSchemaConversion:
         assert _json_type("float") == "number"
         assert _json_type("bool") == "boolean"
         assert _json_type("str") == "string"
+
+
+class TestDPOAlignment:
+    """The prompt render must be a token prefix of the prompt+completion render.
+
+    DPOTrainer slices chosen_ids = prompt_chosen_ids[len(prompt_ids):]. When the
+    prefix property fails it only logs a warning and trains on the misaligned
+    completion, so this invariant has to be asserted here instead.
+    """
+
+    def test_prompt_is_a_token_prefix_of_prompt_plus_chosen(self):
+        from agentlab import env
+        from agentlab.data import build_preference
+
+        tok = env.get_tokenizer(env.load_processor())
+        ds = build_preference(n=8, explicit_prompt=True)
+        for row in ds:
+            kw = row.get("chat_template_kwargs") or {}
+            p = tok.apply_chat_template(row["prompt"], tokenize=False,
+                                        add_generation_prompt=True, **kw)
+            for branch in ("chosen", "rejected"):
+                f = tok.apply_chat_template(list(row["prompt"]) + list(row[branch]),
+                                            tokenize=False, **kw)
+                pi, fi = tok(p).input_ids, tok(f).input_ids
+                assert fi[:len(pi)] == pi, f"{branch} misaligned; DPO would slice wrongly"
+
+    def test_thinking_is_disabled_for_preference_rows(self):
+        from agentlab.data import build_preference
+
+        ds = build_preference(n=4, explicit_prompt=True)
+        assert ds[0]["chat_template_kwargs"] == {"enable_thinking": False}
