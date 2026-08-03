@@ -376,3 +376,81 @@ class TestRewardInputShapes:
         msgs = [{"role": "assistant", "content": "", "reasoning_content": r"maybe \boxed{7}"}]
         assert "boxed" not in _as_text(msgs)
         assert correctness_reward([msgs], ["7"]) == [0.0]
+
+
+class TestTruncationEconomics:
+    """Not finishing must be the worst outcome, now that clips are not masked."""
+
+    @staticmethod
+    def _score(comp, gt="250"):
+        from agentlab.grpo import (
+            REWARD_NAMES, REWARD_WEIGHTS, correctness_reward, format_reward, tool_use_reward,
+        )
+        r = {
+            "correctness": correctness_reward([comp], [gt])[0],
+            "tool_use": tool_use_reward([comp])[0],
+            "format": format_reward([comp])[0],
+        }
+        return sum(w * r[n] for n, w in zip(REWARD_NAMES, REWARD_WEIGHTS))
+
+    UNFINISHED = [
+        {"role": "assistant", "tool_calls": [
+            {"type": "function", "function": {"name": "calculator", "arguments": {}}}]},
+        {"role": "tool", "name": "calculator", "content": "250"},
+    ]  # budget ran out before the boxed answer
+    WRONG_DONE = [{"role": "assistant", "content": r"\boxed{999}"}]
+    RIGHT_DONE = [
+        {"role": "assistant", "tool_calls": [
+            {"type": "function", "function": {"name": "calculator", "arguments": {}}}]},
+        {"role": "tool", "name": "calculator", "content": "250"},
+        {"role": "assistant", "content": r"\boxed{250}"},
+    ]
+
+    def test_unfinished_scores_below_finished_but_wrong(self):
+        assert self._score(self.UNFINISHED) < self._score(self.WRONG_DONE)
+
+    def test_correct_still_wins_overall(self):
+        assert self._score(self.RIGHT_DONE) > self._score(self.WRONG_DONE) > self._score(self.UNFINISHED)
+
+    def test_truncated_rollouts_are_not_masked_out(self):
+        # If they were masked, the ordering above would never reach the loss.
+        import inspect
+
+        from agentlab import grpo
+
+        src = inspect.getsource(grpo.main)
+        assert "mask_truncated_completions=False" in src
+
+
+class TestClipGuard:
+    def test_stays_quiet_below_the_window(self):
+        from agentlab.grpo import ClipGuard
+
+        g = ClipGuard(window=8, threshold=0.5)
+        for _ in range(7):
+            g.on_log(None, None, None, logs={ClipGuard.KEY: 1.0})  # must not raise
+
+    def test_aborts_on_sustained_clipping(self):
+        import pytest
+
+        from agentlab.grpo import ClipGuard
+
+        g = ClipGuard(window=4, threshold=0.5)
+        with pytest.raises(RuntimeError, match="max_completion_length"):
+            for _ in range(4):
+                g.on_log(None, None, None, logs={ClipGuard.KEY: 0.9})
+
+    def test_healthy_run_never_fires(self):
+        from agentlab.grpo import ClipGuard
+
+        g = ClipGuard(window=4, threshold=0.5)
+        for _ in range(20):
+            g.on_log(None, None, None, logs={ClipGuard.KEY: 0.1})
+
+    def test_logs_without_the_key_are_ignored(self):
+        from agentlab.grpo import ClipGuard
+
+        g = ClipGuard(window=2, threshold=0.5)
+        for _ in range(10):
+            g.on_log(None, None, None, logs={"train_runtime": 1.0})  # final summary
+        assert len(g.seen) == 0

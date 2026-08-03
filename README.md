@@ -117,23 +117,44 @@ tool use, never pay the model to spam calls it does not need.
 state across the rollout, exposes its public methods as tools, and scores itself
 via `get_reward()` — the shape you need for a sandbox, a game, or a booking flow.
 
-### Watch `completions/clipped_ratio`
+### The completion budget is shared by the whole rollout
 
-The single most useful number in the GRPO logs. Thinking mode is on by default
-and spends a large share of the completion budget before the tool call appears,
-so a budget that looks generous truncates most rollouts. Truncated rollouts are
-dropped by `mask_truncated_completions=True`, and a step where *every* completion
-clipped teaches nothing at all:
+`max_completion_length` bounds the **entire** multi-turn completion — every
+assistant turn plus every tool result, not one turn
+(`grpo_trainer.py:2043`). With a reasoning trace per turn and four tool
+round-trips, a budget that looks generous per turn is exhausted before the final
+answer, and the rollout is scored as if the model simply never answered.
 
-```
-clipped_ratio: 1     -> loss: 0, grad_norm: 0, frac_reward_zero_std: 1
-clipped_ratio: 0     -> loss: -0.0048, grad_norm: 0.029, accuracy: 0.75
-```
+Three defaults address it, and they are a set rather than a menu:
 
-Both lines are from the same smoke run. If `clipped_ratio` sits high, raise
-`--max-completion-length` before you touch the learning rate — you are not
-looking at a policy that will not learn, you are looking at a policy whose
-rollouts never finished.
+- **Thinking is off for GRPO rollouts.** Stage 1 trains tool calls with no
+  reasoning block, so sampling stage 3 with one is a format mismatch — and the
+  generated reasoning competes for the budget with the answer that earns reward.
+  GSM8K plus a calculator does not need hidden reasoning.
+- **`mask_truncated_completions=False`.** DAPO recommends masking for a long
+  *answer* clipped by an infrastructure limit, where correctness is unknown.
+  A clip here means the tool loop ran out of an intentional task budget without
+  producing the required answer. That is a failure to train against, not data to
+  delete.
+- **`format_reward` is asymmetric** (`+0.1` / `−0.5`). Once truncated rollouts
+  reach the loss this carries weight: with a symmetric ±0.1, an unfinished
+  rollout that had called the calculator scored **+0.07** while one that
+  finished with the *wrong* answer scored **+0.02** — running out of budget paid
+  better than committing. Not finishing must be the worst outcome.
+
+A `ClipGuard` callback then **aborts** the run when the last 8 logged steps
+average ≥50% clipped, rather than letting it burn GPU-hours producing weak
+gradients behind an unremarkable loss curve. Tune with `--clip-window` /
+`--clip-threshold` (`1.0` disables).
+
+> One limit worth knowing: TRL calls a completion clipped when its last token is
+> not EOS/PAD, so a rollout that stops on a tool call at the iteration limit can
+> be counted as finished. Read the guard alongside `format_reward` and a trace,
+> not on its own.
+
+If you *want* thinking during GRPO, raise `--max-completion-length` to 2048; the
+measured GSM8K prompt is ~790 tokens (max 887), so 2048 still fits the default
+`--vllm-max-len 4096`.
 
 ## Three things that will bite you
 

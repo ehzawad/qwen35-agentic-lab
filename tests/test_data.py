@@ -112,7 +112,15 @@ class TestGRPO:
     """GRPOTrainer prompt-only type, plus the ground truth the reward needs."""
 
     def test_columns(self, grpo):
-        assert set(grpo.column_names) == {"prompt", "ground_truth"}
+        assert set(grpo.column_names) == {"prompt", "ground_truth", "chat_template_kwargs"}
+
+    def test_thinking_disabled_to_match_the_sft_grammar(self):
+        # Stage 1 trains tool calls with no reasoning block; sampling stage 3
+        # with one would be a format mismatch, and the generated reasoning
+        # competes for the single budget shared by every turn and tool result.
+        from agentlab.data import build_grpo
+
+        assert build_grpo(n=4)[0]["chat_template_kwargs"] == {"enable_thinking": False}
 
     def test_prompt_is_conversational_and_ends_on_the_user(self, grpo):
         p = grpo[0]["prompt"]

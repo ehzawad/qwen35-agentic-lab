@@ -209,6 +209,12 @@ def build_grpo(n: int = 1000, split: str = "train", seed: int = 0) -> Dataset:
                 {"role": "user", "content": ex["question"]},
             ],
             "ground_truth": _gsm8k_answer(ex["answer"]),
+            # Same rollout grammar the SFT adapter was trained with. Leaving
+            # thinking on here re-introduced a format mismatch -- stage 1 teaches
+            # tool calls with no reasoning block, then stage 3 would sample with
+            # one -- and the generated reasoning competes for the single
+            # completion budget shared by every turn and tool result.
+            "chat_template_kwargs": {"enable_thinking": False},
         }
 
     return raw.map(to_prompt, remove_columns=raw.column_names)

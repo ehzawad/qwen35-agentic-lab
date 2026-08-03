@@ -241,10 +241,67 @@ def tool_use_reward(completions, **kwargs) -> list[float]:
 
 
 def format_reward(completions, **kwargs) -> list[float]:
-    """Shaping: the answer must be extractable at all."""
-    out = [0.1 if _BOXED_RE.search(_as_text(c)) else -0.1 for c in completions]
+    """Shaping: the answer must be extractable at all.
+
+    Asymmetric on purpose, and the asymmetry is load-bearing now that truncated
+    rollouts are no longer masked out. With a symmetric +/-0.1 an unfinished
+    rollout that had called the calculator scored
+        0*1.0 + 0.3*0.3 + (-0.1)*0.2 = +0.07
+    while a rollout that finished with the WRONG answer and no tool scored
+        0*1.0 + 0*0.3   + (+0.1)*0.2 = +0.02
+    i.e. running out of budget paid better than committing to an answer. Failing
+    to produce the terminal answer has to be the worst outcome, so the miss is
+    penalised hard enough to outweigh any shaping the rollout collected.
+    """
+    out = [0.1 if _BOXED_RE.search(_as_text(c)) else -0.5 for c in completions]
     _record("format", completions, out)
     return out
+
+
+# --------------------------------------------------------------------------
+# truncation guard
+# --------------------------------------------------------------------------
+
+class ClipGuard:
+    """Abort when most rollouts are running out of completion budget.
+
+    `max_completion_length` bounds the WHOLE multi-turn completion -- every
+    assistant turn plus every tool result (grpo_trainer.py:2043) -- so a budget
+    that looks generous per turn can still be exhausted before the final answer
+    appears. Half the group failing to terminate is not a run worth continuing,
+    and without this it fails silently: the wasted rollouts simply produce
+    weaker gradients while the loss curve looks unremarkable.
+
+    Caveat worth knowing: TRL defines clipped as "last token is not EOS/PAD", so
+    a rollout that stops on a tool call at the iteration limit can be counted as
+    finished. Read this alongside the format reward and a trace, not alone.
+    """
+
+    KEY = "completions/clipped_ratio"
+
+    def __init__(self, window: int = 8, threshold: float = 0.5):
+        from collections import deque
+
+        self.window = window
+        self.threshold = threshold
+        self.seen = deque(maxlen=window)
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not logs or self.KEY not in logs:
+            return  # e.g. the final runtime summary
+        self.seen.append(float(logs[self.KEY]))
+        if len(self.seen) < self.window:
+            return
+        mean = sum(self.seen) / len(self.seen)
+        if mean >= self.threshold:
+            raise RuntimeError(
+                f"{mean:.0%} of the last {self.window} logged steps hit "
+                f"max_completion_length. The budget is exhausted before the final "
+                f"answer, so those rollouts teach little or nothing.\n"
+                f"  Raise --max-completion-length (currently bounded by "
+                f"--vllm-max-len minus the prompt), lower --max-tool-iters, or "
+                f"keep thinking disabled for GRPO."
+            )
 
 
 # --------------------------------------------------------------------------
@@ -321,6 +378,10 @@ def main() -> None:
     ap.add_argument("--max-completion-length", type=int, default=1024)
     ap.add_argument("--max-tool-iters", type=int, default=4,
                     help="tool round-trips allowed per rollout")
+    ap.add_argument("--clip-window", type=int, default=8,
+                    help="steps averaged by the truncation guard")
+    ap.add_argument("--clip-threshold", type=float, default=0.5,
+                    help="mean clipped_ratio over the window that aborts the run; 1.0 disables")
     ap.add_argument("--rank", type=int, default=32)
     ap.add_argument("--loss-type", default="dapo", choices=["grpo", "dr_grpo", "dapo", "sapo"])
     ap.add_argument("--no-vllm", action="store_true", help="generate with transformers instead of vLLM")
@@ -353,7 +414,12 @@ def main() -> None:
         top_k=20,
         # Truncated rollouts have no terminal reward; letting them into the loss
         # teaches the policy that running out of budget is fine.
-        mask_truncated_completions=True,
+        # False on purpose. DAPO recommends masking for a long *answer* clipped
+        # by an infrastructure limit, where correctness is unknown. Here a clip
+        # means the tool loop ran out of an intentional task budget without
+        # producing the required final answer -- that is a failure the policy
+        # should be trained against, not data to delete.
+        mask_truncated_completions=False,
         bf16=True,
         gradient_checkpointing=True,
         logging_steps=1,
@@ -407,6 +473,13 @@ def main() -> None:
             environment_factory=BudgetEnv,
             **common,
         )
+
+    from transformers import TrainerCallback
+
+    class _Guard(TrainerCallback, ClipGuard):
+        pass
+
+    trainer.add_callback(_Guard(window=args.clip_window, threshold=args.clip_threshold))
 
     describe(trainer.model)
     trainer.train()
