@@ -25,9 +25,29 @@ import re
 from . import env, trace
 from .data import build_grpo
 from .peft_cfg import describe, policy_and_peft
-from .tools import TOOLS, calculator, kb_lookup, unit_convert
+from .tools import TOOLS, trl_tools
 
 _BOXED_RE = re.compile(r"\\boxed\{([^{}]*)\}")
+
+
+def _answer_text(completion) -> str:
+    """Only what the model *committed to the user*, for scoring correctness.
+
+    Deliberately narrower than `_as_text`. That one renders tool calls and tool
+    results into the text for tracing, which makes it a reward-hacking surface:
+    `calculator(expression="\\boxed{42}")` would put the ground truth into the
+    scored string without the model ever answering, and a box appearing in a tool
+    RESULT would score too. Correctness and format therefore read assistant
+    `content` only -- never arguments, never tool output, never
+    `reasoning_content` (which is text the model never committed past </think>).
+    """
+    if isinstance(completion, str):
+        return completion
+    parts = []
+    for msg in completion:
+        if isinstance(msg, dict) and msg.get("role") in (None, "assistant") and msg.get("content"):
+            parts.append(str(msg["content"]))
+    return "\n".join(parts)
 
 
 # --------------------------------------------------------------------------
@@ -194,7 +214,7 @@ def correctness_reward(completions, ground_truth, **kwargs) -> list[float]:
     log_metric = kwargs.get("log_metric")
     out = []
     for comp, gt in zip(completions, ground_truth):
-        text = _as_text(comp)
+        text = _answer_text(comp)
         hits = _BOXED_RE.findall(text)
         if not hits:
             out.append(0.0)
@@ -253,7 +273,7 @@ def format_reward(completions, **kwargs) -> list[float]:
     to produce the terminal answer has to be the worst outcome, so the miss is
     penalised hard enough to outweigh any shaping the rollout collected.
     """
-    out = [0.1 if _BOXED_RE.search(_as_text(c)) else -0.5 for c in completions]
+    out = [0.1 if _BOXED_RE.search(_answer_text(c)) else -0.5 for c in completions]
     _record("format", completions, out)
     return out
 
@@ -440,6 +460,14 @@ def main() -> None:
         reward_weights=list(REWARD_WEIGHTS) if args.mode == "tools" else None,
         # How many tool round-trips one rollout may take before it is cut off.
         max_tool_calling_iterations=args.max_tool_iters,
+        # MUST be set here, not on the dataset rows. TRL stores only
+        # `self.chat_template_kwargs = args.chat_template_kwargs or {}` and uses
+        # that global dict when rendering rollout prompts (grpo_trainer.py:742,
+        # :1758). Row-level chat_template_kwargs reach the reward functions but
+        # never the renderer, so the previous run sampled with thinking ON while
+        # the SFT adapter had been trained with it OFF -- a grammar mismatch, and
+        # reasoning then ate the shared completion budget every tool round.
+        chat_template_kwargs={"enable_thinking": False},
     )
 
     # --adapter is what chains stage 1 into stage 3. Without it the policy starts
@@ -458,7 +486,7 @@ def main() -> None:
         trainer = GRPOTrainer(
             train_dataset=ds,
             reward_funcs=[correctness_reward, tool_use_reward, format_reward],
-            tools=[calculator, unit_convert, kb_lookup],
+            tools=trl_tools(),
             **common,
         )
     else:

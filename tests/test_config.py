@@ -454,3 +454,85 @@ class TestClipGuard:
         for _ in range(10):
             g.on_log(None, None, None, logs={"train_runtime": 1.0})  # final summary
         assert len(g.seen) == 0
+
+
+class TestCommittedAnswerOnly:
+    """Correctness must come from what the model told the user, nothing else."""
+
+    def test_box_in_a_tool_argument_does_not_score(self):
+        # _as_text renders tool calls into the text for tracing, which made it a
+        # reward-hacking surface: put the answer in an argument, collect reward
+        # without ever answering.
+        from agentlab.grpo import correctness_reward
+
+        comp = [{"role": "assistant", "tool_calls": [{"type": "function", "function": {
+            "name": "calculator", "arguments": {"expression": r"\boxed{42}"}}}]}]
+        assert correctness_reward([comp], ["42"]) == [0.0]
+
+    def test_box_in_a_tool_result_does_not_score(self):
+        from agentlab.grpo import correctness_reward
+
+        comp = [
+            {"role": "assistant", "tool_calls": [{"type": "function", "function": {
+                "name": "calculator", "arguments": {"expression": "6*7"}}}]},
+            {"role": "tool", "name": "calculator", "content": r"\boxed{42}"},
+        ]
+        assert correctness_reward([comp], ["42"]) == [0.0]
+
+    def test_box_in_reasoning_content_does_not_score(self):
+        from agentlab.grpo import correctness_reward
+
+        comp = [{"role": "assistant", "content": "", "reasoning_content": r"maybe \boxed{42}"}]
+        assert correctness_reward([comp], ["42"]) == [0.0]
+
+    def test_committed_assistant_answer_does_score(self):
+        from agentlab.grpo import correctness_reward
+
+        comp = [
+            {"role": "assistant", "tool_calls": [{"type": "function", "function": {
+                "name": "calculator", "arguments": {"expression": "6*7"}}}]},
+            {"role": "tool", "name": "calculator", "content": "42"},
+            {"role": "assistant", "content": r"The answer is \boxed{42}."},
+        ]
+        assert correctness_reward([comp], ["42"]) == [1.0]
+
+    def test_format_reward_uses_the_committed_answer_too(self):
+        from agentlab.grpo import format_reward
+
+        hacked = [{"role": "assistant", "tool_calls": [{"type": "function", "function": {
+            "name": "calculator", "arguments": {"expression": r"\boxed{42}"}}}]}]
+        assert format_reward([hacked])[0] < 0
+
+
+class TestTRLToolWrappers:
+    """TRL bypasses call_tool, so the wrappers must restore eval parity."""
+
+    def test_wrappers_preserve_names_and_schema(self):
+        from agentlab.tools import TOOLS, tool_schemas, trl_tools
+
+        assert [f.__name__ for f in trl_tools()] == [f.__name__ for f in TOOLS]
+        assert len(tool_schemas()) == len(trl_tools())
+
+    def test_string_arguments_are_coerced_like_the_eval_path(self):
+        from agentlab.tools import trl_tools
+
+        t = {f.__name__: f for f in trl_tools()}
+        assert t["unit_convert"](value="26.2", from_unit="mile", to_unit="km") == "42.1648"
+
+    def test_bad_arguments_return_an_error_instead_of_raising(self):
+        # A raise would become TRL's {"error": ...} and, worse, could take the
+        # rollout worker with it. The model should observe the failure instead.
+        from agentlab.tools import trl_tools
+
+        t = {f.__name__: f for f in trl_tools()}
+        for bad in ({"nope": 1}, {}, {"value": "abc", "from_unit": "m", "to_unit": "km"}):
+            out = t["unit_convert"](**bad)
+            assert isinstance(out, str) and out.startswith("error:"), bad
+
+    def test_wrapped_errors_are_seen_by_the_error_detector(self):
+        from agentlab.grpo import _tool_errored
+        from agentlab.tools import trl_tools
+
+        t = {f.__name__: f for f in trl_tools()}
+        msg = [{"role": "tool", "name": "unit_convert", "content": t["unit_convert"](nope=1)}]
+        assert _tool_errored(msg)

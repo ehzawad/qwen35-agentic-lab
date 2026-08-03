@@ -114,13 +114,19 @@ class TestGRPO:
     def test_columns(self, grpo):
         assert set(grpo.column_names) == {"prompt", "ground_truth", "chat_template_kwargs"}
 
-    def test_thinking_disabled_to_match_the_sft_grammar(self):
-        # Stage 1 trains tool calls with no reasoning block; sampling stage 3
-        # with one would be a format mismatch, and the generated reasoning
-        # competes for the single budget shared by every turn and tool result.
-        from agentlab.data import build_grpo
+    def test_thinking_disabled_on_the_CONFIG_not_just_the_rows(self):
+        # The row-level key is NOT enough and asserting it was the bug: TRL keeps
+        # only `self.chat_template_kwargs = args.chat_template_kwargs or {}` and
+        # renders rollout prompts from that global dict (grpo_trainer.py:742,
+        # :1758). Row kwargs reach the reward functions and never the renderer,
+        # so GRPO sampled with thinking ON while SFT trained with it OFF.
+        import inspect
 
-        assert build_grpo(n=4)[0]["chat_template_kwargs"] == {"enable_thinking": False}
+        from agentlab import grpo
+
+        src = inspect.getsource(grpo.main)
+        assert 'chat_template_kwargs={"enable_thinking": False}' in src, \
+            "GRPOConfig must disable thinking; the dataset column cannot do it"
 
     def test_prompt_is_conversational_and_ends_on_the_user(self, grpo):
         p = grpo[0]["prompt"]

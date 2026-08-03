@@ -233,3 +233,35 @@ def call_tool(name: str, arguments: dict) -> str:
         return str(fn(**arguments))
     except TypeError as e:
         return f"error: bad arguments for {name}: {e}"
+
+def trl_tools() -> list:
+    """The tool suite wrapped so it is safe to hand to TRL's rollout loop.
+
+    TRL calls the raw functions directly with whatever its parser produced, so
+    `coerce_args` -- which the eval path gets for free via `call_tool` -- is
+    bypassed entirely. The XML wire format carries every parameter as a string,
+    so `unit_convert(value="26.2")` raises TypeError there while succeeding at
+    eval, and training and evaluation stop measuring the same thing.
+
+    Wrapping (rather than making each tool coerce internally) is what works:
+    a missing or unexpected keyword fails at Python argument binding, before any
+    function body runs, so only an outer wrapper can catch it. Each wrapper keeps
+    the original name, signature and docstring, so the schema the model sees is
+    unchanged.
+    """
+    import functools
+
+    def wrap(fn):
+        @functools.wraps(fn)
+        def wrapped(**kwargs):
+            try:
+                return str(fn(**coerce_args(fn.__name__, kwargs)))
+            except Exception as e:  # noqa: BLE001 - must not raise into the rollout
+                # Returned, not raised: a failure the model caused should be an
+                # observation it can react to and be scored on, not a crash. Note
+                # this makes TRL's own tools/failure_frequency read ~0 by design;
+                # grpo._tool_errored stays the semantic failure metric.
+                return f"error: {type(e).__name__}: {e}"
+        return wrapped
+
+    return [wrap(fn) for fn in TOOLS]

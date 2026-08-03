@@ -20,6 +20,9 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 export EXPECT_GPU=A6000
 export PYTHONPATH=src
 export TOKENIZERS_PARALLELISM=false
+# The OOM this hit once was 4.42 GiB reserved-but-unallocated, i.e. fragmentation
+# between vLLM's pool and the training allocator. torch suggests exactly this.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 PY=.venv/bin/python
 SFT=out/qwen35-4b-sft-lora
@@ -30,13 +33,17 @@ mkdir -p "$LOG"
 stamp() { date -u +%H:%M:%S; }
 say()   { echo "[$(stamp)] $*" | tee -a "$LOG/progress.log"; }
 
-say "=== stage 1: SFT (fixed code: prompt/completion, no vision LoRA, thinking off) ==="
-$PY -u -m agentlab.sft --n 4000 --out "$SFT" > "$LOG/sft.log" 2>&1
-say "sft exit=$?"
+if [ "${SKIP_SFT:-0}" = "1" ] && [ -f "$SFT/adapter_model.safetensors" ]; then
+  say "=== stage 1: SFT SKIPPED (reusing existing $SFT) ==="
+else
+  say "=== stage 1: SFT (fixed code: prompt/completion, no vision LoRA, thinking off) ==="
+  $PY -u -m agentlab.sft --n 4000 --out "$SFT" > "$LOG/sft.log" 2>&1
+  say "sft exit=$?"
+fi
 
 say "=== stage 3: GRPO continuing the SFT adapter ==="
-$PY -u -m agentlab.grpo --mode tools --n 300 --num-generations 8 --bsz 8 --accum 2 \
-    --max-completion-length 1024 --vllm-mem 0.28 --vllm-max-len 4096 \
+$PY -u -m agentlab.grpo --mode tools --n 300 --num-generations 8 --bsz 4 --accum 2 \
+    --max-completion-length 1024 --vllm-mem 0.24 --vllm-max-len 4096 \
     --adapter "$SFT" --out "$GRPO" > "$LOG/grpo.log" 2>&1
 say "grpo exit=$?"
 
