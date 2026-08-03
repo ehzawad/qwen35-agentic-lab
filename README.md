@@ -89,6 +89,58 @@ make grpo       # the interesting one
 make eval-base  # then eval-sft / eval-grpo to see whether it moved
 ```
 
+## Result: the pipeline runs, and this recipe makes the model worse
+
+Measured on one A6000, held-out GSM8K, thinking off for both, identical harness:
+
+| checkpoint | accuracy | tool calls / episode | runaway (>10 calls) | sec / episode | n |
+|---|---|---|---|---|---|
+| base `Qwen3.5-4B` | **0.800** | 3.3 | 3 / 51 | 24.8 | 50 |
+| after SFT | **0.050** | **50.0** | **19 / 20** | 242.1 | 20 |
+
+A **16x degradation**, and the mechanism is visible in the traces:
+
+```
+CALL calculator('20 * 40 + 80 * 30') -> 3200     <- correct, first try
+CALL calculator('3200')              -> 3200     <- then 68 more times
+CALL calculator('3200')              -> 3200
+...
+```
+
+The model solves the problem on call one and then cannot stop. 19 of 20 episodes
+never produce a final answer at all (`tool_use_rate` 1.000, `tool_error_rate`
+0.600 as the loop degenerates into empty expressions).
+
+**Why: `xlam-function-calling-60k` is single-turn function-calling data, not
+agentic trajectories.** Every target is a bare tool call. Not one example shows a
+model receiving a tool result and *concluding*. Train 4,000 of those with the
+whole loss on the tool call and the model learns to emit tool calls — thoroughly,
+including the part where a response never ends in prose.
+
+Three things worth taking from this:
+
+1. **A correctness fix made the outcome worse.** An earlier version put only ~12%
+   of the loss on the tool call (a bug). Fixing that to 100% and scaling 250 -> 4000
+   examples made training much better at learning the wrong lesson. The earlier
+   GRPO run scored 0.25-1.00 *because the SFT was too weak to do damage*. The bug
+   was masking the data problem.
+2. **GRPO could not rescue it and could not even measure it.** With no rollout
+   ever producing a boxed answer, `correctness_reward` was identically 0 across
+   every step, so the advantage had no variance and RL had nothing to reinforce.
+3. **Loss going down is not the model getting better.** SFT ended at
+   train_loss 0.0221, eval_loss 0.0125, token accuracy 0.9971 — a textbook clean
+   fit, on an objective that was not the one that mattered.
+
+The pipeline is not what failed here. Every stage did exactly what it was asked.
+
+### What would actually be needed
+
+Multi-turn trajectories where an observation changes the next action *and* the
+episode terminates — see the Environments Hub and the open SWE-trajectory sets.
+Plus process-level reward, since a terminal-only signal on a 20-step task is
+almost no signal at all. Both are out of scope for this repo as it stands, and
+that is the honest boundary of what a single-GPU lab on single-turn data can show.
+
 ### Why SFT before GRPO
 
 GRPO's advantage is the *spread* of reward within a sampled group. If every
