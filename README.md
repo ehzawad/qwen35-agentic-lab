@@ -75,18 +75,31 @@ stage 4   eval/merge/serve
 All three datasets come from the Hub and are cached after the first run;
 subsequent runs are offline. The base model is a ~9 GB download.
 
-Every stage except `grpo-env` has been run end to end at smoke scale. Those runs
+Every stage has been run end to end, `grpo-env` at smoke scale (8 steps: the
+environment's `reset()` supplies prompts, its methods become tools, its
+`get_reward()` scores the rollouts -- all verified working; BudgetEnv itself is
+trivially solved by a 4B model, reward 1.0 with zero variance, so it validates
+the *mechanism*, not learning). Those runs
 prove the **plumbing** — data shape, tool parsing, trainer arguments, checkpoint
 round-trip. They prove nothing about model quality: a handful of GRPO steps on a
 handful of prompts is not evidence that a policy improved, and the reward-model
 smoke finished at chance accuracy. Run `make verify` for the invariants, and
 measure quality yourself before believing any of it.
 
+The **flagship path** — the one that produced the headline result:
+
 ```bash
-make sft        # teach schema adherence — GRPO assumes this already works
+make distill    # rejection-sample terminating trajectories from the base model
+make chain      # RS-SFT -> GRPO -> paired eval at n=200 (unattended, ~9 h)
+make verdict    # base@200 rerun + the machine-checked verdict
+```
+
+The original stages remain runnable, but know what you are running:
+
+```bash
+make sft        # the xlam stage -- reproduces the 16x DEGRADATION on purpose
 make dpo        # RLHF leg: preferences straight into the policy loss
-make grpo       # the interesting one
-make eval-base  # then eval-sft / eval-grpo to see whether it moved
+make grpo       # GRPO continuing whatever adapter make sft produced
 ```
 
 ## Results at a glance
@@ -110,10 +123,17 @@ informative (see below).
 
 > These results were machine-checked, not read off a table. The generated
 > [comparison verdict](results/verdict.md) runs harness-sanity checks S0-S7
-> *before* the pre-registered gates G1-G5; a harness BUG vetoes any model-level
-> verdict, and all scoring uses a notation-tolerant normalizer applied
-> uniformly to every checkpoint after a review found a right answer scored
-> wrong on notation.
+> *before* gates G1-G5; a harness BUG vetoes any model-level verdict, and all
+> scoring uses a notation-tolerant normalizer applied uniformly to every
+> checkpoint after a review found a right answer scored wrong on notation.
+> Gate thresholds were committed (`d81644e`) during SFT training, before any
+> evaluation of the new checkpoints existed — the git history is the receipt.
+> The full evidence (eval summaries + traces) is tracked under
+> [results/evidence/](results/evidence/); regenerate the verdict with
+> `python -m agentlab.analyze --out-dir results/evidence --trace-dirs results/evidence`.
+> The exact 1,275-trajectory corpus is tracked at `data/distill.jsonl`
+> (sha256 `9aff1eae…d658f81`), and `requirements-lock.txt` freezes the
+> verdict-producing environment.
 
 Read together, the three results describe one behaviour. Single-turn xlam SFT
 taught the model to call tools without teaching it to *stop* (16x degradation).
@@ -129,7 +149,7 @@ Measured on one A6000, held-out GSM8K, thinking off for both, identical harness:
 
 | checkpoint | accuracy | tool calls / episode | runaway (>10 calls) | sec / episode | n |
 |---|---|---|---|---|---|
-| base `Qwen3.5-4B` | **0.800** | 3.3 | 3 / 51 | 24.8 | 50 |
+| base `Qwen3.5-4B` | **0.800** | 3.3 | 3 / 50 | 24.8 | 50 |
 | after SFT | **0.050** | **50.0** | **19 / 20** | 242.1 | 20 |
 
 A **16x degradation**, and the mechanism is visible in the traces:
@@ -170,10 +190,11 @@ The pipeline is not what failed here. Every stage did exactly what it was asked.
 ### What would actually be needed
 
 Multi-turn trajectories where an observation changes the next action *and* the
-episode terminates — see the Environments Hub and the open SWE-trajectory sets.
-Plus process-level reward, since a terminal-only signal on a 20-step task is
-almost no signal at all. Both are out of scope for this repo as it stands, and
-that is the honest boundary of what a single-GPU lab on single-turn data can show.
+episode terminates. When this section was first written that was out of scope;
+the follow-up below then implemented exactly that (rejection-sampled from the
+base model) and it worked. Process-level reward remains genuinely out of scope —
+a terminal-only signal on a long-horizon task is almost no signal at all, and
+nothing here addresses it.
 
 ### Follow-up: terminating trajectories recover the headroom
 
@@ -200,7 +221,7 @@ demonstration that fewer calls are better.
 GRPO on a disjoint problem slice, continuing the RS-SFT adapter, 300 steps under
 valid conditions (thinking off in the rollout renderer, committed-answer-only
 rewards, parity-wrapped tools): held-out accuracy 0.930 vs 0.920, p = 0.804.
-During training, **55% of steps had zero within-group reward variance** -- all
+During training, **56% of steps (168/300) had zero within-group reward variance** -- all
 eight samples scored identically, so the advantage was zero and those steps
 taught nothing. RS-SFT had already captured the available headroom; RL had
 almost nothing left to grip on this task. Its one measurable effect is real and
@@ -272,9 +293,11 @@ gradients behind an unremarkable loss curve. Tune with `--clip-window` /
 > be counted as finished. Read the guard alongside `format_reward` and a trace,
 > not on its own.
 
-If you *want* thinking during GRPO, raise `--max-completion-length` to 2048; the
-measured GSM8K prompt is ~790 tokens (max 887), so 2048 still fits the default
-`--vllm-max-len 4096`.
+GRPO hard-disables thinking in the rollout renderer (`GRPOConfig
+chat_template_kwargs`; row-level kwargs are ignored by TRL). If you want
+thinking during GRPO, edit that config line *and* raise
+`--max-completion-length` to 2048 — the measured GSM8K prompt is ~790 tokens
+(max 887), so 2048 still fits the default `--vllm-max-len 4096`.
 
 ## Three things that will bite you
 
@@ -413,7 +436,11 @@ src/agentlab/
   smoke.py          stage 0
   sft.py dpo.py reward.py grpo.py     stages 1-3
   eval.py merge.py                    stage 4
-scripts/setup.sh scripts/serve.sh
+scripts/
+  setup.sh serve.sh                    environment + OpenAI-compatible serving
+  run_distill_chain.sh                 the flagship chain (make chain)
+  after_chain_verdict.sh               base@200 + machine-checked verdict (make verdict)
+  archive_xlam_comparison.sh           the failed xlam experiment, kept as record
 ```
 
-`make help` lists every target.
+`make help` lists the targets.

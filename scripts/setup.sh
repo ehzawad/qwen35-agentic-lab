@@ -24,7 +24,8 @@ uv pip install --python "$VENV" \
   "math-verify" \
   "bitsandbytes" \
   "Pillow" \
-  "num2words"
+  "num2words" \
+  "pytest"
 
 # NOTE: deliberately NOT installing flash-linear-attention / causal-conv1d.
 # transformers advertises them as the Gated DeltaNet "fast path", but 0.5.2 +

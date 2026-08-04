@@ -1,0 +1,11 @@
+{
+  "n": 200,
+  "accuracy": 0.92,
+  "tool_use_rate": 0.905,
+  "tool_error_rate": 0.01,
+  "mean_turns": 1.98,
+  "seconds": 8854.0,
+  "tag": "rssft",
+  "model": "Qwen/Qwen3.5-4B",
+  "adapter": "out/qwen35-4b-rssft-lora"
+}

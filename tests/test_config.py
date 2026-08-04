@@ -536,3 +536,15 @@ class TestTRLToolWrappers:
         t = {f.__name__: f for f in trl_tools()}
         msg = [{"role": "tool", "name": "unit_convert", "content": t["unit_convert"](nope=1)}]
         assert _tool_errored(msg)
+
+
+class TestClipGuardDisable:
+    def test_threshold_one_truly_disables(self):
+        # Documented as '1.0 disables'; the >= comparison used to fire at
+        # exactly 1.0, making the documented escape hatch a lie.
+        from agentlab.grpo import ClipGuard
+
+        g = ClipGuard(window=2, threshold=1.0)
+        for _ in range(10):
+            g.on_log(None, None, None, logs={ClipGuard.KEY: 1.0})
+        assert len(g.seen) == 0

@@ -1,0 +1,11 @@
+{
+  "n": 200,
+  "accuracy": 0.81,
+  "tool_use_rate": 1.0,
+  "tool_error_rate": 0.055,
+  "mean_turns": 2.705,
+  "seconds": 5019.8,
+  "tag": "base",
+  "model": "Qwen/Qwen3.5-4B",
+  "adapter": null
+}

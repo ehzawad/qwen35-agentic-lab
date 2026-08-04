@@ -8,9 +8,9 @@
 #   eval     test  (untouched split)
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
-export EXPECT_GPU=A6000
+export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
+# Device choice belongs to the caller; nothing here requires a specific card.
+# On a multi-GPU box: CUDA_VISIBLE_DEVICES=<idx> [EXPECT_GPU=A6000] make chain
 export PYTHONPATH=src
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -20,9 +20,13 @@ RS=out/qwen35-4b-rssft-lora
 GR=out/qwen35-4b-rsgrpo-lora
 LOG=out/chain
 mkdir -p "$LOG"
+# Fresh log per run: the verdict waiter keys on CHAIN_DONE, and an old
+# sentinel from a previous run would fire it against stale artifacts.
+: > "$LOG/progress.log"
 say(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG/progress.log"; }
-FAILED=0
-check(){ rc=$1; stage=$2; say "$stage exit=$rc"; if [ "$rc" -ne 0 ]; then FAILED=1; say "STAGE_FAILED $stage"; fi; }
+# Fail FAST: a failed stage must not feed stale artifacts into later stages
+# for hours before the run finally reports failure.
+check(){ rc=$1; stage=$2; say "$stage exit=$rc"; if [ "$rc" -ne 0 ]; then say "CHAIN_FAILED at $stage"; exit 1; fi; }
 
 say "=== 1/4 distill: rejection-sample trajectories from base ==="
 $PY -u -m agentlab.distill --n-problems 1500 --k 4 --offset 0 \
@@ -64,6 +68,4 @@ for t in ("base","sft","rssft","rsgrpo"):
         print(f"{r['tag']:<8}{r['accuracy']:>10.3f}{r['tool_use_rate']:>10.3f}"
               f"{r['tool_error_rate']:>10.3f}{r['mean_turns']:>8.2f}{r['n']:>6}")
 PYEOF
-# CHAIN_DONE only on full success: the verdict waiter keys on this string, and
-# an unconditional sentinel let a crashed stage flow into a "complete" verdict.
-if [ "$FAILED" -eq 0 ]; then say "CHAIN_DONE"; else say "CHAIN_FAILED"; exit 1; fi
+say "CHAIN_DONE"

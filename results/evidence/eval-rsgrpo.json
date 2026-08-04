@@ -1,0 +1,11 @@
+{
+  "n": 200,
+  "accuracy": 0.93,
+  "tool_use_rate": 1.0,
+  "tool_error_rate": 0.015,
+  "mean_turns": 2.115,
+  "seconds": 5336.4,
+  "tag": "rsgrpo",
+  "model": "Qwen/Qwen3.5-4B",
+  "adapter": "out/qwen35-4b-rsgrpo-lora"
+}

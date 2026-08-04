@@ -20,7 +20,7 @@ rsgrpo - rssft: +0.010  paired McNemar over 200 shared problems: b=7 c=9 z=+0.50
 
 ## Gates (registered before launch)
   PASS  G1 accuracy >= 0.800: rssft 0.920
-  PASS  G2 calls/ep <= 6.0: rssft 1.4 (base 3.3, broken 50.0)
+  PASS  G2 calls/ep <= 6.0: rssft 1.4 (base 2.8, broken 50.0)
   PASS  G3 runaway <= 10%: 0/200
   PASS  G4 no-box < base: rssft 2.0% vs base 14.0%
   PASS  G5 rsgrpo >= rssft (directional): 0.930 vs 0.920

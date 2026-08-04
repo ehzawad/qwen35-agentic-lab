@@ -325,6 +325,9 @@ class ClipGuard:
     def on_log(self, args, state, control, logs=None, **kwargs):
         if not logs or self.KEY not in logs:
             return  # e.g. the final runtime summary
+        if self.threshold >= 1.0:
+            return  # documented disable: a mean can never exceed 1.0, but the
+                    # old >= comparison still fired at exactly 1.0
         self.seen.append(float(logs[self.KEY]))
         if len(self.seen) < self.window:
             return

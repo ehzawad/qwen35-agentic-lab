@@ -23,6 +23,7 @@ GRPO    := out/$(SLUG)-grpo-lora
 MERGED  := out/$(SLUG)-merged
 
 .PHONY: help setup gpu smoke data inspect sft dpo reward grpo grpo-env grpo-from-base \
+        distill chain verdict \
         verify verify-v trace-eval trace-grpo trace-view \
         eval-base eval-sft eval-grpo merge serve clean
 
@@ -40,10 +41,16 @@ help:
 	@echo "  dpo         stage 2b: preference alignment (ultrafeedback)"
 	@echo "  grpo        stage 3: GRPO with real tool execution (gsm8k)"
 	@echo "  grpo-env    stage 3': GRPO with an environment-owned reward"
+	@echo "  grpo-from-base  stage 3 without the SFT chain (comparison arm)"
+	@echo
+	@echo "  distill     regenerate outcome-filtered GSM8K trajectories"
+	@echo "  chain       run the flagship RS-SFT -> GRPO -> paired eval chain"
+	@echo "  verdict     after chain: run base@200 + the machine-checked verdict"
 	@echo
 	@echo "  verify      CPU-only test suite (parsing, rewards, data, every stage config)"
 	@echo "  trace-eval  run eval with tracing, then render the per-problem trace"
 	@echo "  trace-view  render an existing trace file (FILE=..., LIMIT=...)"
+	@echo "  verify-v    verbose test suite; trace-grpo: traced GRPO run; clean: rm artifacts"
 	@echo ""
 	@echo "  eval-base   stage 4: agentic eval, base model"
 	@echo "  eval-sft    stage 4: agentic eval, after SFT"
@@ -138,3 +145,13 @@ trace-grpo:
 
 trace-view:
 	@$(PY) -m agentlab.trace $(FILE) $(or $(LIMIT),5)
+
+# ---- flagship: rejection-sampled SFT -> GRPO -> machine-checked verdict -----
+distill:
+	$(PY) -m agentlab.distill --model $(MODEL)
+
+chain:
+	bash scripts/run_distill_chain.sh
+
+verdict:
+	bash scripts/after_chain_verdict.sh

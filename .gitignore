@@ -1,6 +1,7 @@
 .venv/
 out/
-data/
+data/*
+!data/distill.jsonl
 __pycache__/
 *.pyc
 wandb/

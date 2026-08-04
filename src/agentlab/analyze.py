@@ -416,8 +416,9 @@ def report(tags: list[str], out_dir: str = "out", trace_dirs: list[str] | None =
         if not ok:
             failed_names.append("G1")
         if "calls_mean" in rssft:
+            base_calls = f"{base['calls_mean']:.1f}" if base and "calls_mean" in base else "n/a"
             ok = gate("G2 calls/ep <= 6.0", rssft["calls_mean"] <= 6.0,
-                      f"rssft {rssft['calls_mean']:.1f} (base 3.3, broken 50.0)", lines)
+                      f"rssft {rssft['calls_mean']:.1f} (base {base_calls}, broken 50.0)", lines)
             passed, failed = passed + ok, failed + (not ok)
             if not ok:
                 failed_names.append("G2")

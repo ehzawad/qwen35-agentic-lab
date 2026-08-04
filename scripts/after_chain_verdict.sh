@@ -7,9 +7,7 @@
 # No pkill anywhere in this file, deliberately.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
-export EXPECT_GPU=A6000
+export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
 export PYTHONPATH=src
 export TOKENIZERS_PARALLELISM=false
 
