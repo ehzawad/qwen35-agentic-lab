@@ -1,0 +1,196 @@
+{
+  "manifest_version": 1,
+  "date": "2026-08-04",
+  "purpose": "Committed deletion manifest for the multifaceted-agentic-pipeline transformation. Every deletion the cleanup stage may perform is enumerated here by exact path. Nothing outside this manifest may be deleted, and no deletion may use a recursive glob. Forward commits on main only; no history rewrite, no force-push, no remote branch/tag deletion.",
+  "preflight": {
+    "pre_cleanup_sha": "9ebe44f6bd687e0a6a489ff6cfcd3770abd3b49f",
+    "branch": "main",
+    "working_tree": "clean, up to date with origin/main",
+    "git_ls_remote": [
+      "9ebe44f6bd687e0a6a489ff6cfcd3770abd3b49f\tHEAD",
+      "9ebe44f6bd687e0a6a489ff6cfcd3770abd3b49f\trefs/heads/main",
+      "36940b367f3dbbe65b6f708067f4410deaf97466\trefs/pull/1/head"
+    ],
+    "historical_record_commits": {
+      "xlam_16x_degradation_result": "95b8326",
+      "full_evidence_and_corpus": "3ab3201"
+    },
+    "notes": "Remote exposes only main plus one PR ref; no tags. All retired artifacts remain recoverable via `git show 9ebe44f6bd687e0a6a489ff6cfcd3770abd3b49f:<path>`."
+  },
+  "tracked_deletions": [
+    {
+      "path": "src/agentlab/reward.py",
+      "reason": "Reward-model run ended near chance accuracy; adapter-only checkpoint silently reinitializes its trained score head on reload, so the artifact is unsafe for reuse."
+    },
+    {
+      "path": "src/agentlab/dpo.py",
+      "reason": "DPO ran as trainer plumbing only; no measured capability claim, no role in the new target."
+    },
+    {
+      "path": "scripts/archive_xlam_comparison.sh",
+      "reason": "Runnable failed-stage code; can overwrite current paired evidence."
+    },
+    {
+      "path": "scripts/eval_sft_only.sh",
+      "reason": "Runnable entry point tied to the failed xlam adapter."
+    },
+    {
+      "path": "scripts/run_distill_chain.sh",
+      "reason": "Superseded by the one multifaceted pipeline orchestration script."
+    },
+    {
+      "path": "scripts/after_chain_verdict.sh",
+      "reason": "Verdict stage of the retired GSM8K chain; the multifaceted verdict stage is a new implementation."
+    },
+    {
+      "path": "data/distill.jsonl",
+      "reason": "Retired GSM8K distillation corpus, not launch data for the new pipeline. Preserved at the pre-cleanup SHA."
+    },
+    {
+      "path": "results/evidence/eval-base.json",
+      "reason": "Retired single-family study evidence; preserved in history at the pre-cleanup SHA."
+    },
+    {
+      "path": "results/evidence/eval-baseconcise.json",
+      "reason": "Retired single-family study evidence; preserved in history at the pre-cleanup SHA."
+    },
+    {
+      "path": "results/evidence/eval-rsgrpo.json",
+      "reason": "Retired single-family study evidence; preserved in history at the pre-cleanup SHA."
+    },
+    {
+      "path": "results/evidence/eval-rssft.json",
+      "reason": "Retired single-family study evidence; preserved in history at the pre-cleanup SHA."
+    },
+    {
+      "path": "results/evidence/eval-sft.json",
+      "reason": "Raw failed-checkpoint (xlam) evidence must not ship at HEAD."
+    },
+    {
+      "path": "results/evidence/trace-base.jsonl",
+      "reason": "Retired single-family study evidence; preserved in history at the pre-cleanup SHA."
+    },
+    {
+      "path": "results/evidence/trace-baseconcise.jsonl",
+      "reason": "Retired single-family study evidence; preserved in history at the pre-cleanup SHA."
+    },
+    {
+      "path": "results/evidence/trace-rsgrpo.jsonl",
+      "reason": "Retired single-family study evidence; preserved in history at the pre-cleanup SHA."
+    },
+    {
+      "path": "results/evidence/trace-rssft.jsonl",
+      "reason": "Retired single-family study evidence; preserved in history at the pre-cleanup SHA."
+    },
+    {
+      "path": "results/evidence/trace-sft.jsonl",
+      "reason": "Raw failed-checkpoint (xlam) evidence must not ship at HEAD."
+    },
+    {
+      "path": "results/verdict.md",
+      "reason": "Promises regeneration from evidence intentionally removed from HEAD; summary moves to docs/EXPERIMENT_HISTORY.md."
+    }
+  ],
+  "tracked_edits_partial_retirement": [
+    {
+      "path": "src/agentlab/data.py",
+      "edit_scope": "Delete _TYPE_MAP, _json_type, _is_optional, _xlam_tool_to_schema, build_sft (xlam loader), and build_preference (UltraFeedback dependency) plus their imports and the xlam references in the build_distill_sft docstring. Keep build_grpo/build_eval only until scenario-manifest loaders replace them in the build stage. Do NOT delete the file."
+    },
+    {
+      "path": "src/agentlab/sft.py",
+      "edit_scope": "Remove the --data {xlam,distill} choice and its harmful xlam default (main() argparse) and xlam-specific comments (e.g. max-length rationale at ~line 64). Keep the trainer; verified multifaceted trajectory data becomes the sole supported input. Do NOT delete the file."
+    },
+    {
+      "path": "src/agentlab/grpo.py",
+      "edit_scope": "Delete the BudgetEnv class (~lines 347-402), the --mode env argparse branch and env-only args (~lines 407-414), and the env-mode dispatch (~lines 483, 505-524) plus the env-mode module docstring section. Keep tools-mode GRPO mechanics and generic environment_factory compatibility for a validated successor environment. Do NOT delete the file."
+    },
+    {
+      "path": "src/agentlab/distill.py",
+      "edit_scope": "Compress xlam-specific rationale to the causal motivation only (terminal/recovery turns are required); generalize from GSM8K to the three task families in the build stage. Do NOT delete the file."
+    },
+    {
+      "path": "Makefile",
+      "edit_scope": "Delete targets: sft (xlam recipe), reward, dpo, grpo-env, chain. Also retire targets that depend on removed stages (eval-sft, verdict, the $(SFT) guard chain and $(DPO) variables) as part of the same edit. Keep verify, trace, serve, and the surviving GRPO/eval plumbing until replaced by the new pipeline targets. Do NOT delete the file."
+    },
+    {
+      "path": "README.md",
+      "edit_scope": "Rewrite, not append: cut the xlam postmortem and stage-tour framing, the RM/DPO story, the BudgetEnv section, and the results-at-a-glance table for the retired study; add the multifaceted target, the one supported command, gates, elicitation-control requirement, and a short provenance paragraph pointing at the pre-cleanup SHA and docs/EXPERIMENT_HISTORY.md. Do NOT delete the file."
+    },
+    {
+      "path": "tests/test_data.py",
+      "edit_scope": "Delete xlam SFT dataset tests (build_sft fixture tests, ~lines 35-81), _xlam_tool_to_schema conversion tests (~lines 158-221), build_preference DPO/RM tests (~lines 84-108) and preference token-prefix/thinking tests (~lines 223-247), and the xlam SFT token-prefix tests (~lines 249-263+). Keep GRPO prompt-dataset tests. Do NOT delete the file."
+    },
+    {
+      "path": "tests/test_config.py",
+      "edit_scope": "Delete DPO config tests (test_dpo_config_has_no_max_prompt_length, test_dpo_config), reward config test (test_reward_config), and class TestBudgetEnv (~lines 229+). Keep GRPO config tests and the reward-function unit tests (correctness/tool_use/format), which the surviving tools-mode GRPO uses. Do NOT delete the file."
+    }
+  ],
+  "local_out_deletions": {
+    "policy": "Delete exactly the enumerated paths below, one by one; never a glob. Everything under out/ is gitignored; these deletions are local-only and practically irreversible without rerunning GPU work. Gate: perform only after the cleanup commits are reviewed, per council removal-mechanics step 6.",
+    "keep": [
+      {"path": "out/qwen35-4b-rssft-lora", "bytes": 1079503329, "reason": "Validated RS-SFT baseline checkpoint (0.920)."},
+      {"path": "out/qwen35-4b-rsgrpo-lora", "bytes": 1080004633, "reason": "Validated RS-GRPO checkpoint (0.930, null vs RS-SFT)."},
+      {"path": "out/chain", "bytes": 3080299, "reason": "Raw chain evidence needed for paired controls in the new work."}
+    ],
+    "delete": [
+      {"path": "out/comparison", "bytes": 293942},
+      {"path": "out/comparison-driver.log", "bytes": 142},
+      {"path": "out/dpo-smoke.log", "bytes": 38247},
+      {"path": "out/eval-base.json", "bytes": 197},
+      {"path": "out/eval-baseconcise.json", "bytes": 203},
+      {"path": "out/eval-baseconcise.log", "bytes": 1502},
+      {"path": "out/eval-rsgrpo.json", "bytes": 222},
+      {"path": "out/eval-rssft.json", "bytes": 220},
+      {"path": "out/eval-sft.json", "bytes": 211},
+      {"path": "out/eval-smoke-base.json", "bytes": 199},
+      {"path": "out/eval-traced-base.json", "bytes": 226},
+      {"path": "out/evalpair-driver.log", "bytes": 361},
+      {"path": "out/final-smoke.log", "bytes": 8239},
+      {"path": "out/grpo-smoke.log", "bytes": 27993},
+      {"path": "out/grpoenv-smoke.log", "bytes": 15353},
+      {"path": "out/qwen35-4b-grpo-env-smoke", "bytes": 1079514938},
+      {"path": "out/qwen35-4b-grpo-lora", "bytes": 4096},
+      {"path": "out/qwen35-4b-sft-lora", "bytes": 1079506478},
+      {"path": "out/rest-smoke.log", "bytes": 2127},
+      {"path": "out/reward-smoke.log", "bytes": 3706},
+      {"path": "out/serve-smoke.log", "bytes": 24715},
+      {"path": "out/setup.log", "bytes": 6514},
+      {"path": "out/sft-smoke.log", "bytes": 9882},
+      {"path": "out/_smoke-dpo", "bytes": 1184020272},
+      {"path": "out/_smoke-grpo", "bytes": 1184049454},
+      {"path": "out/_smoke-merged", "bytes": 9098627015},
+      {"path": "out/_smoke-reward", "bytes": 233856426},
+      {"path": "out/_smoke-sft", "bytes": 1184018956},
+      {"path": "out/trace-base.jsonl", "bytes": 18183},
+      {"path": "out/trace-grpo-verify.jsonl", "bytes": 21815},
+      {"path": "out/traced-eval.log", "bytes": 1225},
+      {"path": "out/_verify-grpo", "bytes": 1184037615},
+      {"path": "out/verify-grpo.log", "bytes": 14557}
+    ],
+    "totals": {
+      "out_total_bytes": 18390713492,
+      "keep_bytes": 2162588261,
+      "delete_bytes": 16228125231
+    }
+  },
+  "scaffold_deletion": {
+    "path": "/mnt/sdb/arafat/ehz/llm/qwen35-a6000-inference-lab",
+    "state": "git init with ZERO commits, no remote, no executable probe scripts; its PROTOCOL.md claims a committed preregistration receipt that does not exist. Deletion is local and irreversible.",
+    "gate": "Delete only AFTER the two durable notes (deferred RM/RLOO Goodhart design incl. the score-head reload blocker, and the inference-limits numbers) are committed in docs/EXPERIMENT_HISTORY.md. That transplant is part of this preflight commit, so the gate is satisfied once this manifest's commit lands.",
+    "files": [
+      {"path": ".gitignore", "bytes": 132},
+      {"path": "LICENSE", "bytes": 11337},
+      {"path": "Makefile", "bytes": 1286},
+      {"path": "PROTOCOL.md", "bytes": 4879},
+      {"path": "README.md", "bytes": 2555},
+      {"path": "docs/DECISIONS.md", "bytes": 2842}
+    ],
+    "note": "The .git directory contains only the empty-repo skeleton (sample hooks, HEAD, config); no objects worth preserving."
+  },
+  "out_of_scope": [
+    "Sibling repo qwen35-gguf-bench (incl. its incomplete branch): do not inspect, rewrite, or delete.",
+    "Any co-tenant artifact, Docker state, or GPU process not started by this workflow.",
+    "Any history rewrite, force-push, or remote branch/tag deletion.",
+    "Any path not explicitly enumerated in this manifest."
+  ]
+}
