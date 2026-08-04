@@ -299,8 +299,10 @@ class TestRetrodictionOnRealData:
     def _load(self, tag):
         from agentlab.analyze import load_tag
 
+        # chain-first: the production verdict's precedence. eval-base.json is
+        # the n=200 rerun, and out/chain holds its matching trace.
         row = load_tag(tag, self.ROOT / "out",
-                       [self.ROOT / "out/comparison", self.ROOT / "out/chain"])
+                       [self.ROOT / "out/chain", self.ROOT / "out/comparison"])
         if row is None or not row.get("_episodes"):
             pytest.skip(f"no local data for {tag}")
         return row
@@ -425,3 +427,16 @@ class TestG5EvidenceRequirement:
         assert "restoration result stands" in out
         assert "NOT supported" not in out
         assert "restored it" not in out
+
+    def test_stale_trace_pairing_is_caught_not_silent(self):
+        # Pairing the n=200 summary with the old n=50 trace (comparison-first
+        # ordering) MUST trip S1. This mispairing happened for real when the
+        # base rerun overwrote eval-base.json; the check is the defence.
+        from agentlab.analyze import load_tag, sanity_checks
+
+        row = load_tag("base", self.ROOT / "out",
+                       [self.ROOT / "out/comparison", self.ROOT / "out/chain"])
+        if row is None or not row.get("_episodes") or row["n"] == row.get("trace_n"):
+            pytest.skip("stale pairing not present on this checkout")
+        assert "S1" in [c for _, c, _ in sanity_checks(row)]
+
