@@ -403,19 +403,29 @@ def report(tags: list[str], out_dir: str = "out", trace_dirs: list[str] | None =
     lines.append("")
 
     # pre-registered gates: PASS / FAIL / SKIP are three different things
-    lines.append("## Gates (registered before launch)")
+    gates_hdr = "## Gates (registered before launch)"
+    if any_bug:
+        gates_hdr += "   [SUSPECT: harness bug flagged above -- see final verdict]"
+    lines.append(gates_hdr)
     passed = failed = skipped = 0
+    failed_names: list[str] = []
     if rssft:
         acc = rssft["acc_k"] / rssft["n"]
         ok = gate("G1 accuracy >= 0.800", acc >= 0.800, f"rssft {acc:.3f}", lines)
         passed, failed = passed + ok, failed + (not ok)
+        if not ok:
+            failed_names.append("G1")
         if "calls_mean" in rssft:
             ok = gate("G2 calls/ep <= 6.0", rssft["calls_mean"] <= 6.0,
                       f"rssft {rssft['calls_mean']:.1f} (base 3.3, broken 50.0)", lines)
             passed, failed = passed + ok, failed + (not ok)
+            if not ok:
+                failed_names.append("G2")
             ok = gate("G3 runaway <= 10%", rssft["runaway_k"] / rssft["trace_n"] <= 0.10,
                       f"{rssft['runaway_k']}/{rssft['trace_n']}", lines)
             passed, failed = passed + ok, failed + (not ok)
+            if not ok:
+                failed_names.append("G3")
         else:
             skipped += 2
             lines.append("  SKIP  G2/G3: no trace found for rssft (locate the trace; not a model result)")
@@ -424,16 +434,30 @@ def report(tags: list[str], out_dir: str = "out", trace_dirs: list[str] | None =
             r_r = rssft["nobox_k"] / rssft["trace_n"]
             ok = gate("G4 no-box < base", r_r < b_r, f"rssft {r_r:.1%} vs base {b_r:.1%}", lines)
             passed, failed = passed + ok, failed + (not ok)
+            if not ok:
+                failed_names.append("G4")
         else:
             skipped += 1
             lines.append("  SKIP  G4: missing no-box data")
     else:
         lines.append("  (rssft not evaluated yet)")
-    if rssft and rsgrpo:
-        ok = gate("G5 rsgrpo >= rssft (directional)",
-                  rsgrpo["acc_k"] / rsgrpo["n"] >= rssft["acc_k"] / rssft["n"],
-                  f"{rsgrpo['acc_k']/rsgrpo['n']:.3f} vs {rssft['acc_k']/rssft['n']:.3f}", lines)
-        passed, failed = passed + ok, failed + (not ok)
+    if "rsgrpo" in tags and rssft:
+        # G5 needs corroborating traces on BOTH sides. A summary json alone is a
+        # self-reported number with no evidence behind it -- the dress rehearsal
+        # produced a full false-success from exactly that state, and the silent
+        # variant (rsgrpo missing entirely, gate never mentioned) was reproduced
+        # against the real output directory. Requested-but-missing is a SKIP.
+        if rsgrpo and rsgrpo.get("_episodes") and rssft.get("_episodes"):
+            ok = gate("G5 rsgrpo >= rssft (directional)",
+                      rsgrpo["acc_k"] / rsgrpo["n"] >= rssft["acc_k"] / rssft["n"],
+                      f"{rsgrpo['acc_k']/rsgrpo['n']:.3f} vs {rssft['acc_k']/rssft['n']:.3f}", lines)
+            passed, failed = passed + ok, failed + (not ok)
+            if not ok:
+                failed_names.append("G5")
+        else:
+            skipped += 1
+            why = "no eval json" if not rsgrpo else "no trace episodes"
+            lines.append(f"  SKIP  G5: rsgrpo {why} -- locate the data; not a model result")
 
     lines.append("")
     lines.append(f"## Verdict: {passed} passed, {failed} failed, {skipped} skipped")
@@ -445,6 +469,10 @@ def report(tags: list[str], out_dir: str = "out", trace_dirs: list[str] | None =
         lines.append("issued. Locate the missing traces and re-run the analyzer.")
     elif rssft and failed == 0:
         lines.append("Single-turn SFT destroyed termination; outcome-filtered multi-turn SFT restored it.")
+    elif rssft and failed_names and set(failed_names) == {"G5"}:
+        lines.append("RS-SFT's own gates (G1-G4) all passed -- the restoration result stands.")
+        lines.append("The additional GRPO stage did not improve on RS-SFT (G5): a real null for")
+        lines.append("the RL add-on on this task, not evidence against RS-SFT.")
     elif rssft:
         lines.append("Harness is clean and data complete, so this is a real model result: the")
         lines.append("RS-SFT hypothesis is NOT supported at these gates. Read the traces first.")

@@ -352,3 +352,76 @@ class TestNotationRescoring:
             e["_ok_rescored"] = bool(e["ok"])
         tools_ok = sum(1 for e in eps if e["_ok_rescored"] and e["n_calls"] > 0)
         assert tools_ok == 1  # the no-tool success does not count
+
+
+class TestG5EvidenceRequirement:
+    """G5 must never evaluate off a self-reported summary alone.
+
+    The dress rehearsal produced a full false-success from eval-rsgrpo.json
+    with no trace, and reproduced the silent variant (rsgrpo absent, gate never
+    mentioned, '0 skipped') against the real output directory.
+    """
+
+    def _write(self, tmp_path, tag, n, acc, episodes=None):
+        import json
+
+        (tmp_path / "out").mkdir(exist_ok=True)
+        (tmp_path / "out" / f"eval-{tag}.json").write_text(json.dumps({
+            "n": n, "accuracy": acc, "tool_use_rate": 1.0,
+            "tool_error_rate": 0.0, "mean_turns": 2.0, "seconds": 1.0, "tag": tag,
+        }))
+        if episodes is not None:
+            (tmp_path / "traces").mkdir(exist_ok=True)
+            with (tmp_path / "traces" / f"trace-{tag}.jsonl").open("w") as fh:
+                for e in episodes:
+                    fh.write(json.dumps({"kind": "episode", **e}) + "\n")
+
+    def _healthy(self, n, k_ok, nobox_failures=True):
+        eps = [_ep(i, n_calls=2) for i in range(k_ok)]
+        # Failures must look like the real base failure mode (truncated, no box)
+        # or G4 (rssft no-box < base no-box) can never pass in a fixture.
+        fail_final = "ran out of budget mid-derivation" if nobox_failures else None
+        eps += [_ep(i, ok=False, n_calls=2, final=fail_final) for i in range(k_ok, n)]
+        return eps
+
+    def test_summary_without_trace_is_a_skip_not_a_pass(self, tmp_path):
+        from agentlab.analyze import report
+
+        self._write(tmp_path, "base", 50, 0.80, self._healthy(50, 40))
+        self._write(tmp_path, "rssft", 50, 0.88, self._healthy(50, 44, nobox_failures=False))
+        self._write(tmp_path, "rsgrpo", 50, 0.93, episodes=None)  # json only
+        out = report(["base", "rssft", "rsgrpo"], str(tmp_path / "out"), [str(tmp_path / "traces")])
+        assert "SKIP  G5" in out and "1 skipped" in out
+        assert "INCOMPLETE DATA" in out
+        assert "restored it" not in out
+
+    def test_missing_rsgrpo_entirely_is_still_a_visible_skip(self, tmp_path):
+        from agentlab.analyze import report
+
+        self._write(tmp_path, "base", 50, 0.80, self._healthy(50, 40))
+        self._write(tmp_path, "rssft", 50, 0.88, self._healthy(50, 44, nobox_failures=False))
+        out = report(["base", "rssft", "rsgrpo"], str(tmp_path / "out"), [str(tmp_path / "traces")])
+        assert "SKIP  G5" in out and "no eval json" in out
+        assert "0 skipped" not in out
+        assert "restored it" not in out
+
+    def test_rsgrpo_not_requested_means_no_g5_bookkeeping(self, tmp_path):
+        from agentlab.analyze import report
+
+        self._write(tmp_path, "base", 50, 0.80, self._healthy(50, 40))
+        self._write(tmp_path, "rssft", 50, 0.88, self._healthy(50, 44, nobox_failures=False))
+        out = report(["base", "rssft"], str(tmp_path / "out"), [str(tmp_path / "traces")])
+        assert "G5" not in out and "0 skipped" in out
+        assert "restored it" in out  # 4-gate experiment may still succeed
+
+    def test_g5_only_failure_is_a_grpo_null_not_an_rssft_indictment(self, tmp_path):
+        from agentlab.analyze import report
+
+        self._write(tmp_path, "base", 50, 0.80, self._healthy(50, 40))
+        self._write(tmp_path, "rssft", 50, 0.88, self._healthy(50, 44, nobox_failures=False))
+        self._write(tmp_path, "rsgrpo", 50, 0.84, self._healthy(50, 42, nobox_failures=False))  # below rssft
+        out = report(["base", "rssft", "rsgrpo"], str(tmp_path / "out"), [str(tmp_path / "traces")])
+        assert "FAIL  G5" in out
+        assert "restoration result stands" in out
+        assert "NOT supported" not in out
+        assert "restored it" not in out
