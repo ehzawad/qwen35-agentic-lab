@@ -193,14 +193,18 @@ def _gsm8k_answer(text: str) -> str:
     return tail.replace(",", "").replace("$", "")
 
 
-def build_grpo(n: int = 1000, split: str = "train", seed: int = 0) -> Dataset:
+def build_grpo(n: int = 1000, split: str = "train", seed: int = 0, offset: int = 0) -> Dataset:
     """Prompt-only set with verifiable ground truth, for tool-using GRPO.
 
     GSM8K is the right shape here: the reward is checkable without a judge, and
     every problem has an arithmetic step the calculator tool can serve.
     """
     raw = load_dataset("openai/gsm8k", "main", split=split)
-    raw = raw.shuffle(seed=seed).select(range(min(n, len(raw))))
+    # `offset` exists so distillation and GRPO can take DISJOINT slices of the
+    # same shuffled train split. Without it both take range(0, n) and GRPO ends
+    # up doing RL on the exact problems the policy was just SFT'd on, which
+    # collapses within-group reward variance and leaves nothing to learn from.
+    raw = raw.shuffle(seed=seed).select(range(offset, min(offset + n, len(raw))))
 
     def to_prompt(ex):
         return {
@@ -241,3 +245,25 @@ if __name__ == "__main__":
         print(f"[grpo] {len(d)} rows, columns={d.column_names}")
         print(json.dumps(d[0], indent=2)[:900])
     print(f"[tools] {len(tool_schemas())} schemas built from the local tool suite")
+
+def build_distill_sft(path: str = "data/distill.jsonl") -> Dataset:
+    """Load the rejection-sampled trajectories written by `agentlab.distill`.
+
+    Same prompt/completion shape as build_sft, so everything downstream is
+    unchanged -- but the completions come from the model's own *successful*
+    multi-turn episodes rather than from single-turn xlam targets, so the corpus
+    contains the terminating turns xlam never had.
+    """
+    import json
+    import pathlib
+
+    p = pathlib.Path(path)
+    if not p.exists():
+        raise FileNotFoundError(
+            f"{p} not found -- run `make distill` first to generate trajectories"
+        )
+    rows = [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not rows:
+        raise ValueError(f"{p} is empty; the acceptance filter kept nothing")
+    return Dataset.from_list(rows, on_mixed_types="use_json")
+

@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 
 from . import env
-from .data import build_sft
+from .data import build_distill_sft, build_sft
 from .peft_cfg import describe, lora_config
 
 
@@ -20,6 +20,10 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=env.MODEL)
     ap.add_argument("--n", type=int, default=4000, help="training examples")
+    ap.add_argument("--data", choices=["xlam", "distill"], default="xlam",
+                    help="xlam = single-turn function calling (degrades the model, see README); "
+                         "distill = rejection-sampled multi-turn trajectories that terminate")
+    ap.add_argument("--distill-path", default="data/distill.jsonl")
     ap.add_argument("--epochs", type=float, default=1.0)
     ap.add_argument("--bsz", type=int, default=4)
     ap.add_argument("--accum", type=int, default=4)
@@ -34,7 +38,8 @@ def main() -> None:
 
     from trl import SFTConfig, SFTTrainer
 
-    ds = build_sft(n=args.n)
+    ds = build_distill_sft(args.distill_path) if args.data == "distill" else build_sft(n=args.n)
+    print(f"[data] source={args.data}")
     split = ds.train_test_split(test_size=0.02, seed=0)
     print(f"[data] train={len(split['train'])} eval={len(split['test'])} cols={ds.column_names}")
 
