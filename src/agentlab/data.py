@@ -16,44 +16,6 @@ from datasets import Dataset, load_dataset
 from .tools import tool_schemas
 
 
-def build_preference(n: int = 3000, split: str = "train_prefs", explicit_prompt: bool = True) -> Dataset:
-    """Preference pairs for reward modelling (implicit) or DPO (explicit).
-
-    The explicit form carries `chat_template_kwargs={"enable_thinking": False}`,
-    and that is not cosmetic. DPOTrainer tokenises the prompt and prompt+chosen
-    separately and then slices:
-
-        output["chosen_ids"] = prompt_chosen_ids[len(prompt_ids):]
-
-    which is only correct if the prompt render is a token prefix of the joint
-    render. With thinking on, Qwen3.5 ends the generation prompt at `<think>\\n`
-    while the completed conversation renders `<think>\\n\\n</think>\\n\\n`, so the
-    prefix property fails on **100%** of rows and the slice cuts in the wrong
-    place. TRL notices and merely logs a warning, then trains on the misaligned
-    completion anyway. Disabling thinking for these rows takes it to 0/8
-    misaligned -- and matches the data, since ultrafeedback responses carry no
-    reasoning traces to learn from in the first place.
-    """
-    raw = load_dataset("HuggingFaceH4/ultrafeedback_binarized", split=split)
-    raw = raw.select(range(min(n, len(raw))))
-
-    def to_explicit(ex):
-        # chosen/rejected arrive as full conversations; strip the shared user turn
-        # so the prompt is stated once rather than duplicated into both branches.
-        return {
-            "prompt": [{"role": "user", "content": ex["prompt"]}],
-            "chosen": [m for m in ex["chosen"] if m["role"] == "assistant"],
-            "rejected": [m for m in ex["rejected"] if m["role"] == "assistant"],
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
-
-    def to_implicit(ex):
-        return {"chosen": ex["chosen"], "rejected": ex["rejected"]}
-
-    fn = to_explicit if explicit_prompt else to_implicit
-    return raw.map(fn, remove_columns=raw.column_names)
-
-
 GRPO_SYSTEM = (
     "You are a careful quantitative assistant. Use the calculator tool for every "
     "arithmetic step rather than doing mental arithmetic. When you have the final "
@@ -137,9 +99,6 @@ if __name__ == "__main__":
     import sys
 
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
-    if which in ("all", "pref"):
-        d = build_preference(n=64)
-        print(f"[pref] {len(d)} rows, columns={d.column_names}")
     if which in ("all", "grpo"):
         d = build_grpo(n=64)
         print(f"[grpo] {len(d)} rows, columns={d.column_names}")

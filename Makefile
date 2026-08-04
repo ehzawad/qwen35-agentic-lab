@@ -21,7 +21,7 @@ RSSFT   := out/$(SLUG)-rssft-lora
 GRPO    := out/$(SLUG)-rsgrpo-lora
 MERGED  := out/$(SLUG)-merged
 
-.PHONY: help setup gpu smoke data inspect dpo reward rs-sft grpo grpo-env grpo-from-base \
+.PHONY: help setup gpu smoke data inspect rs-sft grpo grpo-env grpo-from-base \
         distill chain verdict \
         verify verify-v trace-eval trace-grpo trace-view \
         eval-base eval-rssft eval-grpo merge serve clean
@@ -37,8 +37,6 @@ help:
 	@echo
 	@echo "  distill     rejection-sample verified trajectories from the base model"
 	@echo "  rs-sft      LoRA SFT on the verified distilled trajectories"
-	@echo "  reward      stage 2a: explicit reward model (classical RLHF)"
-	@echo "  dpo         stage 2b: preference alignment (ultrafeedback)"
 	@echo "  grpo        GRPO with real tool execution, continuing the RS-SFT adapter"
 	@echo "  grpo-env    GRPO with an environment-owned reward"
 	@echo "  grpo-from-base  the same GRPO stage from base (comparison arm)"
@@ -75,13 +73,6 @@ data:
 # ---- SFT on verified distilled trajectories ---------------------------------
 rs-sft:
 	$(PY) -m agentlab.sft --model $(MODEL) --distill-path data/distill.jsonl --out $(RSSFT)
-
-# ---- stage 2 ----------------------------------------------------------------
-reward:
-	$(PY) -m agentlab.reward
-
-dpo: $(RSSFT)
-	$(PY) -m agentlab.dpo --model $(MODEL) --adapter $(RSSFT) --out out/$(SLUG)-dpo-lora
 
 # ---- GRPO --------------------------------------------------------------------
 # GRPO continues the RS-SFT adapter: RL can only reinforce behaviour the policy

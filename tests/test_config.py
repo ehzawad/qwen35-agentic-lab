@@ -44,15 +44,6 @@ class TestTrainerSignatures:
 
         assert "vllm_max_model_length" in {f.name for f in dataclasses.fields(GRPOConfig)}
 
-    def test_dpo_config_has_no_max_prompt_length(self):
-        import dataclasses
-
-        from trl import DPOConfig
-
-        fields = {f.name for f in dataclasses.fields(DPOConfig)}
-        assert "max_length" in fields
-        assert "max_prompt_length" not in fields, "TRL re-added it; dpo.py can use it again"
-
     def test_peft_model_plus_peft_config_is_rejected_by_trl(self):
         # The constraint that forces policy_and_peft() to return peft_config=None
         # when continuing an adapter. If TRL ever relaxes it, we want to know.
@@ -74,29 +65,6 @@ class TestStageConfigs:
             save_total_limit=1, report_to=[], packing=False,
         )
         assert cfg.max_length == 2048
-
-    def test_dpo_config(self):
-        from trl import DPOConfig
-
-        cfg = DPOConfig(
-            output_dir="/tmp/_t", num_train_epochs=1.0, per_device_train_batch_size=2,
-            gradient_accumulation_steps=8, learning_rate=5e-6, lr_scheduler_type="cosine",
-            warmup_ratio=0.03, beta=0.1, max_length=1536, bf16=True,
-            gradient_checkpointing=True, logging_steps=10, eval_strategy="steps",
-            eval_steps=100, save_strategy="epoch", save_total_limit=1, report_to=[],
-        )
-        assert cfg.beta == 0.1
-
-    def test_reward_config(self):
-        from trl import RewardConfig
-
-        cfg = RewardConfig(
-            output_dir="/tmp/_t", num_train_epochs=1.0, per_device_train_batch_size=4,
-            gradient_accumulation_steps=4, learning_rate=1e-5, max_length=1024, bf16=True,
-            gradient_checkpointing=True, logging_steps=10, eval_strategy="steps",
-            eval_steps=100, save_strategy="epoch", save_total_limit=1, report_to=[],
-        )
-        assert cfg.max_length == 1024
 
     @pytest.mark.parametrize("mode", ["tools", "env"])
     def test_grpo_config(self, mode):

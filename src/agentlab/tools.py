@@ -143,7 +143,6 @@ _KB: dict[str, str] = {
     "a6000": "NVIDIA RTX A6000: 48 GB GDDR6, 300 W board power, GA102 die.",
     "qwen3.5-4b": "Qwen3.5-4B: 4.7B params, Apache-2.0, 262144-token context, thinking mode on by default.",
     "grpo": "Group Relative Policy Optimization: samples a group of completions per prompt and uses the within-group reward spread as the advantage, so no value network is needed.",
-    "dpo": "Direct Preference Optimization: fits a policy to pairwise preferences directly through a classification loss, skipping explicit reward modelling.",
     "sft": "Supervised fine-tuning: ordinary cross-entropy next-token training on curated demonstrations.",
     "lora": "Low-Rank Adaptation: freezes base weights and trains low-rank update matrices injected into projection layers.",
 }

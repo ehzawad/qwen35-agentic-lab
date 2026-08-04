@@ -1,7 +1,7 @@
 """Shared LoRA configuration.
 
-One definition so the SFT adapter, the DPO adapter and the GRPO adapter are
-rank-compatible and can be stacked or compared without surprises.
+One definition so the SFT adapter and the GRPO adapter are rank-compatible and
+can be stacked or compared without surprises.
 """
 
 from __future__ import annotations

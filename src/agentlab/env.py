@@ -26,7 +26,6 @@ MODEL = os.environ.get("QWEN_MODEL", DEFAULT_MODEL)
 SLUG = MODEL.split("/")[-1].replace(".", "").lower()
 
 SFT_DIR = OUT / f"{SLUG}-sft-lora"
-DPO_DIR = OUT / f"{SLUG}-dpo-lora"
 GRPO_DIR = OUT / f"{SLUG}-grpo-lora"
 MERGED_DIR = OUT / f"{SLUG}-merged"
 

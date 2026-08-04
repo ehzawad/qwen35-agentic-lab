@@ -1,7 +1,7 @@
 [project]
 name = "qwen35-agentic-lab"
 version = "0.1.0"
-description = "Post-training path for a small agentic model: SFT, reward modelling, DPO, GRPO with real tool execution, eval and serving."
+description = "Verifiable agentic pipeline for a small tool-using model: distilled SFT, GRPO with real tool execution, eval and serving."
 requires-python = ">=3.10,<3.15"
 dependencies = [
     "vllm==0.25.1",       # pins torch==2.11.0; TRL supports vllm 0.17.0-0.25.1
