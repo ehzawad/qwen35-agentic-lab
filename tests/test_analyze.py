@@ -1,35 +1,44 @@
 """The analyzer must separate 'model is weak' from 'harness is broken'.
 
-Two kinds of test:
+Three kinds of test:
   * statistics -- the formulas do what their names claim, including edges;
-  * retrodiction -- every sanity check fires on a synthetic version of a bug
-    this session actually hit, and stays SILENT on real healthy data and on the
-    real pathological-but-honestly-measured checkpoint. A weak model is a
-    result; only a broken harness is a defect.
+  * discrimination -- each sanity check fires on a synthetic version of a bug
+    that actually happened, and stays SILENT on a genuinely weak-but-honest
+    model. A weak model is a result; only a broken harness is a defect;
+  * retrodiction -- the checks are quiet on the real runs already on disk.
 """
 
 from __future__ import annotations
 
-import json
 import pathlib
 
 import pytest
 
-from agentlab.analyze import mde, sanity_checks, two_prop_test, wilson
+from agentlab.analyze import (
+    _dedupe,
+    mcnemar,
+    mde,
+    paired_compare,
+    sanity_checks,
+    two_prop_test,
+    wilson,
+)
 
 
 class TestWilson:
     def test_matches_known_value(self):
-        # 40/50: canonical Wilson bounds ~ [0.670, 0.888]
         p, lo, hi = wilson(40, 50)
         assert p == pytest.approx(0.8)
         assert lo == pytest.approx(0.6699, abs=2e-3)
         assert hi == pytest.approx(0.8884, abs=2e-3)
 
     def test_edges_stay_in_unit_interval(self):
-        for k, n in ((0, 20), (20, 20), (1, 1), (0, 1)):
+        # (10,10) and (50,50) previously returned hi one ulp BELOW p.
+        for k, n in ((0, 20), (20, 20), (1, 1), (0, 1), (10, 10), (50, 50), (0, 5)):
             p, lo, hi = wilson(k, n)
             assert 0.0 <= lo <= p <= hi <= 1.0
+        assert wilson(10, 10)[2] == 1.0
+        assert wilson(0, 5)[1] == 0.0
 
     def test_zero_n_is_uninformative_not_a_crash(self):
         assert wilson(0, 0) == (0.0, 0.0, 1.0)
@@ -42,12 +51,12 @@ class TestWilson:
 
 class TestTwoProp:
     def test_no_difference_gives_p_one(self):
-        z, p = two_prop_test(40, 50, 160, 200)  # both 0.8
+        z, p = two_prop_test(40, 50, 160, 200)
         assert z == pytest.approx(0.0, abs=1e-9)
         assert p == pytest.approx(1.0)
 
     def test_huge_difference_is_significant(self):
-        z, p = two_prop_test(1, 20, 40, 50)  # 0.05 vs 0.80
+        z, p = two_prop_test(1, 20, 40, 50)
         assert p < 1e-6 and z < 0
 
     def test_symmetry(self):
@@ -64,69 +73,134 @@ class TestTwoProp:
         assert mde(200, 200, 0.8) < mde(50, 50, 0.8) < mde(20, 20, 0.8)
 
 
-# ---------------------------------------------------------------------------
-# retrodiction: bug signatures from this session, as fixtures
-# ---------------------------------------------------------------------------
+class TestMcNemar:
+    def test_no_discordance_is_no_evidence(self):
+        assert mcnemar(0, 0) == (0.0, 1.0)
 
-def _row(n, episodes, accuracy=None, tool_use=None):
+    def test_resolves_what_the_unpaired_test_cannot(self):
+        # The regime this experiment actually sits in: n=200 per arm, base
+        # 160/200 (0.800) vs 170/200 (0.850), with the improvement concentrated
+        # in 12 discordant pairs (b=1, c=11). Paired resolves it at p=0.006;
+        # the unpaired test sees nothing at p=0.19 and would report "no
+        # significant difference" for a real +5pp gain.
+        _, p_paired = mcnemar(1, 11)
+        _, p_unpaired = two_prop_test(170, 200, 160, 200)
+        assert p_paired < 0.05 <= p_unpaired, (p_paired, p_unpaired)
+
+    def test_exact_branch_is_more_conservative_than_the_normal_approx(self):
+        # b=1,c=7: normal approx gives ~0.034, the exact binomial ~0.070. The
+        # exact one is used below n=25 precisely because it does not overstate.
+        import math
+
+        _, p_exact = mcnemar(1, 7)
+        z_norm = (7 - 1) / math.sqrt(8)
+        p_norm = math.erfc(abs(z_norm) / math.sqrt(2))
+        assert p_exact > p_norm
+
+    def test_direction_follows_c_minus_b(self):
+        assert mcnemar(1, 9)[0] > 0   # second condition better
+        assert mcnemar(9, 1)[0] < 0
+
+    def test_exact_and_normal_branches_agree_in_sign(self):
+        assert mcnemar(2, 20)[0] > 0 and mcnemar(5, 40)[0] > 0
+
+
+def _row(n, episodes, accuracy=None, tool_use=None, dupes=0):
     ok_k = sum(1 for e in episodes if e.get("ok"))
     acc = accuracy if accuracy is not None else (ok_k / len(episodes) if episodes else 0)
     used = sum(1 for e in episodes if e.get("n_calls", 0) > 0)
     tu = tool_use if tool_use is not None else (used / len(episodes) if episodes else 0)
     return {
-        "n": n, "acc_k": round(acc * n),
+        "n": n, "acc_k": round(acc * n), "dupes": dupes,
         "summary": {"n": n, "accuracy": acc, "tool_use_rate": tu},
         "_episodes": episodes,
     }
 
 
-def _ep(i, ok=True, final=r"the answer is \boxed{5}", n_calls=2, predicted=5.0, expected=5.0):
+def _ep(i, ok=True, final=None, n_calls=2, predicted=None, expected=None, gt=None):
+    """A self-consistent episode for problem i, unless overridden."""
+    gt = gt if gt is not None else str(i)
+    val = float(gt)
+    if final is None:
+        final = f"the answer is \\boxed{{{gt if ok else int(val) + 1}}}"
+    pred = predicted if predicted is not None else (val if ok else val + 1)
+    exp = expected if expected is not None else val
     return {"index": i, "ok": ok, "final": final, "n_calls": n_calls,
-            "rewards": {"predicted": predicted, "expected": expected}}
+            "ground_truth": gt, "rewards": {"predicted": pred, "expected": exp}}
 
 
 def _codes(issues, level=None):
     return [c for lv, c, _ in issues if level is None or lv == level]
 
 
-class TestSanitySignatures:
+class TestDiscrimination:
     def test_healthy_run_is_clean(self):
-        # Finals must be distinct per problem, as they are in a real run --
-        # identical finals across a run is itself one of the bug signatures.
-        eps = [_ep(i, final=f"the answer is \\boxed{{{i}}}", predicted=float(i), expected=float(i))
-               for i in range(30)]
+        eps = [_ep(i) for i in range(30)]
         eps += [_ep(i, ok=False, final=f"went wrong at step {i}") for i in range(30, 40)]
         assert sanity_checks(_row(40, eps)) == []
 
     def test_weak_model_is_NOT_flagged(self):
-        # 5% accuracy with working parsing/scoring: a result, not a defect.
+        # 5% accuracy, working parsing and scoring: a result, not a defect.
         eps = [_ep(0)] + [_ep(i, ok=False, final=f"wandering text {i}", n_calls=50)
                           for i in range(1, 20)]
         assert _codes(sanity_checks(_row(20, eps)), "BUG") == []
+
+    # --- S0/S1: trace integrity -------------------------------------------
+    def test_S0_duplicate_indices_warn_and_dedupe_keeps_last(self):
+        eps = [_ep(0, n_calls=1), _ep(0, n_calls=3)] + [_ep(i) for i in range(1, 20)]
+        deduped, dupes = _dedupe(eps)
+        assert dupes == 1 and len(deduped) == 20
+        assert deduped[0]["n_calls"] == 3, "the rerun supersedes the killed run"
+        issues = sanity_checks(_row(20, deduped, dupes=dupes))
+        assert "S0" in _codes(issues) and _codes(issues, "BUG") == []
 
     def test_S1_dropped_episodes(self):
         eps = [_ep(i) for i in range(10)]
         assert "S1" in _codes(sanity_checks(_row(50, eps, accuracy=1.0)), "BUG")
 
+    def test_S1_off_by_one_now_fires(self):
+        # The old +/-1 slack admitted exactly the duplicate-append artifact.
+        eps = [_ep(i) for i in range(49)]
+        assert "S1" in _codes(sanity_checks(_row(50, eps, accuracy=1.0)), "BUG")
+
+    # --- S2: scoring paths must agree -------------------------------------
     def test_S2_scoring_paths_disagree(self):
-        eps = [_ep(i) for i in range(20)]                       # trace says 100%
+        eps = [_ep(i) for i in range(20)]
         assert "S2" in _codes(sanity_checks(_row(20, eps, accuracy=0.5)), "BUG")
 
-    def test_S3_scorer_blind(self):
-        # The GRPO-zero shape: boxes present, accuracy exactly 0.
-        eps = [_ep(i, ok=False) for i in range(20)]             # finals DO contain boxes
-        assert "S3" in _codes(sanity_checks(_row(20, eps, accuracy=0.0)), "BUG")
+    # --- S3: scorer-blind, at ANY accuracy --------------------------------
+    def test_S3_fires_when_boxed_equals_gt_but_scored_wrong(self):
+        eps = [_ep(i) for i in range(14)]
+        eps += [_ep(i, ok=False, final=f"the answer is \\boxed{{{i}}}",
+                    predicted=float(i), expected=float(i)) for i in range(14, 20)]
+        issues = sanity_checks(_row(20, eps))
+        assert "S3" in _codes(issues, "BUG") or "S5" in _codes(issues, "BUG")
 
-    def test_S3_warns_when_no_boxes_at_all(self):
-        eps = [_ep(i, ok=False, final="rambling") for i in range(20)]
+    def test_S3_honest_zero_scorer_is_not_a_bug(self):
+        # Always answers 42, always wrong: catastrophic RESULT, no harness bug.
+        eps = [_ep(i, ok=False, final=r"the answer is \boxed{42}", gt=str(1000 + i),
+                   predicted=42.0, expected=float(1000 + i)) for i in range(20)]
+        issues = sanity_checks(_row(20, eps, accuracy=0.0))
+        assert _codes(issues, "BUG") == []
+        assert "S3" in _codes(issues, "WARN")
+
+    def test_S3_no_boxes_at_zero_warns_only(self):
+        eps = [_ep(i, ok=False, final=f"rambling {i}") for i in range(20)]
         issues = sanity_checks(_row(20, eps, accuracy=0.0))
         assert "S3" in _codes(issues, "WARN") and "S3" not in _codes(issues, "BUG")
 
-    def test_S4_parser_blind(self):
-        # The XML-vs-JSON shape: tools offered, zero calls observed.
-        eps = [_ep(i, n_calls=0) for i in range(20)]
+    # --- S4: parser-blind needs corroboration -----------------------------
+    def test_S4_fires_only_with_visible_tool_syntax(self):
+        eps = [_ep(i, ok=False, n_calls=0,
+                   final=f"<tool_call>\n<function=calculator>\n{i}") for i in range(20)]
         assert "S4" in _codes(sanity_checks(_row(20, eps, tool_use=0.0)), "BUG")
 
+    def test_S4_honest_no_tool_collapse_is_a_warn(self):
+        eps = [_ep(i, ok=False, n_calls=0, final=f"just prose {i}") for i in range(20)]
+        issues = sanity_checks(_row(20, eps, tool_use=0.0))
+        assert "S4" in _codes(issues, "WARN") and "S4" not in _codes(issues, "BUG")
+
+    # --- S5: impossible states, both directions ---------------------------
     def test_S5_ok_with_empty_final(self):
         eps = [_ep(0, final="   ")] + [_ep(i) for i in range(1, 12)]
         assert "S5" in _codes(sanity_checks(_row(12, eps)), "BUG")
@@ -135,14 +209,86 @@ class TestSanitySignatures:
         eps = [_ep(0, predicted=5.0, expected=7.0)] + [_ep(i) for i in range(1, 12)]
         assert "S5" in _codes(sanity_checks(_row(12, eps)), "BUG")
 
-    def test_S6_mass_duplicate_finals(self):
-        eps = [_ep(i, final=r"identical \boxed{5}") for i in range(15)] + \
-              [_ep(i, final=f"unique {i} \\boxed{{5}}") for i in range(15, 20)]
-        assert "S6" in _codes(sanity_checks(_row(20, eps)), "BUG")
+    def test_S5_inverse_not_ok_but_numbers_agree(self):
+        eps = [_ep(0, ok=False, final="text with no box", predicted=5.0, expected=5.0)]
+        eps += [_ep(i) for i in range(1, 12)]
+        assert "S5" in _codes(sanity_checks(_row(12, eps)), "BUG")
+
+    # --- S6/S7 ------------------------------------------------------------
+    def test_S6_mass_duplicate_finals_warns(self):
+        # WARN not BUG: a collapsed policy and an indexing fault look identical
+        # in the trace, so this flags for inspection rather than vetoing.
+        eps = [_ep(i, final=r"identical \boxed{5}") for i in range(15)]
+        eps += [_ep(i, final=f"unique {i} \\boxed{{{i}}}") for i in range(15, 20)]
+        assert "S6" in _codes(sanity_checks(_row(20, eps)), "WARN")
 
     def test_S7_summary_trace_tool_use_mismatch(self):
-        eps = [_ep(i, n_calls=2) for i in range(20)]            # trace: 100% use
+        eps = [_ep(i, n_calls=2) for i in range(20)]
         assert "S7" in _codes(sanity_checks(_row(20, eps, tool_use=0.5)), "BUG")
+
+
+class TestPairedCompare:
+    def test_joins_on_index_and_counts_discordance(self):
+        a = [_ep(i, ok=(i < 8)) for i in range(20)]
+        b = [_ep(i, ok=(i < 14)) for i in range(20)]
+        out = paired_compare(a, b)
+        assert out["n_pairs"] == 20 and out["b"] == 0 and out["c"] == 6
+        assert out["z"] > 0
+
+    def test_returns_none_when_too_little_overlap(self):
+        assert paired_compare([_ep(i) for i in range(5)], [_ep(i) for i in range(5)]) is None
+
+
+class TestReportSemantics:
+    """A skipped gate is not a failed gate, and a failed gate is not success."""
+
+    def _write(self, tmp_path, tag, n, acc, episodes=None, tool_use=1.0):
+        import json
+
+        (tmp_path / "out").mkdir(exist_ok=True)
+        (tmp_path / "out" / f"eval-{tag}.json").write_text(json.dumps({
+            "n": n, "accuracy": acc, "tool_use_rate": tool_use,
+            "tool_error_rate": 0.0, "mean_turns": 2.5, "seconds": 1.0, "tag": tag,
+        }))
+        if episodes is not None:
+            (tmp_path / "traces").mkdir(exist_ok=True)
+            with (tmp_path / "traces" / f"trace-{tag}.jsonl").open("w") as fh:
+                for e in episodes:
+                    fh.write(json.dumps({"kind": "episode", **e}) + "\n")
+
+    def test_failed_gate_never_prints_the_success_line(self, tmp_path):
+        from agentlab.analyze import report
+
+        base_eps = [_ep(i, ok=(i < 40)) for i in range(50)]
+        # rssft below the 0.800 gate but behaviourally healthy
+        rs_eps = [_ep(i, ok=(i < 37), n_calls=3) for i in range(50)]
+        self._write(tmp_path, "base", 50, 0.80, base_eps)
+        self._write(tmp_path, "rssft", 50, 0.74, rs_eps)
+        out = report(["base", "rssft"], str(tmp_path / "out"), [str(tmp_path / "traces")])
+        assert "FAIL  G1" in out
+        assert "restored it" not in out, "success narrative printed despite a failed gate"
+
+    def test_missing_trace_is_skipped_not_failed(self, tmp_path):
+        from agentlab.analyze import report
+
+        self._write(tmp_path, "rssft", 200, 0.84, episodes=None)
+        out = report(["rssft"], str(tmp_path / "out"), [str(tmp_path / "traces")])
+        assert "SKIP" in out
+        assert "0 failed" in out
+        assert "INCOMPLETE DATA" in out
+        assert "NOT supported" not in out, "a missing file was reported as a model result"
+
+    def test_all_gates_passing_prints_success(self, tmp_path):
+        from agentlab.analyze import report
+
+        base_eps = [_ep(i, ok=(i < 40), n_calls=3) for i in range(50)]
+        base_eps = [{**e, "final": e["final"] if e["ok"] else "no box"} for e in base_eps]
+        rs_eps = [_ep(i, ok=(i < 44), n_calls=3) for i in range(50)]
+        self._write(tmp_path, "base", 50, 0.80, base_eps)
+        self._write(tmp_path, "rssft", 50, 0.88, rs_eps)
+        out = report(["base", "rssft"], str(tmp_path / "out"), [str(tmp_path / "traces")])
+        assert "0 failed" in out and "0 skipped" in out
+        assert "restored it" in out
 
 
 class TestRetrodictionOnRealData:
@@ -153,12 +299,13 @@ class TestRetrodictionOnRealData:
     def _load(self, tag):
         from agentlab.analyze import load_tag
 
-        row = load_tag(tag, self.ROOT / "out", [self.ROOT / "out/comparison", self.ROOT / "out/chain"])
+        row = load_tag(tag, self.ROOT / "out",
+                       [self.ROOT / "out/comparison", self.ROOT / "out/chain"])
         if row is None or not row.get("_episodes"):
             pytest.skip(f"no local data for {tag}")
         return row
 
-    def test_real_base_run_is_clean(self):
+    def test_real_base_run_has_no_harness_bug(self):
         assert _codes(sanity_checks(self._load("base")), "BUG") == []
 
     def test_real_broken_sft_run_is_weak_not_buggy(self):
