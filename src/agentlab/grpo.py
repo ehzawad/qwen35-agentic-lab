@@ -119,11 +119,11 @@ def _tool_names(completion) -> list[str]:
     return names
 
 
-def _numeric(s: str):
-    try:
-        return float(str(s).strip().replace(",", "").replace("$", ""))
-    except (TypeError, ValueError):
-        return None
+def _numeric(s):
+    from .chat import numeric_answer
+
+    return numeric_answer(s)
+
 
 
 # A failed tool reaches us in two different shapes and both must be penalised:

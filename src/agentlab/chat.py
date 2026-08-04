@@ -193,3 +193,27 @@ def _decode(proc, ids) -> str:
     # text in this template, so the call survives while <|im_end|>/<|endoftext|> go.
     tok = getattr(proc, "tokenizer", proc)
     return tok.decode(ids, skip_special_tokens=True).strip()
+
+_LATEX_STRIP = re.compile(r"\\(?:%|\$|,|;|!|\s)|\\text\{([^{}]*)\}")
+
+
+def numeric_answer(s) -> float | None:
+    """Parse a model answer to a float, tolerating the notation models emit.
+
+    The scorer previously rejected `\\boxed{24\\%}` against ground truth 24 --
+    a real base-eval episode scored wrong purely on notation (found by review,
+    verified in the trace). Strips LaTeX percent/dollar/space escapes and
+    \\text{} wrappers, then plain %, $, commas and spaces. Returns None when no
+    number remains.
+    """
+    if s is None:
+        return None
+    t = str(s)
+    t = _LATEX_STRIP.sub(lambda m: m.group(1) or "", t)
+    t = t.replace("%", "").replace("$", "").replace(",", "").replace(" ", "").strip()
+    t = t.rstrip("\\.")
+    try:
+        return float(t)
+    except ValueError:
+        return None
+

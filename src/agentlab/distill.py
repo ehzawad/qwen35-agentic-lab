@@ -50,10 +50,10 @@ def _save(convos, path: str) -> None:
 
 
 def _numeric(s):
-    try:
-        return float(str(s).strip().replace(",", "").replace("$", ""))
-    except (TypeError, ValueError):
-        return None
+    from .chat import numeric_answer
+
+    return numeric_answer(s)
+
 
 
 def generate(model_id: str, n_problems: int, k: int, max_turns: int,
@@ -227,8 +227,10 @@ def to_sft_rows(traj: dict) -> list[dict]:
     prompt, and the committed final answer is the only completion. Loss lands on
     the termination decision and nothing else.
 
-    Balancing the accepted set across call counts is what stops this teaching
-    "always stop after exactly one result" -- see `main`.
+    The accepted set is NOT balanced across call counts (the per-problem cap
+    only limits duplicates), so it skews toward short paths -- 48% one-call in
+    the real corpus. A reviewer correctly flagged the earlier comment here that
+    claimed otherwise. The measured effect is calls/ep 1.4 vs base 3.3.
     """
     msgs = traj["messages"]
     # index of the final assistant turn (the committed answer)

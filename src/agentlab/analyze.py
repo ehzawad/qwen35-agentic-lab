@@ -45,10 +45,10 @@ _BOXED_RE = re.compile(r"\\boxed\{([^{}]*)\}")
 
 
 def _numeric(s):
-    try:
-        return float(str(s).strip().replace(",", "").replace("$", "").replace(" ", ""))
-    except (TypeError, ValueError):
-        return None
+    from .chat import numeric_answer
+
+    return numeric_answer(s)
+
 
 
 def _boxed_matches_gt(episode: dict) -> bool | None:
@@ -128,8 +128,11 @@ def mde(n1: int, n2: int, p_base: float) -> float:
 
 def paired_compare(eps_a: list[dict], eps_b: list[dict]) -> dict | None:
     """McNemar over episodes joined by index; None when nothing aligns."""
-    by_a = {e.get("index"): bool(e.get("ok")) for e in eps_a if e.get("index") is not None}
-    by_b = {e.get("index"): bool(e.get("ok")) for e in eps_b if e.get("index") is not None}
+    def _ok(e):
+        return bool(e.get("_ok_rescored", e.get("ok")))
+
+    by_a = {e.get("index"): _ok(e) for e in eps_a if e.get("index") is not None}
+    by_b = {e.get("index"): _ok(e) for e in eps_b if e.get("index") is not None}
     common = sorted(set(by_a) & set(by_b))
     if len(common) < 10:
         return None
@@ -198,6 +201,23 @@ def load_tag(tag: str, out_dir: pathlib.Path, trace_dirs: list[pathlib.Path]) ->
         row["runaway_k"] = sum(1 for c in calls if c > 10)
         row["nobox_k"] = sum(
             1 for e in episodes if not e.get("ok") and "boxed" not in str(e.get("final", ""))
+        )
+        # Rescore every episode with the corrected normalizer. Review found a
+        # real base episode answering \boxed{24\%} against ground truth 24,
+        # scored wrong purely on notation. Gates and the paired test use this
+        # uniform rescoring; the original ok flags are kept for the sanity layer,
+        # which audits the harness that wrote the file.
+        for e in episodes:
+            m = _boxed_matches_gt(e)
+            e["_ok_rescored"] = bool(e.get("ok")) if m is None else m
+        row["rescored_k"] = sum(1 for e in episodes if e["_ok_rescored"])
+        row["corrections"] = sum(
+            1 for e in episodes if e["_ok_rescored"] != bool(e.get("ok"))
+        )
+        # Referee metric: correct AND actually used a tool. 0.920 with 16
+        # no-tool successes is a different claim than 0.920 tool-compliant.
+        row["tools_ok_k"] = sum(
+            1 for e in episodes if e["_ok_rescored"] and e.get("n_calls", 0) > 0
         )
         row["trace_n"] = len(episodes)
         row["_episodes"] = episodes
@@ -327,15 +347,24 @@ def report(tags: list[str], out_dir: str = "out", trace_dirs: list[str] | None =
     rows = {t: r for t in tags if (r := load_tag(t, out_p, dirs))}
 
     lines = ["# Comparison verdict", ""]
-    hdr = f"{'ckpt':<8}{'accuracy (95% CI)':>26}{'calls/ep':>10}{'runaway':>10}{'no-box':>9}{'n':>6}"
+    hdr = (f"{'ckpt':<8}{'accuracy (95% CI)':>26}{'calls/ep':>10}{'runaway':>10}"
+           f"{'no-box':>9}{'tool-ok':>9}{'n':>6}")
     lines += [hdr, "-" * len(hdr)]
     for t, r in rows.items():
+        if "rescored_k" in r:
+            r["acc_k"] = r["rescored_k"]  # gates/CIs on uniformly corrected scoring
         acc = fmt_ci(r["acc_k"], r["n"])
         calls = f"{r.get('calls_mean', float('nan')):.1f}" if "calls_mean" in r else "-"
         run = (f"{r['runaway_k']}/{r['trace_n']}" if "runaway_k" in r else "-")
         nob = (f"{r['nobox_k']}/{r['trace_n']}" if "nobox_k" in r else "-")
-        lines.append(f"{t:<8}{acc:>26}{calls:>10}{run:>10}{nob:>9}{r['n']:>6}")
+        tok = (f"{r['tools_ok_k']/r['trace_n']:.3f}" if "tools_ok_k" in r else "-")
+        lines.append(f"{t:<8}{acc:>26}{calls:>10}{run:>10}{nob:>9}{tok:>9}{r['n']:>6}")
     lines.append("")
+    corr = {t: r["corrections"] for t, r in rows.items() if r.get("corrections")}
+    if corr:
+        lines.append("rescoring: " + ", ".join(f"{t}: {k} episode(s) corrected" for t, k in corr.items())
+                     + "  (notation-tolerant normalizer; original flags kept for the sanity layer)")
+        lines.append("")
 
     # Harness sanity FIRST. A "weak model" verdict is only meaningful once these
     # are clean; a BUG here means fix the harness, not blame the model.

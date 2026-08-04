@@ -311,3 +311,44 @@ class TestRetrodictionOnRealData:
     def test_real_broken_sft_run_is_weak_not_buggy(self):
         # The 0.050 checkpoint: catastrophically bad AND honestly measured.
         assert _codes(sanity_checks(self._load("sft")), "BUG") == []
+
+
+class TestNotationRescoring:
+    """A right answer in the wrong notation must not score wrong."""
+
+    def test_normalizer_accepts_model_notation(self):
+        from agentlab.chat import numeric_answer
+
+        for s, want in ((r"24\%", 24.0), ("24%", 24.0), (r"\$50", 50.0),
+                        ("1,234", 1234.0), (r"\text{42}", 42.0), ("abc", None)):
+            assert numeric_answer(s) == want, s
+
+    def test_real_base_episode_38_is_corrected(self):
+        # The episode the referee found: gt='24', boxed='24\%', scored wrong.
+        from agentlab.analyze import load_tag
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        row = load_tag("base", root / "out", [root / "out/comparison", root / "out/chain"])
+        if row is None or not row.get("_episodes"):
+            pytest.skip("no local base data")
+        ep = {e["index"]: e for e in row["_episodes"]}.get(38)
+        if ep is None or "24" not in str(ep.get("final", "")):
+            pytest.skip("trace does not contain the episode")
+        assert ep.get("ok") is False and ep["_ok_rescored"] is True
+        assert row["corrections"] >= 1
+        assert row["rescored_k"] == sum(1 for e in row["_episodes"] if e["_ok_rescored"])
+
+    def test_paired_compare_uses_rescored_flags(self):
+        eps_a = [dict(_ep(i), _ok_rescored=(i < 10)) for i in range(20)]
+        eps_b = [dict(_ep(i), _ok_rescored=(i < 15)) for i in range(20)]
+        out = paired_compare(eps_a, eps_b)
+        assert out["b"] == 0 and out["c"] == 5
+
+    def test_tool_compliant_accuracy_counts_only_tool_using_successes(self):
+        from agentlab.analyze import load_tag  # noqa: F401  (shape covered above)
+
+        eps = [_ep(0, n_calls=0), _ep(1, n_calls=2), _ep(2, ok=False, n_calls=2)]
+        for e in eps:
+            e["_ok_rescored"] = bool(e["ok"])
+        tools_ok = sum(1 for e in eps if e["_ok_rescored"] and e["n_calls"] > 0)
+        assert tools_ok == 1  # the no-tool success does not count

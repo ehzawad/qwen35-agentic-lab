@@ -31,10 +31,10 @@ from .tools import tool_schemas
 
 
 def _numeric(s):
-    try:
-        return float(str(s).strip().replace(",", "").replace("$", ""))
-    except (TypeError, ValueError):
-        return None
+    from .chat import numeric_answer
+
+    return numeric_answer(s)
+
 
 
 def evaluate(model, proc, n: int, max_turns: int, max_new_tokens: int,
