@@ -387,6 +387,10 @@ def main() -> None:
     ap.add_argument("--adapter", default=None, help="SFT adapter to start the policy from")
     ap.add_argument("--mode", choices=["tools", "env"], default="tools")
     ap.add_argument("--n", type=int, default=1000, help="prompts, --mode tools only")
+    ap.add_argument("--grpo-offset", type=int, default=0,
+                    help="start index into the shuffled train split; must NOT overlap the "
+                         "slice used for distillation, or RL trains on problems already SFT'd "
+                         "and within-group reward variance collapses")
     ap.add_argument("--max-steps", type=int, default=200,
                     help="--mode env only: required, since a procedural env has no dataset length")
     ap.add_argument("--epochs", type=float, default=1.0)
@@ -480,7 +484,7 @@ def main() -> None:
     )
 
     if args.mode == "tools":
-        ds = build_grpo(n=args.n)
+        ds = build_grpo(n=args.n, offset=args.grpo_offset)
         print(f"[data] {len(ds)} prompts, cols={ds.column_names}")
         print(f"[tools] {', '.join(t.__name__ for t in TOOLS)}")
         trainer = GRPOTrainer(
