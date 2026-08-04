@@ -29,7 +29,7 @@ import json
 import pathlib
 
 from . import env
-from .chat import boxed_answer, parse_tool_calls
+from .chat import boxed_answer, parse_tool_calls, strip_thinking
 
 # strips the tool-call block so the assistant's prose can be kept separately
 _TOOL_CALL_BLOCK = __import__('re').compile(r'<tool_call>.*?(?:</tool_call>|$)', __import__('re').DOTALL)
@@ -119,8 +119,16 @@ def generate(model_id: str, n_problems: int, k: int, max_turns: int,
                 # the very habit that causes most base failures -- back in.
                 c["done"] = True
                 c["truncated"] = comp.finish_reason == "length"
-                c["final"] = "" if c["truncated"] else text.strip()
-                c["messages"].append({"role": "assistant", "content": text.strip()})
+                # Sanitise BEFORE storing, and store the same text in both sinks.
+                # The Qwen template splits assistant content on </think> and
+                # rebuilds around it, so a stray tag in the final answer breaks
+                # the token-prefix property SFTTrainer's completion mask depends
+                # on -- and TRL only logs a warning before training on the
+                # misaligned span. to_sft_rows trains on the MESSAGE, so
+                # sanitising traj["final"] alone would not be enough.
+                clean = strip_thinking(text).strip()
+                c["final"] = "" if c["truncated"] else clean
+                c["messages"].append({"role": "assistant", "content": clean})
                 continue
             # Keep the model's own prose next to the call. Dropping it would make
             # every intermediate turn byte-identical to the xlam shape this run
@@ -175,6 +183,10 @@ def accept(traj: dict, max_calls: int, max_final_tokens: int = 128,
         return False, "truncated_final"
     if not traj["final"]:
         return False, "no_final"
+    # Visibility guard. If a stray tag ever survives sanitisation it shows up in
+    # the rejection histogram instead of silently corrupting one row's labels.
+    if "</think>" in traj["final"]:
+        return False, "stray_think"
     got, want = _numeric(boxed_answer(traj["final"]) or ""), _numeric(traj["gt"])
     if got is None:
         return False, "no_box"
