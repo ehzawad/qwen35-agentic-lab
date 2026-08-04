@@ -193,7 +193,8 @@ def _gsm8k_answer(text: str) -> str:
     return tail.replace(",", "").replace("$", "")
 
 
-def build_grpo(n: int = 1000, split: str = "train", seed: int = 0, offset: int = 0) -> Dataset:
+def build_grpo(n: int = 1000, split: str = "train", seed: int = 0, offset: int = 0,
+               system_suffix: str = "") -> Dataset:
     """Prompt-only set with verifiable ground truth, for tool-using GRPO.
 
     GSM8K is the right shape here: the reward is checkable without a judge, and
@@ -207,9 +208,10 @@ def build_grpo(n: int = 1000, split: str = "train", seed: int = 0, offset: int =
     raw = raw.shuffle(seed=seed).select(range(offset, min(offset + n, len(raw))))
 
     def to_prompt(ex):
+        sys_msg = GRPO_SYSTEM + (" " + system_suffix if system_suffix else "")
         return {
             "prompt": [
-                {"role": "system", "content": GRPO_SYSTEM},
+                {"role": "system", "content": sys_msg},
                 {"role": "user", "content": ex["question"]},
             ],
             "ground_truth": _gsm8k_answer(ex["answer"]),
@@ -224,9 +226,9 @@ def build_grpo(n: int = 1000, split: str = "train", seed: int = 0, offset: int =
     return raw.map(to_prompt, remove_columns=raw.column_names)
 
 
-def build_eval(n: int = 200) -> Dataset:
+def build_eval(n: int = 200, system_suffix: str = "") -> Dataset:
     """Held-out GSM8K slice for the tool-use evaluation harness."""
-    return build_grpo(n=n, split="test", seed=1)
+    return build_grpo(n=n, split="test", seed=1, system_suffix=system_suffix)
 
 
 if __name__ == "__main__":

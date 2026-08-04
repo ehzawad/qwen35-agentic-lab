@@ -38,8 +38,8 @@ def _numeric(s):
 
 
 def evaluate(model, proc, n: int, max_turns: int, max_new_tokens: int,
-             enable_thinking: bool, verbose: bool) -> dict:
-    ds = build_eval(n=n)
+             enable_thinking: bool, verbose: bool, system_suffix: str = "") -> dict:
+    ds = build_eval(n=n, system_suffix=system_suffix)
     schemas = tool_schemas()
 
     correct = used_tool = tool_error = 0
@@ -114,6 +114,10 @@ def main() -> None:
     ap.add_argument("--max-new-tokens", type=int, default=1024)
     ap.add_argument("--no-thinking", action="store_true")
     ap.add_argument("--tag", default=None, help="label for the results file")
+    ap.add_argument("--system-append", default="",
+                    help="extra sentence appended to the system prompt -- the zero-training "
+                         "control arm: if prompting alone recovers the RS-SFT gain, the gain "
+                         "was elicitation, not learning")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -131,7 +135,7 @@ def main() -> None:
     print(f"[eval] {tag}: {args.n} held-out GSM8K problems, thinking={not args.no_thinking}")
 
     res = evaluate(model, proc, args.n, args.max_turns, args.max_new_tokens,
-                   not args.no_thinking, not args.quiet)
+                   not args.no_thinking, not args.quiet, system_suffix=args.system_append)
     res["tag"] = tag
     res["model"] = args.model
     res["adapter"] = args.adapter

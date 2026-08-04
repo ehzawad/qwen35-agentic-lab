@@ -216,6 +216,39 @@ corpus is the model teaching itself its own successes -- calls/episode dropped
 to 1.4 because accepted trajectories skew short, a selection effect, not a
 demonstration that fewer calls are better.
 
+### The zero-training control arm: most of the gain was elicitation
+
+Motivated by the Spurious-Rewards line of work (Qwen models' post-training gains
+are often elicitation of latent behaviour) and by the fact that Qwen small
+models are logit-distilled from RLVR-trained flagships, we ran the control the
+headline deserved: **base model, no training, one added system sentence** --
+"Keep your final response under 60 words: state the result and the boxed
+answer, nothing more" -- same 200 paired problems, same harness. The
+interpretation function was committed before the number existed
+(regime boundaries derived from exact McNemar counts; see git history).
+
+> **What this does and does not show:** The no-training concise-prompt control
+> scored **180/200 (0.900)**, recovering **81.8%** of the observed
+> base-to-RS-SFT gain. It significantly exceeded base (b=5, c=23, p=0.0007) and
+> could not be distinguished from RS-SFT (b=11, c=7, p=0.481). The headline
+> accuracy gain therefore cannot be attributed uniquely to SFT: on this single
+> stochastic draw, an explicit brevity-and-boxing instruction reproduced the
+> accuracy. The behavioural anatomy also landed on the trained side of every
+> pre-registered guardrail (calls/ep 1.56, no-box 4/200, tool-error episodes 3,
+> correct-with-tool 172). The fixed 27-problem multi-call tail stayed
+> unresolved (control 23/27 vs RS-SFT 26/27, p=0.375). This does not show
+> better arithmetic or knowledge absent from the base.
+
+So the honest final reading of the whole experiment: **single-turn xlam SFT
+destroys termination; outcome-filtered self-distillation restores it; and most
+of what it restores is behaviour a one-sentence prompt can elicit from this
+model family anyway.** What training buys over the prompt is internalisation
+(no prompt engineering required downstream), a still-unresolved edge on the
+multi-call tail, and -- per the Qwen3 technical report -- exactly what Qwen's
+own Stage-3 "thinking mode fusion" buys: rejection-sampled SFT is their method,
+re-applied one level down. This is a stronger teaching result than the
+uncontrolled version, and a humbler one.
+
 ### GRPO after outcome-filtered SFT: an informative null
 
 GRPO on a disjoint problem slice, continuing the RS-SFT adapter, 300 steps under
