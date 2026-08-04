@@ -1,10 +1,11 @@
-"""Stage 1 -- supervised fine-tuning on tool calls (LoRA).
+"""Supervised fine-tuning (LoRA) on verified distilled trajectories.
 
-Teaches the one thing RL cannot bootstrap cheaply: emitting a syntactically valid
-call against the tool list it was actually given, instead of inventing a function
-or answering in prose. GRPO in stage 3 assumes this already works -- if the policy
-never produces a parseable call, every rollout scores zero and the gradient is
-noise.
+The sole supported input is the corpus written by `agentlab.distill`: the
+model's own multi-turn episodes against the real tools, kept only when they end
+in a correct committed answer. Every training row therefore demonstrates the
+full loop -- call a tool, read the result, terminate -- and GRPO downstream
+assumes this already works: if the policy never produces a parseable call and a
+committed answer, every rollout scores zero and the gradient is noise.
 """
 
 from __future__ import annotations
@@ -12,18 +13,15 @@ from __future__ import annotations
 import argparse
 
 from . import env
-from .data import build_distill_sft, build_sft
+from .data import build_distill_sft
 from .peft_cfg import describe, lora_config
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=env.MODEL)
-    ap.add_argument("--n", type=int, default=4000, help="training examples")
-    ap.add_argument("--data", choices=["xlam", "distill"], default="xlam",
-                    help="xlam = single-turn function calling (degrades the model, see README); "
-                         "distill = rejection-sampled multi-turn trajectories that terminate")
-    ap.add_argument("--distill-path", default="data/distill.jsonl")
+    ap.add_argument("--distill-path", default="data/distill.jsonl",
+                    help="verified trajectories from `make distill`")
     ap.add_argument("--epochs", type=float, default=1.0)
     ap.add_argument("--bsz", type=int, default=4)
     ap.add_argument("--accum", type=int, default=4)
@@ -38,8 +36,8 @@ def main() -> None:
 
     from trl import SFTConfig, SFTTrainer
 
-    ds = build_distill_sft(args.distill_path) if args.data == "distill" else build_sft(n=args.n)
-    print(f"[data] source={args.data}")
+    ds = build_distill_sft(args.distill_path)
+    print(f"[data] source={args.distill_path}")
     split = ds.train_test_split(test_size=0.02, seed=0)
     print(f"[data] train={len(split['train'])} eval={len(split['test'])} cols={ds.column_names}")
 
@@ -60,8 +58,8 @@ def main() -> None:
         save_strategy="epoch",
         save_total_limit=1,
         report_to=[],
-        # 262K-context model on a 48 GB card: cap the sequence and let packing off,
-        # so a single long xlam row cannot blow the step.
+        # 262K-context model on a 48 GB card: cap the sequence and leave packing
+        # off, so a single long trajectory row cannot blow the step.
         packing=False,
     )
 

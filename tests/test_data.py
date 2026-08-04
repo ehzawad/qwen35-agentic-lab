@@ -16,68 +16,10 @@ datasets = pytest.importorskip("datasets")
 
 
 @pytest.fixture(scope="module")
-def sft():
-    from agentlab.data import build_sft
-
-    return build_sft(n=32)
-
-
-@pytest.fixture(scope="module")
 def grpo():
     from agentlab.data import build_grpo
 
     return build_grpo(n=32)
-
-
-class TestSFT:
-    """SFTTrainer language-modeling type, plus the `tools` column."""
-
-    def test_prompt_completion_shape_not_messages(self, sft):
-        # Decides whether SFT loss lands on the tool call or on the schema
-        # preamble: TRL enables completion_only_loss ONLY for prompt/completion.
-        assert set(sft.column_names) == {"prompt", "completion", "tools", "chat_template_kwargs"}
-
-    def test_rows_survived_conversion(self, sft):
-        assert len(sft) > 0, "every xlam row was dropped by the converter"
-
-    def test_completion_is_a_tool_call(self, sft):
-        assert sft[0]["prompt"][0]["role"] == "user"
-        comp = sft[0]["completion"]
-        assert comp[-1]["role"] == "assistant"
-        assert comp[-1]["tool_calls"], "the SFT target must be a tool call, not prose"
-
-    def test_completion_only_loss_would_be_enabled(self, sft):
-        # Mirrors TRL: completion_only_loss = "prompt" in s and "completion" in s
-        s = sft[0]
-        assert "prompt" in s and "completion" in s
-
-    def test_tool_schemas_are_openai_shaped(self, sft):
-        for tool in sft[0]["tools"]:
-            assert tool["type"] == "function"
-            fn = tool["function"]
-            assert fn["name"]
-            assert fn["parameters"]["type"] == "object"
-            assert isinstance(fn["parameters"]["properties"], dict)
-            assert isinstance(fn["parameters"]["required"], list)
-
-    def test_called_function_is_among_the_offered_tools(self, sft):
-        # If the target calls a function that was never offered, SFT teaches the
-        # model to hallucinate tools rather than to use the ones it was given.
-        for row in sft.select(range(min(16, len(sft)))):
-            offered = {t["function"]["name"] for t in row["tools"]}
-            called = {tc["function"]["name"] for tc in row["completion"][-1]["tool_calls"]}
-            assert called <= offered, f"{called - offered} called but not offered"
-
-    def test_renders_through_the_real_chat_template(self, sft):
-        from agentlab import env
-
-        proc = env.load_processor()
-        tok = env.get_tokenizer(proc)
-        row = sft[0]
-        msgs = list(row["prompt"]) + list(row["completion"])
-        kw = row.get("chat_template_kwargs") or {}
-        text = tok.apply_chat_template(msgs, tools=row["tools"], tokenize=False, **kw)
-        assert row["completion"][-1]["tool_calls"][0]["function"]["name"] in text
 
 
 class TestPreference:
@@ -167,51 +109,6 @@ class TestToolSuite:
                 assert spec.get("description"), f"{fn['name']}.{name} undocumented"
 
 
-class TestXlamSchemaConversion:
-    """Optionality and types must survive the xlam -> JSON Schema conversion."""
-
-    def test_optional_suffix_in_type_is_honoured(self):
-        from agentlab.data import _xlam_tool_to_schema
-
-        s = _xlam_tool_to_schema({
-            "name": "f", "description": "d",
-            "parameters": {
-                "must": {"type": "str", "description": "x"},
-                "maybe": {"type": "str, optional", "description": "y"},
-            },
-        })
-        req = s["function"]["parameters"]["required"]
-        assert "must" in req and "maybe" not in req
-
-    def test_supplied_default_marks_optional_even_when_falsy(self):
-        from agentlab.data import _xlam_tool_to_schema
-
-        s = _xlam_tool_to_schema({
-            "name": "f", "description": "d",
-            "parameters": {
-                "a": {"type": "int", "description": "x", "default": 0},
-                "b": {"type": "str", "description": "y", "default": ""},
-                "c": {"type": "str", "description": "z"},
-            },
-        })
-        req = s["function"]["parameters"]["required"]
-        assert req == ["c"], f"empty/zero defaults are still defaults, got {req}"
-
-    def test_container_types_map_to_array(self):
-        from agentlab.data import _json_type
-
-        for t in ("list", "List[int]", "tuple", "Tuple[str, int]", "set"):
-            assert _json_type(t) == "array", t
-
-    def test_scalar_types(self):
-        from agentlab.data import _json_type
-
-        assert _json_type("int") == "integer"
-        assert _json_type("float") == "number"
-        assert _json_type("bool") == "boolean"
-        assert _json_type("str") == "string"
-
-
 class TestDPOAlignment:
     """The prompt render must be a token prefix of the prompt+completion render.
 
@@ -241,40 +138,3 @@ class TestDPOAlignment:
 
         ds = build_preference(n=4, explicit_prompt=True)
         assert ds[0]["chat_template_kwargs"] == {"enable_thinking": False}
-
-
-class TestSFTAlignment:
-    """SFTTrainer's completion mask depends on the same prefix property as DPO."""
-
-    def test_prompt_is_a_token_prefix_of_prompt_plus_completion(self):
-        from agentlab import env
-        from agentlab.data import build_sft
-
-        tok = env.get_tokenizer(env.load_processor())
-        for row in build_sft(n=8):
-            kw = row.get("chat_template_kwargs") or {}
-            p = tok.apply_chat_template(row["prompt"], tools=row["tools"], tokenize=False,
-                                        add_generation_prompt=True, **kw)
-            f = tok.apply_chat_template(list(row["prompt"]) + list(row["completion"]),
-                                        tools=row["tools"], tokenize=False, **kw)
-            pi, fi = tok(p).input_ids, tok(f).input_ids
-            assert fi[:len(pi)] == pi, "completion_mask boundary would be wrong"
-
-    def test_trained_tokens_are_the_tool_call_and_nothing_else(self):
-        # The template always renders a hollow <think></think> for an assistant
-        # turn with no reasoning_content. What matters is which side of the mask
-        # boundary it lands on: it must sit in the PROMPT (masked out), so the
-        # model is never trained to emit an empty reasoning block before a call.
-        from agentlab import env
-        from agentlab.data import build_sft
-
-        tok = env.get_tokenizer(env.load_processor())
-        row = build_sft(n=4)[0]
-        kw = row.get("chat_template_kwargs") or {}
-        p = tok.apply_chat_template(row["prompt"], tools=row["tools"], tokenize=False,
-                                    add_generation_prompt=True, **kw)
-        f = tok.apply_chat_template(list(row["prompt"]) + list(row["completion"]),
-                                    tools=row["tools"], tokenize=False, **kw)
-        trained = tok.decode(tok(f).input_ids[len(tok(p).input_ids):])
-        assert "<tool_call>" in trained
-        assert "<think>" not in trained, "the hollow thinking block leaked into the loss"

@@ -1,16 +1,14 @@
-"""Stage 1b -- build SFT data the model can actually learn termination from.
+"""Build SFT data the model can actually learn termination from.
 
-Why this exists: training on `xlam-function-calling-60k` degraded the model 16x
-(0.800 -> 0.050). Every xlam target is a bare tool call, so nothing in it ever
-shows a model receiving a tool result and *concluding*. The policy learned to
-emit calls and never stop -- 50 calls per episode, 19 of 20 episodes with no
-final answer at all.
+Why this exists: a corpus of bare tool calls never shows a model receiving a
+tool result and *concluding*, and training on one teaches the policy to emit
+calls and never stop. Terminal and recovery turns are required.
 
 This is rejection sampling / expert iteration (STaR, RFT): let the base model
 attempt the real task with the real tools, keep only the trajectories that end in
 a *correct committed answer*, and train on those. Every accepted example
-therefore demonstrates the exact behaviour xlam lacked -- call a tool, read the
-result, and terminate.
+therefore demonstrates the full loop -- call a tool, read the result, and
+terminate.
 
 The honest limit: this distils the base model into itself and cannot exceed base
 on reasoning. It is aimed at the failure base actually has -- 9 of its 10 errors
@@ -131,8 +129,8 @@ def generate(model_id: str, n_problems: int, k: int, max_turns: int,
                 c["messages"].append({"role": "assistant", "content": clean})
                 continue
             # Keep the model's own prose next to the call. Dropping it would make
-            # every intermediate turn byte-identical to the xlam shape this run
-            # exists to replace, and the conditioning context the terminal row is
+            # every intermediate turn a bare single-turn call -- the shape this
+            # run exists to replace -- and the conditioning context the terminal row is
             # trained against would then not match what the model emits at
             # inference. `content` is the text with the tool-call block removed.
             prose = _TOOL_CALL_BLOCK.sub("", text).strip()

@@ -14,18 +14,17 @@ PY      := .venv/bin/python
 MODEL   ?= Qwen/Qwen3.5-4B
 
 # Derive the artifact slug from MODEL rather than hardcoding it, so
-# `make sft MODEL=Qwen/Qwen3.5-2B` cannot overwrite the 4B adapter.
+# `make rs-sft MODEL=Qwen/Qwen3.5-2B` cannot overwrite the 4B adapter.
 # Matches env.SLUG: basename, dots stripped, lowercased.
 SLUG    := $(shell echo '$(notdir $(MODEL))' | tr -d '.' | tr 'A-Z' 'a-z')
-SFT     := out/$(SLUG)-sft-lora
-DPO     := out/$(SLUG)-dpo-lora
-GRPO    := out/$(SLUG)-grpo-lora
+RSSFT   := out/$(SLUG)-rssft-lora
+GRPO    := out/$(SLUG)-rsgrpo-lora
 MERGED  := out/$(SLUG)-merged
 
-.PHONY: help setup gpu smoke data inspect sft dpo reward grpo grpo-env grpo-from-base \
+.PHONY: help setup gpu smoke data inspect dpo reward rs-sft grpo grpo-env grpo-from-base \
         distill chain verdict \
         verify verify-v trace-eval trace-grpo trace-view \
-        eval-base eval-sft eval-grpo merge serve clean
+        eval-base eval-rssft eval-grpo merge serve clean
 
 help:
 	@echo "Qwen3.5-4B agentic post-training lab  (model=$(MODEL), GPU=A6000)"
@@ -36,14 +35,13 @@ help:
 	@echo "  inspect     dump the module tree (LoRA target selection)"
 	@echo "  data        build + preview all three datasets"
 	@echo
-	@echo "  sft         stage 1: LoRA SFT on tool calling (xlam-60k)"
+	@echo "  distill     rejection-sample verified trajectories from the base model"
+	@echo "  rs-sft      LoRA SFT on the verified distilled trajectories"
 	@echo "  reward      stage 2a: explicit reward model (classical RLHF)"
 	@echo "  dpo         stage 2b: preference alignment (ultrafeedback)"
-	@echo "  grpo        stage 3: GRPO with real tool execution (gsm8k)"
-	@echo "  grpo-env    stage 3': GRPO with an environment-owned reward"
-	@echo "  grpo-from-base  stage 3 without the SFT chain (comparison arm)"
-	@echo
-	@echo "  distill     regenerate outcome-filtered GSM8K trajectories"
+	@echo "  grpo        GRPO with real tool execution, continuing the RS-SFT adapter"
+	@echo "  grpo-env    GRPO with an environment-owned reward"
+	@echo "  grpo-from-base  the same GRPO stage from base (comparison arm)"
 	@echo "  chain       run the flagship RS-SFT -> GRPO -> paired eval chain"
 	@echo "  verdict     after chain: run base@200 + the machine-checked verdict"
 	@echo
@@ -52,9 +50,9 @@ help:
 	@echo "  trace-view  render an existing trace file (FILE=..., LIMIT=...)"
 	@echo "  verify-v    verbose test suite; trace-grpo: traced GRPO run; clean: rm artifacts"
 	@echo ""
-	@echo "  eval-base   stage 4: agentic eval, base model"
-	@echo "  eval-sft    stage 4: agentic eval, after SFT"
-	@echo "  eval-grpo   stage 4: agentic eval, after GRPO"
+	@echo "  eval-base   agentic eval, base model"
+	@echo "  eval-rssft  agentic eval, after RS-SFT"
+	@echo "  eval-grpo   agentic eval, after GRPO"
 	@echo "  merge       fold an adapter into the base weights"
 	@echo "  serve       vLLM OpenAI server with tool calling"
 
@@ -74,22 +72,22 @@ inspect:
 data:
 	$(PY) -m agentlab.data
 
-# ---- stage 1 ----------------------------------------------------------------
-sft:
-	$(PY) -m agentlab.sft --model $(MODEL) --out $(SFT)
+# ---- SFT on verified distilled trajectories ---------------------------------
+rs-sft:
+	$(PY) -m agentlab.sft --model $(MODEL) --distill-path data/distill.jsonl --out $(RSSFT)
 
 # ---- stage 2 ----------------------------------------------------------------
 reward:
 	$(PY) -m agentlab.reward
 
-dpo: $(SFT)
-	$(PY) -m agentlab.dpo --model $(MODEL) --adapter $(SFT) --out $(DPO)
+dpo: $(RSSFT)
+	$(PY) -m agentlab.dpo --model $(MODEL) --adapter $(RSSFT) --out out/$(SLUG)-dpo-lora
 
-# ---- stage 3 ----------------------------------------------------------------
-# GRPO continues the SFT adapter: RL can only reinforce behaviour the policy
-# already emits sometimes, and stage 1 is what buys that non-zero baseline.
-grpo: $(SFT)
-	$(PY) -m agentlab.grpo --model $(MODEL) --mode tools --adapter $(SFT) --out $(GRPO)
+# ---- GRPO --------------------------------------------------------------------
+# GRPO continues the RS-SFT adapter: RL can only reinforce behaviour the policy
+# already emits sometimes, and the SFT stage is what buys that non-zero baseline.
+grpo: $(RSSFT)
+	$(PY) -m agentlab.grpo --model $(MODEL) --mode tools --adapter $(RSSFT) --out $(GRPO)
 
 # The same stage without the chain, to see what RL alone does from base.
 grpo-from-base:
@@ -98,17 +96,17 @@ grpo-from-base:
 grpo-env:
 	$(PY) -m agentlab.grpo --model $(MODEL) --mode env --out out/$(SLUG)-grpo-env
 
-# Guard: `make dpo` / `make grpo` depend on this, so the chain cannot silently
-# fall back to base just because stage 1 was never run.
-$(SFT):
-	@echo "missing $(SFT) -- run 'make sft' first (stages chain through the adapter)"; exit 1
+# Guard: `make grpo` depends on this, so the chain cannot silently fall back to
+# base just because the SFT stage was never run.
+$(RSSFT):
+	@echo "missing $(RSSFT) -- run 'make distill' then 'make rs-sft' first"; exit 1
 
-# ---- stage 4 ----------------------------------------------------------------
+# ---- eval --------------------------------------------------------------------
 eval-base:
 	$(PY) -m agentlab.eval --model $(MODEL) --tag base
 
-eval-sft:
-	$(PY) -m agentlab.eval --model $(MODEL) --adapter $(SFT) --tag sft
+eval-rssft:
+	$(PY) -m agentlab.eval --model $(MODEL) --adapter $(RSSFT) --tag rssft
 
 eval-grpo:
 	$(PY) -m agentlab.eval --model $(MODEL) --adapter $(GRPO) --tag grpo
@@ -141,7 +139,7 @@ trace-eval:
 	@$(MAKE) --no-print-directory trace-view FILE=$(TRACE)
 
 trace-grpo:
-	AGENTLAB_TRACE=$(TRACE) $(PY) -m agentlab.grpo --model $(MODEL) --mode tools --adapter $(SFT) --out $(GRPO)
+	AGENTLAB_TRACE=$(TRACE) $(PY) -m agentlab.grpo --model $(MODEL) --mode tools --adapter $(RSSFT) --out $(GRPO)
 
 trace-view:
 	@$(PY) -m agentlab.trace $(FILE) $(or $(LIMIT),5)
