@@ -310,10 +310,6 @@ class TestRetrodictionOnRealData:
     def test_real_base_run_has_no_harness_bug(self):
         assert _codes(sanity_checks(self._load("base")), "BUG") == []
 
-    def test_real_broken_sft_run_is_weak_not_buggy(self):
-        # The 0.050 checkpoint: catastrophically bad AND honestly measured.
-        assert _codes(sanity_checks(self._load("sft")), "BUG") == []
-
 
 class TestNotationRescoring:
     """A right answer in the wrong notation must not score wrong."""

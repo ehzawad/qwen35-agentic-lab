@@ -22,7 +22,7 @@ GRPO    := out/$(SLUG)-rsgrpo-lora
 MERGED  := out/$(SLUG)-merged
 
 .PHONY: help setup gpu smoke data inspect rs-sft grpo grpo-from-base \
-        distill chain verdict \
+        distill \
         verify verify-v trace-eval trace-grpo trace-view \
         eval-base eval-rssft eval-grpo merge serve clean
 
@@ -39,8 +39,6 @@ help:
 	@echo "  rs-sft      LoRA SFT on the verified distilled trajectories"
 	@echo "  grpo        GRPO with real tool execution, continuing the RS-SFT adapter"
 	@echo "  grpo-from-base  the same GRPO stage from base (comparison arm)"
-	@echo "  chain       run the flagship RS-SFT -> GRPO -> paired eval chain"
-	@echo "  verdict     after chain: run base@200 + the machine-checked verdict"
 	@echo
 	@echo "  verify      CPU-only test suite (parsing, rewards, data, every stage config)"
 	@echo "  trace-eval  run eval with tracing, then render the per-problem trace"
@@ -104,8 +102,10 @@ merge:
 serve:
 	bash scripts/serve.sh $(MODEL)
 
+# Deliberately narrow: eval summaries and traces only. Checkpoints -- including
+# the validated RS-SFT/RS-GRPO baselines under out/ -- are never glob-deleted.
 clean:
-	rm -rf out/qwen35-*-lora out/qwen35-*-merged out/eval-*.json
+	rm -f out/eval-*.json out/trace*.jsonl
 
 # ---- verify + trace ---------------------------------------------------------
 # `verify` is CPU-only and fast: it constructs every stage config, so a TRL
@@ -131,12 +131,6 @@ trace-grpo:
 trace-view:
 	@$(PY) -m agentlab.trace $(FILE) $(or $(LIMIT),5)
 
-# ---- flagship: rejection-sampled SFT -> GRPO -> machine-checked verdict -----
+# ---- rejection sampling ------------------------------------------------------
 distill:
 	$(PY) -m agentlab.distill --model $(MODEL)
-
-chain:
-	bash scripts/run_distill_chain.sh
-
-verdict:
-	bash scripts/after_chain_verdict.sh
