@@ -89,6 +89,40 @@ make grpo       # the interesting one
 make eval-base  # then eval-sft / eval-grpo to see whether it moved
 ```
 
+## Results at a glance
+
+Measured on one 48 GB GPU on held-out GSM8K with the calculator tools, thinking
+off, the same generation budget, and the same evaluation harness. Base, RS-SFT
+and RS-GRPO are evaluated on the **same 200 seeded problems** (paired); the
+smaller xlam run is retained because it is the run that exposed the termination
+failure.
+
+| checkpoint | accuracy (95% CI) | calls/ep | runaway >10 | no box | tool-ok acc | tool err | n |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| base `Qwen3.5-4B` | **0.810** [0.750, 0.858] | 2.8 | 4/200 | 28/200 | 0.810 | 0.055 | 200 |
+| xlam single-turn SFT | **0.050** [0.009, 0.236] | 50.0 | 19/20 | 19/20 | 0.050 | 0.600 | 20 |
+| rejection-sampled multi-turn SFT | **0.920** [0.874, 0.950] | 1.4 | 0/200 | 4/200 | 0.840 | 0.010 | 200 |
+| RS-SFT + GRPO | **0.930** [0.886, 0.958] | 1.2 | 0/200 | 4/200 | **0.930** | 0.015 | 200 |
+
+Paired McNemar on the shared 200 problems: **RS-SFT vs base +0.110, p < 0.001**
+(b=5, c=27). **RS-GRPO vs RS-SFT +0.010, p = 0.804** -- a null, expected and
+informative (see below).
+
+> These results were machine-checked, not read off a table. The generated
+> [comparison verdict](results/verdict.md) runs harness-sanity checks S0-S7
+> *before* the pre-registered gates G1-G5; a harness BUG vetoes any model-level
+> verdict, and all scoring uses a notation-tolerant normalizer applied
+> uniformly to every checkpoint after a review found a right answer scored
+> wrong on notation.
+
+Read together, the three results describe one behaviour. Single-turn xlam SFT
+taught the model to call tools without teaching it to *stop* (16x degradation).
+Rejection-sampled multi-turn SFT trained the missing conditional -- observe a
+tool result, commit an answer, terminate -- and reached 0.920. GRPO then found
+little to improve because most sampled groups no longer disagreed in reward;
+its one attributable effect is restoring full tool use (0.905 -> 1.000), which
+lifts tool-compliant accuracy to 0.930.
+
 ## Result: the pipeline runs, and this recipe makes the model worse
 
 Measured on one A6000, held-out GSM8K, thinking off for both, identical harness:
@@ -140,6 +174,40 @@ episode terminates — see the Environments Hub and the open SWE-trajectory sets
 Plus process-level reward, since a terminal-only signal on a 20-step task is
 almost no signal at all. Both are out of scope for this repo as it stands, and
 that is the honest boundary of what a single-GPU lab on single-turn data can show.
+
+### Follow-up: terminating trajectories recover the headroom
+
+The fix the diagnosis implies: generate multi-turn trajectories **with the base
+model itself** against the real tools (6,000 rollouts over 1,500 train problems,
+disjoint from evaluation), keep only those that end in a *correct committed
+answer* (plus: >=1 tool call, <=6 calls, <=128-token final, no stray reasoning
+tags), and fine-tune on the **terminal turn only** -- everything before it is
+masked context. 1,275 accepted trajectories, ~80 minutes of SFT.
+
+Result: 0.920 vs base 0.810 on the paired 200 (p < 0.001), with the failure mode
+the corpus was filtered against essentially gone -- no-box failures 14% -> 2%,
+tool errors 0.055 -> 0.010, zero runaway episodes.
+
+**What this does not show:** better arithmetic. Base's errors were dominated by
+running out of budget before `\boxed{}`; the gain is termination and formatting
+headroom, which is exactly what an outcome filter can capture and no more. The
+corpus is the model teaching itself its own successes -- calls/episode dropped
+to 1.4 because accepted trajectories skew short, a selection effect, not a
+demonstration that fewer calls are better.
+
+### GRPO after outcome-filtered SFT: an informative null
+
+GRPO on a disjoint problem slice, continuing the RS-SFT adapter, 300 steps under
+valid conditions (thinking off in the rollout renderer, committed-answer-only
+rewards, parity-wrapped tools): held-out accuracy 0.930 vs 0.920, p = 0.804.
+During training, **55% of steps had zero within-group reward variance** -- all
+eight samples scored identically, so the advantage was zero and those steps
+taught nothing. RS-SFT had already captured the available headroom; RL had
+almost nothing left to grip on this task. Its one measurable effect is real and
+small: the tool_use_reward pushed tool use from 0.905 back to 1.000.
+
+Scope: one task, one model, one seed, one budget. None of this licenses claims
+beyond that.
 
 ### Why SFT before GRPO
 
