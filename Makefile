@@ -27,7 +27,7 @@ MERGED  := out/$(SLUG)-merged
         eval-base eval-rssft eval-grpo merge serve clean
 
 help:
-	@echo "Qwen3.5-4B agentic post-training lab  (model=$(MODEL), GPU=A6000)"
+	@echo "Qwen3.5-4B agentic pipeline lab  (model=$(MODEL), GPU=A6000)"
 	@echo
 	@echo "  setup       build the venv (vllm 0.25.1 -> torch 2.11, trl 1.9.2)"
 	@echo "  gpu         show what is on the card right now"
