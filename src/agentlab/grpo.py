@@ -168,9 +168,25 @@ REWARD_NAMES = ("correctness", "tool_use", "format")
 _REWARD_BUF: dict[int, dict] = {}
 
 
+# Cap the buffer. An id() key is only valid while the caller keeps the list
+# alive; a caller that never completes a full triple would otherwise leak an
+# entry per batch forever.
+_REWARD_BUF_MAX = 64
+
+
 def _record(name: str, completions, scores, ground_truth=None) -> None:
+    """Accumulate one reward component; the last of the triple writes the record.
+
+    Keyed on id(completions), which requires the CALLER to pass the SAME list
+    object to all three reward functions. TRL does. A caller that builds a fresh
+    list per function gets no record at all -- and worse, sporadic ones when
+    CPython recycles a freed id, mixing scores across rollouts. eval.py scores
+    through a single shared list for exactly this reason.
+    """
     if not trace.enabled():
         return
+    if len(_REWARD_BUF) > _REWARD_BUF_MAX:
+        _REWARD_BUF.clear()  # stale partials from a caller that never completed
     key = id(completions)
     slot = _REWARD_BUF.setdefault(key, {"scores": {}, "gt": None})
     slot["scores"][name] = list(scores)

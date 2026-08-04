@@ -140,3 +140,46 @@ class TestRolloutRendering:
         from agentlab import grpo
 
         assert len(grpo.REWARD_WEIGHTS) == len(grpo.REWARD_NAMES)
+
+
+class TestRewardBufferKeying:
+    """_record keys on id(completions); callers must pass ONE list object.
+
+    Three separate `[comp]` literals never complete a triple, and sporadically
+    emit a record with scores mixed across rollouts when CPython recycles a
+    freed id. That produced 23 bogus records in a real eval trace.
+    """
+
+    COMP = [{"role": "assistant", "content": r"\boxed{7}"}]
+
+    def test_shared_list_emits_exactly_one_complete_record(self, traced):
+        import json
+
+        from agentlab import grpo
+
+        batch = [self.COMP]
+        grpo.correctness_reward(batch, ["7"])
+        grpo.tool_use_reward(batch)
+        grpo.format_reward(batch)
+        recs = [json.loads(l) for l in traced.read_text().splitlines() if l.strip()]
+        assert len(recs) == 1
+        assert set(recs[0]["rewards"]) == set(grpo.REWARD_NAMES)
+        assert recs[0]["rewards"]["correctness"] == 1.0
+
+    def test_buffer_is_capped_against_orphaned_partials(self, traced):
+        from agentlab import grpo
+
+        grpo._REWARD_BUF.clear()
+        for i in range(200):
+            grpo._record("correctness", [[{"role": "assistant", "content": str(i)}]], [0.0])
+        assert len(grpo._REWARD_BUF) <= grpo._REWARD_BUF_MAX + 1
+
+    def test_eval_scores_through_a_single_batch(self):
+        # Pin the calling convention itself: eval must not rebuild the list.
+        import inspect
+
+        from agentlab import eval as ev
+
+        src = inspect.getsource(ev.evaluate)
+        assert "batch = [comp]" in src
+        assert "correctness_reward([comp]" not in src

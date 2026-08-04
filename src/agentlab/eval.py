@@ -67,10 +67,15 @@ def evaluate(model, proc, n: int, max_turns: int, max_new_tokens: int,
             # predicted/expected into a field labelled "rewards". This is what
             # makes an eval trace comparable with a training trace.
             comp = [m for m in convo if m.get("role") in ("assistant", "tool")]
+            # ONE list object for all three calls. grpo._record keys its buffer
+            # on id(completions), so three separate `[comp]` literals would never
+            # complete a triple -- and would emit sporadic records with mismatched
+            # scores whenever CPython recycled a freed id.
+            batch = [comp]
             rewards = {
-                "correctness": correctness_reward([comp], [ex["ground_truth"]])[0],
-                "tool_use": tool_use_reward([comp])[0],
-                "format": format_reward([comp])[0],
+                "correctness": correctness_reward(batch, [ex["ground_truth"]])[0],
+                "tool_use": tool_use_reward(batch)[0],
+                "format": format_reward(batch)[0],
             }
             rewards["total"] = round(
                 sum(w * rewards[n] for n, w in zip(REWARD_NAMES, REWARD_WEIGHTS)), 4
