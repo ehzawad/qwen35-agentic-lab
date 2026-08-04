@@ -21,7 +21,7 @@ RSSFT   := out/$(SLUG)-rssft-lora
 GRPO    := out/$(SLUG)-rsgrpo-lora
 MERGED  := out/$(SLUG)-merged
 
-.PHONY: help setup gpu smoke data inspect rs-sft grpo grpo-env grpo-from-base \
+.PHONY: help setup gpu smoke data inspect rs-sft grpo grpo-from-base \
         distill chain verdict \
         verify verify-v trace-eval trace-grpo trace-view \
         eval-base eval-rssft eval-grpo merge serve clean
@@ -38,7 +38,6 @@ help:
 	@echo "  distill     rejection-sample verified trajectories from the base model"
 	@echo "  rs-sft      LoRA SFT on the verified distilled trajectories"
 	@echo "  grpo        GRPO with real tool execution, continuing the RS-SFT adapter"
-	@echo "  grpo-env    GRPO with an environment-owned reward"
 	@echo "  grpo-from-base  the same GRPO stage from base (comparison arm)"
 	@echo "  chain       run the flagship RS-SFT -> GRPO -> paired eval chain"
 	@echo "  verdict     after chain: run base@200 + the machine-checked verdict"
@@ -78,14 +77,11 @@ rs-sft:
 # GRPO continues the RS-SFT adapter: RL can only reinforce behaviour the policy
 # already emits sometimes, and the SFT stage is what buys that non-zero baseline.
 grpo: $(RSSFT)
-	$(PY) -m agentlab.grpo --model $(MODEL) --mode tools --adapter $(RSSFT) --out $(GRPO)
+	$(PY) -m agentlab.grpo --model $(MODEL) --adapter $(RSSFT) --out $(GRPO)
 
 # The same stage without the chain, to see what RL alone does from base.
 grpo-from-base:
-	$(PY) -m agentlab.grpo --model $(MODEL) --mode tools --out $(GRPO)-frombase
-
-grpo-env:
-	$(PY) -m agentlab.grpo --model $(MODEL) --mode env --out out/$(SLUG)-grpo-env
+	$(PY) -m agentlab.grpo --model $(MODEL) --out $(GRPO)-frombase
 
 # Guard: `make grpo` depends on this, so the chain cannot silently fall back to
 # base just because the SFT stage was never run.
@@ -130,7 +126,7 @@ trace-eval:
 	@$(MAKE) --no-print-directory trace-view FILE=$(TRACE)
 
 trace-grpo:
-	AGENTLAB_TRACE=$(TRACE) $(PY) -m agentlab.grpo --model $(MODEL) --mode tools --adapter $(RSSFT) --out $(GRPO)
+	AGENTLAB_TRACE=$(TRACE) $(PY) -m agentlab.grpo --model $(MODEL) --adapter $(RSSFT) --out $(GRPO)
 
 trace-view:
 	@$(PY) -m agentlab.trace $(FILE) $(or $(LIMIT),5)

@@ -1,25 +1,21 @@
-"""Stage 3 -- agentic RL with GRPO, where the model really calls the tools.
+"""Agentic RL with GRPO, where the model really calls the tools.
 
-Two modes, both exercising TRL v1's agentic rollout:
-
-  --mode tools   Pass our Python functions straight to GRPOTrainer. TRL runs the
-                 multi-turn loop: sample -> parse tool call -> execute -> feed the
-                 result back -> continue, and the whole transcript is what gets
-                 the advantage. Reward is verifiable (GSM8K ground truth).
-
-  --mode env     Environment-owned rewards. The environment holds state across a
-                 rollout, exposes its public methods as tools, and scores itself
-                 via get_reward(). This is the shape you need for anything
-                 stateful -- a sandbox, a game, a multi-step booking flow.
+Our Python functions are passed straight to GRPOTrainer. TRL runs the
+multi-turn loop: sample -> parse tool call -> execute -> feed the result back
+-> continue, and the whole transcript is what gets the advantage. Reward is
+verifiable (GSM8K ground truth).
 
 GRPO needs no value network: it samples a group of `num_generations` completions
 per prompt and uses the spread of rewards within that group as the advantage.
+
+TRL's `environment_factory` remains available for a future validated stateful
+environment (state held across a rollout, public methods exposed as tools,
+scored via `get_reward()`); nothing here precludes wiring one in.
 """
 
 from __future__ import annotations
 
 import argparse
-import random
 import re
 
 from . import env, trace
@@ -344,74 +340,16 @@ class ClipGuard:
 
 
 # --------------------------------------------------------------------------
-# stateful environment (--mode env)
-# --------------------------------------------------------------------------
-
-class BudgetEnv:
-    """A small stateful task: hit a target total by spending through a tool.
-
-    Every public method becomes a tool the model can call, `reset` starts a
-    rollout, and `get_reward` scores it from internal state -- so correctness is
-    defined by the environment rather than by parsing the text.
-    """
-
-    def reset(self, **kwargs) -> str:
-        self.target = random.randint(20, 200)
-        self.spent = 0
-        self.calls = 0
-        return (
-            f"You have a budget tracker starting at 0. Spend so the total lands "
-            f"exactly on {self.target}. Use the `spend` tool, then `check` to "
-            f"confirm. You may make at most 5 spends."
-        )
-
-    def spend(self, amount: int) -> str:
-        """
-        Adds an amount to the running total.
-
-        Args:
-            amount: The amount to add to the running total.
-
-        Returns:
-            The new running total after spending.
-        """
-        if self.calls >= 5:
-            return "error: no spends remaining"
-        self.calls += 1
-        self.spent += amount
-        return f"total is now {self.spent}"
-
-    def check(self) -> str:
-        """
-        Reports the running total and how far it is from the target.
-
-        Returns:
-            The current total and the remaining distance to the target.
-        """
-        return f"total {self.spent}, target {self.target}, difference {self.target - self.spent}"
-
-    def get_reward(self) -> float:
-        """Exact hit scores 1.0, near misses decay, overshoot scores 0."""
-        gap = abs(self.target - self.spent)
-        if gap == 0:
-            return 1.0
-        return max(0.0, 1.0 - gap / max(self.target, 1))
-
-
-# --------------------------------------------------------------------------
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=env.MODEL)
     ap.add_argument("--adapter", default=None, help="SFT adapter to start the policy from")
-    ap.add_argument("--mode", choices=["tools", "env"], default="tools")
-    ap.add_argument("--n", type=int, default=1000, help="prompts, --mode tools only")
+    ap.add_argument("--n", type=int, default=1000, help="prompts")
     ap.add_argument("--grpo-offset", type=int, default=0,
                     help="start index into the shuffled train split; must NOT overlap the "
                          "slice used for distillation, or RL trains on problems already SFT'd "
                          "and within-group reward variance collapses")
-    ap.add_argument("--max-steps", type=int, default=200,
-                    help="--mode env only: required, since a procedural env has no dataset length")
     ap.add_argument("--epochs", type=float, default=1.0)
     ap.add_argument("--bsz", type=int, default=8)
     ap.add_argument("--accum", type=int, default=4)
@@ -480,7 +418,7 @@ def main() -> None:
         vllm_max_model_length=args.vllm_max_len,
         # reward_weights lives on the config, not on GRPOTrainer -- `tools` and
         # `environment_factory` are the trainer kwargs, these are not.
-        reward_weights=list(REWARD_WEIGHTS) if args.mode == "tools" else None,
+        reward_weights=list(REWARD_WEIGHTS),
         # How many tool round-trips one rollout may take before it is cut off.
         max_tool_calling_iterations=args.max_tool_iters,
         # MUST be set here, not on the dataset rows. TRL stores only
@@ -502,28 +440,15 @@ def main() -> None:
         peft_config=peft,
     )
 
-    if args.mode == "tools":
-        ds = build_grpo(n=args.n, offset=args.grpo_offset)
-        print(f"[data] {len(ds)} prompts, cols={ds.column_names}")
-        print(f"[tools] {', '.join(t.__name__ for t in TOOLS)}")
-        trainer = GRPOTrainer(
-            train_dataset=ds,
-            reward_funcs=[correctness_reward, tool_use_reward, format_reward],
-            tools=trl_tools(),
-            **common,
-        )
-    else:
-        # No train_dataset at all: TRL allows it to be omitted when a single
-        # environment_factory owns the data, because BudgetEnv.reset() generates
-        # the prompt procedurally. In exchange max_steps must be set, since there
-        # is no dataset length to infer the schedule from.
-        cfg.max_steps = args.max_steps
-        print(f"[data] procedural: {args.max_steps} steps against BudgetEnv "
-              f"(environment-owned reward, no dataset)")
-        trainer = GRPOTrainer(
-            environment_factory=BudgetEnv,
-            **common,
-        )
+    ds = build_grpo(n=args.n, offset=args.grpo_offset)
+    print(f"[data] {len(ds)} prompts, cols={ds.column_names}")
+    print(f"[tools] {', '.join(t.__name__ for t in TOOLS)}")
+    trainer = GRPOTrainer(
+        train_dataset=ds,
+        reward_funcs=[correctness_reward, tool_use_reward, format_reward],
+        tools=trl_tools(),
+        **common,
+    )
 
     from transformers import TrainerCallback
 

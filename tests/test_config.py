@@ -66,8 +66,7 @@ class TestStageConfigs:
         )
         assert cfg.max_length == 2048
 
-    @pytest.mark.parametrize("mode", ["tools", "env"])
-    def test_grpo_config(self, mode):
+    def test_grpo_config(self):
         from trl import GRPOConfig
 
         cfg = GRPOConfig(
@@ -79,7 +78,7 @@ class TestStageConfigs:
             logging_steps=1, save_strategy="epoch", save_total_limit=1, report_to=[],
             use_vllm=True, vllm_mode="colocate", vllm_gpu_memory_utilization=0.25,
             vllm_max_model_length=4096,
-            reward_weights=[1.0, 0.3, 0.2] if mode == "tools" else None,
+            reward_weights=[1.0, 0.3, 0.2],
             max_tool_calling_iterations=4,
         )
         assert cfg.vllm_max_model_length == 4096
@@ -192,33 +191,6 @@ class TestRewardFunctions:
         from agentlab.grpo import correctness_reward
 
         assert correctness_reward([r"\boxed{7}"], ["7"]) == [1.0]
-
-
-class TestBudgetEnv:
-    def test_exact_hit_scores_one(self):
-        from agentlab.grpo import BudgetEnv
-
-        env = BudgetEnv()
-        env.reset()
-        env.spend(env.target)
-        assert env.get_reward() == 1.0
-
-    def test_reward_decays_with_distance(self):
-        from agentlab.grpo import BudgetEnv
-
-        env = BudgetEnv()
-        env.reset()
-        env.spend(env.target - 5)
-        assert 0.0 < env.get_reward() < 1.0
-
-    def test_spend_budget_is_enforced(self):
-        from agentlab.grpo import BudgetEnv
-
-        env = BudgetEnv()
-        env.reset()
-        for _ in range(5):
-            env.spend(1)
-        assert env.spend(1).startswith("error:")
 
 
 class TestToolErrorDetection:
