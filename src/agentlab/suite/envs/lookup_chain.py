@@ -27,11 +27,51 @@ def has_unit_convert(horizon: int) -> bool:
 
 _AISLES = ("A", "B", "C", "D", "E", "F", "G", "H")
 _THINGS = ("crate", "pallet", "bin", "rack", "tote", "drum", "carton", "shelf")
+_ZONES = ("north dock", "south dock", "mezzanine", "cold row", "outbound",
+          "returns", "staging", "overflow")
+
+# The eight committed distractor SCHEMAS. Every nonterminal record still exposes
+# exactly one `next` key; what varies is which distractor fields surround it, so
+# the model has to locate the pointer in differently shaped records instead of
+# reading a fixed slot. This is the family's structural-role dimension: the field
+# set enters `schema.node_role`, so two chains whose records are shaped alike are
+# one bootstrap cluster and two shaped differently are not. Without it every
+# lookup_chain cell would be a single cluster of 100 instantiations, and its
+# contribution to a clustered interval would be one unit of information.
+_SCHEMAS = (
+    ("note",),
+    ("zone",),
+    ("note", "lot"),
+    ("shelf",),
+    ("bay", "note"),
+    ("aisle", "slot"),
+    ("tag",),
+    ("note", "zone", "bin"),
+)
+N_SCHEMAS = len(_SCHEMAS)
 
 
-def _note(rng) -> str:
-    return (f"{rng.choice(_THINGS)} {rng.randint(2, 97)}, "
-            f"aisle {rng.choice(_AISLES)}{rng.randint(1, 9)}")
+def _distractor(rng, field: str):
+    if field == "note":
+        return (f"{rng.choice(_THINGS)} {rng.randint(2, 97)}, "
+                f"aisle {rng.choice(_AISLES)}{rng.randint(1, 9)}")
+    if field == "zone":
+        return rng.choice(_ZONES)
+    if field == "lot":
+        return "L" + rng.base32(5)
+    if field == "shelf":
+        return f"{rng.choice(_AISLES)}{rng.randint(1, 9)}-{rng.randint(10, 89)}"
+    if field == "bay":
+        return rng.randint(1, 48)
+    if field == "aisle":
+        return f"{rng.choice(_AISLES)}{rng.randint(1, 9)}"
+    if field == "slot":
+        return rng.randint(1, 24)
+    if field == "tag":
+        return "T" + rng.base32(4)
+    if field == "bin":
+        return rng.randint(100, 999)
+    raise ValueError(f"unknown distractor field {field!r}")
 
 
 def generate_task(rng, horizon: int) -> TaskDraft:
@@ -50,7 +90,10 @@ def generate_task(rng, horizon: int) -> TaskDraft:
     nodes: list[OracleNode] = []
     for i, key in enumerate(keys):
         if i < horizon - 1:
-            rec = {"next": keys[i + 1], "note": _note(rng)}
+            schema = _SCHEMAS[rng.randint(0, N_SCHEMAS - 1)]
+            rec = {"next": keys[i + 1]}
+            for field in schema:
+                rec[field] = _distractor(rng, field)
         else:
             rec = {"code": code}
         kb[key] = rec
@@ -65,6 +108,22 @@ def generate_task(rng, horizon: int) -> TaskDraft:
         kb=kb, nodes=nodes, answer=code, answer_kind="token",
         start={"start_key": keys[0]}, env=None, secret_tokens=[],
     )
+
+
+def redact_absent(draft: TaskDraft) -> dict:
+    """Delete the terminal record holding the 128-bit code; return the descriptor.
+
+    Mutates `draft.kb` in place: the committed control split IS the redacted
+    task, so nothing downstream has to reimplement the transform.
+    """
+    target = draft.nodes[-1].args["key"]
+    if target not in draft.kb:
+        raise RuntimeError(f"lookup_chain redaction target {target} not in KB")
+    del draft.kb[target]
+    return {"kind": "kb_record", "target": target, "field": "code",
+            "hidden_entropy_bits": 128,
+            "why": "the terminal 128-bit code is retrievable from exactly one "
+                   "record, and that record is gone"}
 
 
 # 12 paraphrase templates; 0-7 train, 8-9 dev, 10-11 eval.

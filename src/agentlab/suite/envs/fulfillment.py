@@ -123,7 +123,11 @@ class WarehouseState:
         self.budget = int(env["budget"])
         self.mass_limit_kg = int(env["mass_limit_kg"])
         self.finalize_token = env["finalize_token"]
-        self.completion_token = env["completion_token"]
+        # None under the absent-information control: the order still finalizes,
+        # but the terminal completion token is withheld, so the committed answer
+        # is unobtainable from any observation. Deleting a KB record cannot do
+        # this -- express fulfillment reads no KB at all.
+        self.completion_token = env.get("completion_token")
         self.lines = copy.deepcopy(env["lines"])
         self.inventory = {lot: dict(v) for lot, v in env["inventory"].items()}
         self.status = "open"
@@ -264,8 +268,9 @@ class WarehouseState:
         if action == "finalize":
             if token != self.finalize_token:
                 return {"ok": False, "error": "unknown_token"}, meta
-            payload = {"ok": True, "status": "complete",
-                       "completion_token": self.completion_token}
+            payload = {"ok": True, "status": "complete"}
+            if self.completion_token is not None:
+                payload["completion_token"] = self.completion_token
             if self.status == "complete":
                 meta["replay"] = True
                 return payload, meta
@@ -443,6 +448,33 @@ def generate_task(rng, horizon: int) -> TaskDraft:
         start={"order_id": order_id, "order_token": order_token},
         env=env, secret_tokens=secret_tokens,
     )
+
+
+def redact_absent(draft: TaskDraft) -> dict:
+    """Withhold the terminal warehouse completion token; return the descriptor.
+
+    The hidden value of a fulfillment episode is not in the KB -- express orders
+    read no KB record at all -- it is the token the finalize call hands back. So
+    the redaction removes it from the environment and from the finalize node's
+    canonical envelope: the order still completes, and the answer is nowhere in
+    the episode. `draft.answer` deliberately keeps the withheld token, which is
+    what the leakage check scores against.
+    """
+    terminal = draft.nodes[-1]
+    if terminal.tool != "warehouse_update" or terminal.args.get("action") != "finalize":
+        raise RuntimeError("fulfillment absent draft does not end in finalize")
+    token = draft.env.get("completion_token")
+    if not token:
+        raise RuntimeError("fulfillment absent draft has no completion token")
+    draft.env["completion_token"] = None
+    terminal.expect = {k: v for k, v in terminal.expect.items()
+                       if k != "completion_token"}
+    draft.secret_tokens = [t for t in draft.secret_tokens if t != token]
+    return {"kind": "env_completion_token", "target": "env.completion_token",
+            "field": "completion_token",
+            "hidden_entropy_bits": 16 * 5,   # 16 base32 characters
+            "why": "the finalize envelope no longer carries the completion "
+                   "token, and no KB record ever held it"}
 
 
 # ---------------------------------------------------------------------------

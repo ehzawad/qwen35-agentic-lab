@@ -13,7 +13,14 @@ bytes it evaluated.
 
     PYTHONPATH=src .venv/bin/python scripts/export_eval_specs.py \
         [--data data/suite/v1] [--out data/suite/v1/certspecs] \
-        [--splits eval dev eval_stress]
+        [--splits eval eval_mt eval_h8 eval_absent eval_perm ...]
+
+With no --splits it exports every registered split, including the four
+claim/control splits (eval_mt, eval_h8, eval_absent, eval_perm). The two control
+splits are already IN their controlled form: eval_absent rows carry
+`control: "redacted"` with the family-specific redaction applied, and eval_perm
+rows carry `control: "permuted"` with the committed derangement applied, so the
+arm that runs them must not transform them a second time.
 """
 
 from __future__ import annotations
@@ -31,8 +38,12 @@ import sys
 # manifest per split makes it report template overlap as a harness BUG and no
 # verdict can ever issue. `group_of` is the same grouping scripts/validate_suite.py
 # uses, so both checkers mean the same thing by "split".
-GROUP_OF = {"oracle_sft": "train", "distill": "train", "grpo_train": "train",
-            "dev": "dev", "eval": "eval", "eval_stress": "eval"}
+# Taken from the generator so a newly registered split cannot end up ungrouped
+# and therefore silently excluded from the leakage veto.
+def _group_of() -> dict:
+    from agentlab.suite.generate import SPLIT_KIND
+
+    return dict(SPLIT_KIND)
 
 
 def _write(path: str, rows) -> dict:
@@ -50,13 +61,14 @@ def export(data_dir: str, out_dir: str, splits, groups: bool = True) -> dict:
     from agentlab.suite.generate import certification_spec, load_bundles
 
     os.makedirs(out_dir, exist_ok=True)
+    group_of = _group_of()
     written = {}
     by_group: dict = {}
     for split in splits:
         rows = [certification_spec(b) for b in load_bundles(data_dir, split)]
         written[f"{split}.jsonl"] = _write(
             os.path.join(out_dir, f"{split}.jsonl"), rows)
-        by_group.setdefault(GROUP_OF.get(split, split), []).extend(rows)
+        by_group.setdefault(group_of.get(split, split), []).extend(rows)
     if groups:
         gdir = os.path.join(out_dir, "groups")
         os.makedirs(gdir, exist_ok=True)
@@ -75,19 +87,22 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", default="data/suite/v1")
     ap.add_argument("--out", default=None, help="default: <data>/certspecs")
-    # All six by default: the evaluation arms only need dev/eval/eval_stress, but
-    # the verdict's S10 split-leakage veto compares whatever manifests it is
-    # given, so exporting the training splits too lets it check every pair rather
-    # than only dev-vs-eval.
-    ap.add_argument("--splits", nargs="+",
-                    default=["oracle_sft", "distill", "grpo_train",
-                             "dev", "eval", "eval_stress"])
+    # Every split by default. The evaluation arms need dev/eval/eval_stress plus
+    # the four registered claim/control splits (eval_mt, eval_h8, eval_absent,
+    # eval_perm), and the verdict's S10 split-leakage veto compares whatever
+    # manifests it is given, so exporting the training splits too lets it check
+    # every pair rather than only dev-vs-eval.
+    ap.add_argument("--splits", nargs="+", default=None,
+                    help="default: every registered split")
     ap.add_argument("--no-groups", action="store_true",
                     help="skip the merged train/dev/eval group manifests")
     args = ap.parse_args()
 
+    from agentlab.suite.generate import SPLITS
+
     out_dir = args.out or os.path.join(args.data, "certspecs")
-    written = export(args.data, out_dir, args.splits, groups=not args.no_groups)
+    written = export(args.data, out_dir, args.splits or list(SPLITS),
+                     groups=not args.no_groups)
     for rel, meta in sorted(written.items()):
         print(f"  {rel:<20} {meta['rows']:>6} specs  {meta['bytes']:>10} bytes  "
               f"{meta['sha256'][:12]}")

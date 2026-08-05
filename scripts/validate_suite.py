@@ -1,9 +1,10 @@
 #!/usr/bin/env python
-"""Validate suite v1 against the eleven binding failure conditions.
+"""Validate suite v1 against the binding failure conditions.
 
 The validator FAILS (exit 1) on any of:
 
-   1. non-byte-identical regeneration;
+   1. non-byte-identical regeneration, or a committed file whose bytes do not
+      hash to its listed SHA256SUMS value;
    2. any key, terminal token, task ID, template, or whole-task CONTENT HASH
       crossing splits (and no duplicate task content inside a split group);
    3. incorrect declared horizon;
@@ -14,7 +15,22 @@ The validator FAILS (exit 1) on any of:
    8. a successful verifier result with a missing oracle node;
    9. a same-decision dependency being credited;
   10. unknown-key errors exposing the KB key list;
-  11. evaluation data appearing in SFT or GRPO inputs.
+  11. evaluation data appearing in SFT or GRPO inputs;
+  12. a SHORTFALL in any registered claim or control cardinality -- exact split
+      totals, the three core-eval fault groups, the six MT order patterns and
+      their structural-cluster floor, the 400 H8 pairs, 200 absent-information
+      tasks per family per arm, exactly 100 deranged permutation tasks, and the
+      per-axis dev pool the prompt tournament needs;
+  13. a missing or drifted `template_cluster_id` -- the bootstrap resampling
+      unit -- on any scored task;
+  14. an absent-information control whose hidden value is in fact reachable, or
+      whose redaction is a no-op against its own unredacted twin;
+  15. a permutation control that is not a fixed-point-free derangement, or whose
+      terminal value did not actually move.
+
+Condition 12 exists because the alternative failure mode is silent: a split that
+is short does not look broken, it looks like a preregistered gate that turned out
+to be "INCONCLUSIVE" after the GPU time was already spent.
 
 CPU-only. Usage:
 
@@ -29,10 +45,13 @@ import os
 import sys
 import tempfile
 
-EXPECTED_TOTALS = {"oracle_sft": 4800, "distill": 2400, "grpo_train": 2400,
-                   "dev": 240, "eval": 1200, "eval_stress": 280}
 TRAIN_SPLITS = ("oracle_sft", "distill", "grpo_train")
-EVAL_SPLITS = ("eval", "eval_stress")
+EVAL_SPLITS = ("eval", "eval_stress", "eval_mt", "eval_h8", "eval_absent",
+               "eval_perm")
+# The absent-information control is deliberately unreachable, so it is exempt
+# from "the oracle trajectory must verify" -- and gets its own, stricter check
+# (14) that the trajectory must NOT reach the hidden value.
+UNREACHABLE_SPLITS = ("eval_absent",)
 
 
 def _fresh_runtime(bundle):
@@ -42,37 +61,250 @@ def _fresh_runtime(bundle):
 
 
 def check_regeneration(cfg, data_dir) -> list[str]:
+    """Check 1: the committed bytes hash to their listed sums AND regenerate.
+
+    Two separate claims, and the second used to be mistaken for the first: the
+    old check compared the committed SHA256SUMS TEXT to a regenerated one and
+    never hashed a single data file, so a corrupted payload passed as long as the
+    sums file was untouched. `sha256sum -c` is done here, in Python, over every
+    listed path -- and the paths themselves are checked for the tricks a hostile
+    or buggy writer produces (absolute, escaping, duplicated).
+    """
     from agentlab.suite.generate import generate_all
+    from agentlab.suite.schema import file_sha256
 
     sums_path = os.path.join(data_dir, "SHA256SUMS")
     if not os.path.exists(sums_path):
         return [f"missing {sums_path}; run scripts/generate_suite.py first"]
     with open(sums_path, encoding="utf-8") as fh:
         committed = fh.read()
+
+    problems: list[str] = []
+    listed: dict[str, str] = {}
+    for line in committed.splitlines():
+        if not line.strip():
+            continue
+        digest, _, rel = line.partition("  ")
+        if len(digest) != 64 or not rel:
+            problems.append(f"SHA256SUMS: malformed line {line!r}")
+            continue
+        if rel in listed:
+            problems.append(f"SHA256SUMS: duplicate entry {rel}")
+        if os.path.isabs(rel) or "\\" in rel or ".." in rel.split("/"):
+            problems.append(f"SHA256SUMS: unsafe path {rel!r}")
+            continue
+        listed[rel] = digest
+    for rel, digest in sorted(listed.items()):
+        path = os.path.join(data_dir, rel)
+        if not os.path.exists(path):
+            problems.append(f"SHA256SUMS lists {rel}, which is missing on disk")
+        elif file_sha256(path) != digest:
+            problems.append(f"{rel}: on-disk bytes do not match SHA256SUMS")
+
     with tempfile.TemporaryDirectory(prefix="suite-regen-") as tmp:
-        generate_all(cfg, tmp)
-        with open(os.path.join(tmp, "SHA256SUMS"), encoding="utf-8") as fh:
+        regen_dir = os.path.join(tmp, "v1")
+        generate_all(cfg, regen_dir)
+        with open(os.path.join(regen_dir, "SHA256SUMS"), encoding="utf-8") as fh:
             regenerated = fh.read()
     if committed != regenerated:
-        return ["regeneration is not byte-identical to the committed artifacts"]
-    return []
+        problems.append("regeneration is not byte-identical to the committed "
+                        "artifacts")
+    return problems
 
 
 def check_sizes(splits_data, cfg) -> list[str]:
+    """Check 12: every registered cardinality, per split and across splits.
+
+    A shortfall is a hard failure here rather than an "INCONCLUSIVE" verdict
+    later. Nothing in this function is allowed to compare against a number
+    derived from the data itself -- the expectations come from the registered
+    tables in agentlab.suite.generate.
+    """
+    from agentlab.suite.generate import (EVAL_FAULT_GROUPS, MT_MAX_PER_CLUSTER,
+                                         MT_MIN_CLUSTERS, MT_PATTERNS,
+                                         REGISTERED_DEV_PER_AXIS,
+                                         REGISTERED_H8_PER_FAMILY,
+                                         REGISTERED_H8_TOTAL,
+                                         REGISTERED_TOTALS, SPLITS,
+                                         assert_suite_cardinalities,
+                                         cells_of, cluster_census,
+                                         fault_group_census)
+
     problems = []
-    for split, bundles in splits_data.items():
+    for split in SPLITS:
+        bundles = splits_data.get(split)
+        if not bundles:
+            problems.append(f"{split}: split is absent from the suite")
+            continue
         cells = {}
         for b in bundles:
-            cells.setdefault((b.spec.family, b.spec.horizon), 0)
-            cells[(b.spec.family, b.spec.horizon)] += 1
+            key = (b.spec.family, b.spec.horizon, b.spec.pattern_id)
+            cells[key] = cells.get(key, 0) + 1
         expected_cell = cfg["sizes"][split]
-        for cell, n in cells.items():
+        n_cells = len(cells_of(split))
+        for cell, n in sorted(cells.items(), key=str):
             if n != expected_cell:
                 problems.append(f"{split} cell {cell}: {n} != {expected_cell}")
-        default_total = EXPECTED_TOTALS.get(split)
-        if default_total is not None and cfg["sizes"][split] * len(cells) != default_total:
-            problems.append(f"{split}: total {cfg['sizes'][split] * len(cells)} "
-                            f"!= committed {default_total}")
+        if len(cells) != n_cells:
+            problems.append(f"{split}: {len(cells)} realized cells != "
+                            f"{n_cells} registered")
+        if len(bundles) != REGISTERED_TOTALS[split]:
+            problems.append(f"{split}: {len(bundles)} specs != registered "
+                            f"{REGISTERED_TOTALS[split]}")
+
+    # core eval fault GROUPS: transient+rate_limit / malformed / wrong_unit
+    got_groups = fault_group_census(splits_data.get("eval", []))
+    if got_groups != EVAL_FAULT_GROUPS:
+        problems.append(f"eval fault groups {got_groups} != registered "
+                        f"{EVAL_FAULT_GROUPS}")
+
+    # the six registered MT order patterns and their structural clusters
+    mt = splits_data.get("eval_mt", [])
+    per_pattern: dict = {}
+    for b in mt:
+        per_pattern[b.spec.pattern_id] = per_pattern.get(b.spec.pattern_id, 0) + 1
+    want_each = REGISTERED_TOTALS["eval_mt"] // len(MT_PATTERNS)
+    if sorted(k for k in per_pattern if k is not None) != list(range(len(MT_PATTERNS))):
+        problems.append(f"MT patterns realized: {sorted(map(str, per_pattern))} "
+                        f"!= 0..{len(MT_PATTERNS) - 1}")
+    for pid, n in sorted(per_pattern.items(), key=str):
+        if n != want_each:
+            problems.append(f"MT pattern {pid}: {n} specs != registered {want_each}")
+    census = cluster_census(mt)
+    if census["clusters"] < MT_MIN_CLUSTERS:
+        problems.append(f"MT structural clusters {census['clusters']} < registered "
+                        f"{MT_MIN_CLUSTERS}")
+    if census["max_per_cluster"] > MT_MAX_PER_CLUSTER:
+        problems.append(f"MT cluster holds {census['max_per_cluster']} "
+                        f"instantiations > registered {MT_MAX_PER_CLUSTER}")
+    # The registered MT1 stratum is ["eval", "eval_mt"], so the cluster floor and
+    # ceiling bind over the combined all-tools H4 sample, not over eval_mt alone.
+    mt_stratum = [b for split in ("eval", "eval_mt")
+                  for b in splits_data.get(split, [])
+                  if b.spec.horizon == 4
+                  and {"kb_lookup", "unit_convert", "calculator"}
+                  <= {n.tool for n in b.nodes}]
+    stratum = cluster_census(mt_stratum)
+    if stratum["clusters"] < MT_MIN_CLUSTERS:
+        problems.append(f"MT gated stratum: {stratum['clusters']} clusters < "
+                        f"registered {MT_MIN_CLUSTERS}")
+    if stratum["max_per_cluster"] > MT_MAX_PER_CLUSTER:
+        problems.append(f"MT gated stratum: a cluster holds "
+                        f"{stratum['max_per_cluster']} instantiations > "
+                        f"registered {MT_MAX_PER_CLUSTER}")
+
+    # H8 pairs, absent-information coverage, permutation size
+    h8: dict = {}
+    for split in ("eval", "eval_h8"):
+        for b in splits_data.get(split, []):
+            if b.spec.horizon == 8 and b.spec.family in ("lookup_chain",
+                                                         "typed_relay"):
+                h8[b.spec.family] = h8.get(b.spec.family, 0) + 1
+    if sum(h8.values()) != REGISTERED_H8_TOTAL:
+        problems.append(f"H8 pairs {sum(h8.values())} != registered "
+                        f"{REGISTERED_H8_TOTAL} ({h8})")
+    for family, n in sorted(h8.items()):
+        if n != REGISTERED_H8_PER_FAMILY:
+            problems.append(f"H8 {family}: {n} != registered "
+                            f"{REGISTERED_H8_PER_FAMILY}")
+
+    absent: dict = {}
+    for b in splits_data.get("eval_absent", []):
+        absent[b.spec.family] = absent.get(b.spec.family, 0) + 1
+    want_absent = REGISTERED_TOTALS["eval_absent"] // 3
+    if sorted(absent) != ["fulfillment", "lookup_chain", "typed_relay"]:
+        problems.append(f"absent-information families {sorted(absent)}: all three "
+                        f"are registered, per arm")
+    for family, n in sorted(absent.items()):
+        if n != want_absent:
+            problems.append(f"absent-information {family}: {n} != registered "
+                            f"{want_absent} per arm")
+
+    try:
+        realized = assert_suite_cardinalities(splits_data)
+    except AssertionError as exc:
+        problems.append(f"cross-split cardinality: {exc}")
+        realized = {}
+    for axis in ("recovery", "orchestration", "h8"):
+        size = realized.get(f"dev_{axis}_axis")
+        if size is not None and size < REGISTERED_DEV_PER_AXIS:
+            problems.append(f"dev {axis} axis pool {size} < registered "
+                            f"{REGISTERED_DEV_PER_AXIS}: the two-round prompt "
+                            f"tournament cannot execute")
+    return problems
+
+
+def check_template_clusters(splits_data) -> list[str]:
+    """Check 13: the bootstrap unit exists, is structural, and has not drifted.
+
+    Also reports the realized cluster count per split. A split whose scored tasks
+    all collapse into one cluster is not a validity failure by itself -- a family
+    can genuinely have one structure -- but the CORE eval split collapsing is,
+    because the primary claim's clustered interval is computed over it.
+    """
+    from agentlab.suite.schema import template_cluster_id
+
+    problems = []
+    for split, bundles in sorted(splits_data.items()):
+        for b in bundles:
+            want = template_cluster_id(b.spec.family, b.spec.horizon, b.nodes)
+            if b.spec.template_cluster_id != want:
+                problems.append(f"{b.spec.task_id}: stored template_cluster_id "
+                                f"{b.spec.template_cluster_id} != structural {want}")
+                break
+    core = splits_data.get("eval", [])
+    n_clusters = len({b.spec.template_cluster_id for b in core})
+    if core and n_clusters < 12:
+        problems.append(f"core eval has {n_clusters} structural clusters; fewer "
+                        f"than one per family/horizon cell means the clustered "
+                        f"bootstrap is not clustering on structure")
+    return problems
+
+
+def check_absent_information(splits_data, cfg) -> list[str]:
+    """Check 14: the hidden value really is unavailable, per family."""
+    from agentlab.suite.generate import (SPLIT_SEED_KEY, absent_information_problems,
+                                         build_task, cells_of)
+
+    problems: list[str] = []
+    cells = {c.family: c for c in cells_of("eval_absent")}
+    seed = cfg["seeds"][SPLIT_SEED_KEY["eval_absent"]]
+    for b in splits_data.get("eval_absent", []):
+        cell = cells[b.spec.family]
+        index = int(b.spec.task_id.rsplit("-", 1)[1])
+        twin = build_task(cfg["suite"], seed, "eval_absent", cell.family,
+                          cell.horizon, index, None, variant=cell.variant,
+                          apply_control=False)
+        problems += absent_information_problems(b, twin)
+    return problems
+
+
+def check_permutation(splits_data) -> list[str]:
+    """Check 15: a fixed-point-free derangement in which every value moved."""
+    bundles = splits_data.get("eval_perm", [])
+    problems = []
+    donors = {}
+    for b in bundles:
+        meta = b.spec.control_meta or {}
+        if b.spec.control != "permuted" or not meta:
+            problems.append(f"{b.spec.task_id}: no committed permutation")
+            continue
+        if meta["donor_task_id"] == b.spec.task_id:
+            problems.append(f"{b.spec.task_id}: derangement fixed point")
+        if meta["original_answer"] == meta["permuted_answer"]:
+            problems.append(f"{b.spec.task_id}: terminal value did not move")
+        if b.spec.answer != meta["permuted_answer"]:
+            problems.append(f"{b.spec.task_id}: committed answer is not the "
+                            f"permuted value")
+        record = b.kb.get(meta["target"], {})
+        if record.get(meta["field"]) != meta["permuted_answer"]:
+            problems.append(f"{b.spec.task_id}: terminal record still holds the "
+                            f"original value")
+        if meta["original_answer"] in b.spec.prompt:
+            problems.append(f"{b.spec.task_id}: the original value is in the prompt")
+        donors[b.spec.task_id] = meta["donor_task_id"]
+    if bundles and len(set(donors.values())) != len(bundles):
+        problems.append("the derangement is not a bijection over the 100 tasks")
     return problems
 
 
@@ -198,6 +430,8 @@ def check_oracle_execution(splits_data) -> list[str]:
                                 "replay observation after ambiguous mutation")
 
     for split, bundles in splits_data.items():
+        if split in UNREACHABLE_SPLITS:
+            continue  # check 14 owns these, with the opposite expectation
         paired = split in ("dev",) + EVAL_SPLITS
         for b in bundles:
             if b.spec.faults:
@@ -330,7 +564,7 @@ def check_kb_miss_no_leak(splits_data) -> list[str]:
 
 
 CHECKS = (
-    ("1 regeneration", "regen"),
+    ("1 regeneration + on-disk sha256sum -c", "regen"),
     ("2+11 split isolation / eval leakage", "isolation"),
     ("2b task-content hashes (no crossing, no duplicates)", "content"),
     ("3 declared horizons", "horizons"),
@@ -339,7 +573,10 @@ CHECKS = (
     ("8 missing-node rejection", "missing_node"),
     ("9 same-decision rejection", "same_decision"),
     ("10 kb miss no key leak", "kb_miss"),
-    ("0 committed sizes", "sizes"),
+    ("12 registered claim/control cardinalities", "sizes"),
+    ("13 structural template clusters (the bootstrap unit)", "clusters"),
+    ("14 absent-information control is genuinely unreachable", "absent"),
+    ("15 permutation control is a derangement that moved every value", "perm"),
 )
 
 
@@ -355,6 +592,8 @@ def main() -> int:
     cfg = load_suite_config(args.config)
     data_dir = args.data or cfg["out_dir"]
 
+    from agentlab.suite.generate import cluster_census
+
     print("rebuilding all splits in memory (deterministic) ...")
     splits_data = {}
     for split in SPLITS:
@@ -362,7 +601,10 @@ def main() -> int:
                              cfg["seeds"][SPLIT_SEED_KEY[split]],
                              cfg["sizes"][split])
         splits_data[split] = result["bundles"]
-        print(f"  {split:<12} {len(result['bundles']):>6} specs")
+        census = cluster_census(result["bundles"])
+        print(f"  {split:<12} {len(result['bundles']):>6} specs   "
+              f"{census['clusters']:>5} structural clusters "
+              f"(max {census['max_per_cluster']} instantiations)")
 
     runners = {
         "regen": lambda: check_regeneration(cfg, data_dir),
@@ -374,6 +616,9 @@ def main() -> int:
         "same_decision": lambda: check_same_decision_rejected(splits_data),
         "kb_miss": lambda: check_kb_miss_no_leak(splits_data),
         "sizes": lambda: check_sizes(splits_data, cfg),
+        "clusters": lambda: check_template_clusters(splits_data),
+        "absent": lambda: check_absent_information(splits_data, cfg),
+        "perm": lambda: check_permutation(splits_data),
     }
 
     failed = False

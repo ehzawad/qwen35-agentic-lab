@@ -1,9 +1,13 @@
 # Suite v1 committed generation seeds and sizes.
 #
 # The seed block below is the exact committed form from the council
-# env-architect spec. After the Preregister phase commit these values are
-# FROZEN: a genuinely broken gate gets a dated AMENDMENT section plus fresh
-# held-out seeds, never an in-place change.
+# env-architect spec, extended with one seed per claim/control split. After the
+# Preregister phase commit these values are FROZEN: a genuinely broken gate gets
+# a dated AMENDMENT section plus fresh held-out seeds, never an in-place change.
+#
+# These are the COMMITTED generation seeds, which is a different thing from a
+# held-out test-blindness seed. Whether S18 provides test blindness or only
+# test-set commitment is a protocol-layer question and is not settled here.
 
 suite = "agentlab-suite-v1"
 oracle_sft = 0xA61E0001
@@ -12,18 +16,42 @@ grpo_train = 0xA61E0003
 dev = 0xA61E0004
 eval = 0xA61E0005
 stress = 0xA61E0006
+# The four registered claim/control splits. Distinct seeds keep their keys,
+# tokens and terminal values disjoint from the core splits by construction.
+mt = 0xA61E0011          # six typed_relay tool-order patterns, 100 each
+h8 = 0xA61E0012          # the H8 augmentation that lifts H8 to 400 pairs
+absent = 0xA61E0013      # absent-information control
+perm = 0xA61E0014        # counterfactual permutation control
 
-# Per-cell sizes over the 12 primary family/horizon cells
-# (lookup_chain/typed_relay at H 2/4/8/12; fulfillment at H 4/8/14/20).
-# Totals: oracle_sft 4,800; distill 2,400; grpo_train 2,400; dev 240;
-# eval 1,200; stress 280 (40 per cell at or above H8, 7 cells).
+# Per-cell sizes. The first six splits run over the 12 primary family/horizon
+# cells (lookup_chain/typed_relay at H 2/4/8/12; fulfillment at H 4/8/14/20);
+# stress runs over the 7 cells at or above H8.
+#
+# Registered EXACT totals (not minimums):
+#   oracle_sft  4,800   400 x 12 cells
+#   distill     2,400   200 x 12 cells
+#   grpo_train  2,400   200 x 12 cells
+#   dev         3,600   300 x 12 cells   -- 300 is what the prompt tournament
+#                                           needs in its NARROWEST claim axis
+#                                           (the single typed_relay H4 cell:
+#                                           100 round-one + 200 round-two)
+#   eval        1,200   100 x 12 cells   -- fault groups exactly 400/400/400
+#   stress        280    40 x  7 cells
+#   mt            600   100 x  6 registered tool-order patterns
+#   h8            200   100 x  2 families (with core eval's 200 -> 400 pairs)
+#   absent        600   200 x  3 families, per arm
+#   perm          100    50 x  2 families, one deterministic derangement
 [sizes]
 oracle_sft = 400
 distill = 200
 grpo_train = 200
-dev = 20
+dev = 300
 eval = 100
 stress = 40
+mt = 100
+h8 = 100
+absent = 200
+perm = 50
 
 [layout]
 out_dir = "data/suite/v1"

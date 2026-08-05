@@ -142,6 +142,99 @@ def call_args_digest(tool: str, args: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# STRUCTURAL template clusters (the bootstrap resampling unit)
+#
+# `template_id` is a PARAPHRASE id: which of the 12 wordings rendered the prompt.
+# Held-out evaluation draws from ids 10-11 only, so clustering the bootstrap on
+# it collapses every eval task into two clusters -- one per wording, pooled
+# across families and horizons -- and the clustered confidence intervals then
+# describe two units of information instead of the real structural variety.
+#
+# `template_cluster_id` is the STRUCTURAL identity instead: family, horizon, the
+# tool-order pattern, and the operand ROLE of every oracle node (which fields a
+# KB record exposes, which unit pair a conversion crosses, the arithmetic shape
+# of an expression, which warehouse resource/action a call touches). It is a
+# pure function of (family, horizon, oracle nodes) -- never of the drawn values
+# -- so two tasks share a cluster exactly when they are two value
+# instantiations of one structural template.
+#
+# It is deliberately NOT a split-isolation field. Parameterized instance
+# identity is what must never cross train/dev/eval, and that is the whole-task
+# content hash the validator already enforces; the unparameterized structure is
+# shared by construction, because the same families and horizons are evaluated
+# in every split.
+# ---------------------------------------------------------------------------
+
+_EXPR_OPS = {"Add": "+", "Sub": "-", "Mult": "*", "Div": "/",
+             "FloorDiv": "//", "Mod": "%", "Pow": "**"}
+
+TOOL_SHORT = {"kb_lookup": "kb", "unit_convert": "uc", "calculator": "calc",
+              "warehouse_query": "wq", "warehouse_update": "wu"}
+
+
+def expr_shape(expression: str) -> str:
+    """The arithmetic SHAPE of an expression, constants erased.
+
+    "1200 * 7 + 5" and "48 * 3 + 91" are the same structural template and both
+    render as "((c*c)+c)"; "(48 + 91) * 3" renders as "((c+c)*c)" and is a
+    different one. This is what makes the calculator form a structural role
+    rather than a drawn value.
+    """
+    import ast
+
+    def walk(node) -> str:
+        if isinstance(node, ast.BinOp):
+            op = _EXPR_OPS.get(type(node.op).__name__, "?")
+            return f"({walk(node.left)}{op}{walk(node.right)})"
+        if isinstance(node, ast.UnaryOp):
+            return f"(-{walk(node.operand)})"
+        if isinstance(node, ast.Constant):
+            return "c"
+        return "?"
+
+    try:
+        return walk(ast.parse(str(expression).strip(), mode="eval").body)
+    except (SyntaxError, ValueError):
+        return "?"
+
+
+def node_role(node) -> dict:
+    """One oracle node's structural role: no drawn value survives."""
+    tool = node.tool
+    if tool == "kb_lookup":
+        rec = (node.expect or {}).get("record")
+        return {"t": "kb", "f": sorted(rec) if isinstance(rec, dict) else []}
+    if tool == "unit_convert":
+        return {"t": "uc", "u": [str(node.args.get("from_unit", "")),
+                                 str(node.args.get("to_unit", ""))]}
+    if tool == "calculator":
+        return {"t": "calc", "e": expr_shape(node.args.get("expression", ""))}
+    if tool == "warehouse_query":
+        return {"t": "wq", "r": str(node.args.get("resource", ""))}
+    if tool == "warehouse_update":
+        return {"t": "wu", "a": str(node.args.get("action", ""))}
+    return {"t": tool}
+
+
+def tool_pattern(nodes) -> str:
+    """The tool-order pattern of an oracle DAG, e.g. "kb>uc>calc>kb"."""
+    return ">".join(TOOL_SHORT.get(n.tool, n.tool) for n in nodes)
+
+
+def structural_descriptor(family: str, horizon: int, nodes) -> dict:
+    """The full canonical structure a `template_cluster_id` hashes."""
+    return {"family": family, "horizon": horizon,
+            "pattern": tool_pattern(nodes),
+            "edges": [[i, i + 1] for i in range(len(nodes) - 1)],
+            "roles": [node_role(n) for n in nodes]}
+
+
+def template_cluster_id(family: str, horizon: int, nodes) -> str:
+    """The bootstrap cluster label: "tc-" + 64 bits of the structural digest."""
+    return "tc-" + digest(structural_descriptor(family, horizon, nodes))[:16]
+
+
+# ---------------------------------------------------------------------------
 # dataclasses
 # ---------------------------------------------------------------------------
 
@@ -223,18 +316,31 @@ class TaskSpec:
     max_decisions: int
     max_calls: int
     secret_tokens: list    # capability tokens for provenance checking (fulfillment)
+    # Appended with defaults so any existing positional construction still works.
+    template_cluster_id: str = ""   # STRUCTURAL cluster; the bootstrap unit
+    pattern_id: int | None = None   # 0..5 for registered typed_relay MT orders
+    control: str | None = None      # None | "redacted" | "permuted"
+    control_meta: dict | None = None  # the committed control descriptor
 
     def to_row(self) -> dict:
-        return {
+        row = {
             "task_id": self.task_id, "suite": self.suite, "split": self.split,
             "family": self.family, "horizon": self.horizon,
-            "template_id": self.template_id, "prompt": self.prompt,
+            "template_id": self.template_id,
+            "template_cluster_id": self.template_cluster_id,
+            "pattern_id": self.pattern_id, "prompt": self.prompt,
             "answer": self.answer, "answer_kind": self.answer_kind,
             "start": self.start, "env": self.env,
             "faults": [f.to_row() for f in self.faults],
             "max_decisions": self.max_decisions, "max_calls": self.max_calls,
             "secret_tokens": self.secret_tokens,
         }
+        # Control rows are the exception, not the norm: the 10,000+ ordinary
+        # specs must not each carry two null fields.
+        if self.control is not None:
+            row["control"] = self.control
+            row["control_meta"] = self.control_meta or {}
+        return row
 
     @classmethod
     def from_row(cls, row: dict) -> "TaskSpec":
@@ -247,6 +353,10 @@ class TaskSpec:
             faults=[FaultSpec.from_row(f) for f in row.get("faults", [])],
             max_decisions=int(row["max_decisions"]), max_calls=int(row["max_calls"]),
             secret_tokens=list(row.get("secret_tokens", [])),
+            template_cluster_id=str(row.get("template_cluster_id", "")),
+            pattern_id=(None if row.get("pattern_id") is None
+                        else int(row["pattern_id"])),
+            control=row.get("control"), control_meta=row.get("control_meta"),
         )
 
     def without_faults(self) -> "TaskSpec":

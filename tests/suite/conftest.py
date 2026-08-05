@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import pytest
 
-from agentlab.suite.generate import build_task
+import os
+
+from agentlab.suite.generate import build_task, load_suite_config
 
 SUITE = "agentlab-suite-v1"
 SEED = 0xA61E0005  # the committed eval seed; tests never depend on GPU state
+
+CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "configs", "suite_v1.toml")
+# Read the committed seeds rather than copying them: a duplicated seed table is
+# how a new split ends up generated from the wrong stream, or not at all.
+SEEDS = load_suite_config(CONFIG_PATH)["seeds"]
 
 
 def mk_bundle(family: str, horizon: int, entries=None, split: str = "eval",
