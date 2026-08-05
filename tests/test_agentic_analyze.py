@@ -1,4 +1,4 @@
-"""End-to-end machine verdict: S8-S18 vetoes, ER/MT/HR gates, floors, winner.
+"""End-to-end machine verdict: S8-S19 vetoes, ER/MT/HR gates, floors, winner.
 
 The heavy fixture drives the REAL episode loop (scripted policies, real fault
 injection, real receipts) at PREREGISTERED scale: the registered 1,200 core
@@ -23,7 +23,7 @@ import pathlib
 
 import pytest
 from agentic_helpers import (SECRET, Guesser, ScriptedOracle, chain_spec,
-                             make_arm_policy, relay_spec, run)
+                             engine_fingerprint, make_arm_policy, relay_spec, run)
 
 from agentlab import provenance
 from agentlab.analyze import (agentic_verdict, load_preregister,
@@ -52,6 +52,40 @@ def _write(path: pathlib.Path, rows):
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
+def _disposition_artifact(**overrides) -> dict:
+    """The registered GRPO stage-disposition artifact, built from the JSON.
+
+    ---- SEAM (frozen contract, owed by the lock/chain layer) -------------------
+    In production `results/agentic/grpo_disposition.json` is written by the stage
+    driver before RS-SFT is locked; the analyzer only READS it. Every value here
+    comes from `machine.grpo_disposition`, so a fixture cannot invent a
+    disposition the preregistration does not allow.
+    """
+    reg = _M["grpo_disposition"]
+    inf = reg["hardware_infeasible"]
+    art = {
+        "branch": reg["expected_branch"],
+        "outcome": inf["outcome"],
+        "variance_gate": inf["variance_gate"],
+        "trainer_feasibility": inf["trainer_feasibility"],
+        "optimizer_steps": inf["optimizer_steps"],
+        "gpu_name": _M["hardware_integrity"]["expected_gpu_name"],
+        "cuda_visible_bytes": _M["hardware_integrity"]["expected_cuda_visible_bytes"],
+        "config_hash": "cfg-0123456789ab",
+        "checkpoint_hash": "sha256:" + "b" * 64,
+        "git_sha": "deadbeef",
+        "arithmetic": {k: inf[k] for k in inf["arithmetic_fields"]},
+        "timestamp_utc": "2026-08-05T00:00:00Z",
+    }
+    art.update(overrides)
+    return art
+
+
+def _write_disposition(results_dir: pathlib.Path, **overrides):
+    (results_dir / "grpo_disposition.json").write_text(
+        json.dumps(_disposition_artifact(**overrides)))
+
+
 def _locks_and_reveal(results_dir: pathlib.Path):
     locks = {"checkpoint": {"path": LOCKED_ADAPTER, "stage": "rs_sft",
                             "locked_at": "2026-08-05T00:00:00Z", "commit": "aaa111"},
@@ -64,6 +98,9 @@ def _locks_and_reveal(results_dir: pathlib.Path):
               "preregistration_commit": "deadbeef", "heldout_seed": seed}
     (results_dir / "locks.json").write_text(json.dumps(locks))
     (results_dir / "seed_reveal.json").write_text(json.dumps(reveal))
+    # RS-SFT is the sole trained candidate only because GRPO is registered as
+    # hardware-infeasible; the analyzer requires that receipt beside the lock.
+    _write_disposition(results_dir)
 
 
 def core_specs(n_per_group=N_PER_GROUP):
@@ -478,7 +515,14 @@ def test_every_registered_threshold_holds_its_unchanged_value():
 # literal margins at :988, :1012, :1064), plus the bootstrap block size.
 FORBIDDEN_LITERALS = {500, 900, 600, 400, 300, 240, 80, 20, 2000, 1152,
                       0.05, 0.03, 0.01, 0.02, 0.6, 0.60, 0.65, 0.40, 0.25,
-                      -0.03, -0.05, 36.0}
+                      -0.03, -0.05, 36.0,
+                      # the single-card pivot's operational numbers: the budget
+                      # ceiling, the mandatory census, the registered card's
+                      # CUDA-visible bytes, the engine contract's utilisation and
+                      # context, and the GRPO infeasibility arithmetic. None of
+                      # them decides a gate, and none may be retyped in code
+                      # either -- the analyzer reads them from the JSON.
+                      120.0, 7800, 25282805760, 0.80, 0.8, 8192, 5.651, 8.455}
 # Structurally innocent numbers: list/byte slices, `n // 2`, string padding,
 # truth-table rank ids, and the 0.0/1.0 identities of a probability.
 ALLOWED_LITERALS = {0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 0.0, 1.0}
@@ -933,3 +977,382 @@ def test_every_declared_mandatory_check_is_implemented(full_results):
     declared = set(_M["mandatory_harness_checks"])
     assert declared == set(full_results["vetoes"])
     assert declared == set(full_results["mandatory_harness_checks"])
+
+
+# ---------------------------------------------------------------------------
+# S19 HARDWARE-INTEGRITY: one physical A5000, one engine, full provenance
+# ---------------------------------------------------------------------------
+
+_HW = _M["hardware_integrity"]
+
+
+def test_s19_is_mandatory_and_clean_on_one_registered_card(full_results):
+    """The OK outcome: one run_id, one physical UUID, one engine fingerprint."""
+    assert "S19" in _M["mandatory_harness_checks"]
+    s19 = full_results["vetoes"]["S19"]
+    assert s19["status"] == "OK", s19
+    assert s19["numbers"]["n_traces"] > 0
+    assert s19["numbers"]["gpu_uuid"]
+    assert _HW["expected_gpu_name"] in s19["detail"]
+    assert "S8-S19" in render_agentic_verdict(full_results)
+
+
+def test_s19_missing_hardware_provenance_is_inconclusive_and_no_winner(tmp_path):
+    """Outcome 1 of 4: MISSING provenance is missing evidence, never an assumed card.
+
+    An unlabelled trace is not silently treated as the registered A5000: without
+    the fingerprint the claim "the weights were the only difference" is
+    unverifiable, so the run gets no winner at all.
+    """
+    def mutate(rows, specs):
+        for row in rows["TP.faulted.none.jsonl"]:
+            del row["provenance"]["gpu_uuid"]
+    v = _mini(tmp_path, mutate, n=40)
+    s19 = v["vetoes"]["S19"]
+    assert s19["status"] == "INCONCLUSIVE", s19
+    assert not v["any_bug"]
+    assert "gpu_uuid" in s19["detail"]
+    assert "S19" in v["mandatory_inconclusive"]
+    assert v["winner_rank"] == 2 and "NO VERDICT" in v["winner"]
+    assert "S19" in v["winner"]
+
+
+def test_s19_a_known_wrong_card_is_a_bug(tmp_path):
+    """Outcome 2 of 4: the wrong GPU model is a harness BUG, not a nuance."""
+    def mutate(rows, specs):
+        for row in rows["TP.clean.none.jsonl"]:
+            row["provenance"]["gpu_name"] = "NVIDIA RTX A6000"
+    v = _mini(tmp_path, mutate)
+    assert v["vetoes"]["S19"]["status"] == "BUG", v["vetoes"]["S19"]
+    assert "known-wrong card" in v["vetoes"]["S19"]["detail"]
+    assert v["any_bug"] and v["winner_rank"] == 1
+    assert all(g["status"] == "BUG" for g in v["gates"].values())
+
+
+def test_s19_a_wrong_cuda_visible_byte_count_is_a_bug(tmp_path):
+    """A card that reports a different total memory is a different card."""
+    def mutate(rows, specs):
+        for row in rows["TP.clean.none.jsonl"]:
+            row["provenance"]["cuda_visible_bytes"] = 51527024640  # 48 GB class
+    v = _mini(tmp_path, mutate)
+    assert v["vetoes"]["S19"]["status"] == "BUG"
+    assert str(_HW["expected_cuda_visible_bytes"]) in v["vetoes"]["S19"]["detail"]
+
+
+def test_s19_mixed_gpu_uuid_inside_one_run_id_is_a_bug(tmp_path):
+    """Outcome 3 of 4: one run_id must sit on exactly one physical card."""
+    def mutate(rows, specs):
+        for row in rows["TP.clean.none.jsonl"][:5]:
+            row["provenance"]["gpu_uuid"] = "GPU-ffffffff-0000-0000-0000-000000000002"
+    v = _mini(tmp_path, mutate)
+    s19 = v["vetoes"]["S19"]
+    assert s19["status"] == "BUG", s19
+    assert "distinct physical GPU" in s19["detail"]
+    assert v["any_bug"] and "NO VERDICT" in v["winner"]
+
+
+def test_s19_a_replication_may_not_append_to_an_existing_trace_set(tmp_path):
+    """An independent replication needs a NEW run_id AND its own trace set.
+
+    Appending replication rows to an existing set is how two cards end up inside
+    one claim, which is exactly what this veto exists to catch. The registered
+    escape hatch is a separate run, not a second run_id in one directory.
+    """
+    def mutate(rows, specs):
+        for row in rows["TP.clean.none.jsonl"][:4]:
+            row["provenance"]["run_id"] = "replication-2"
+            row["provenance"]["gpu_uuid"] = "GPU-ffffffff-0000-0000-0000-000000000003"
+    v = _mini(tmp_path, mutate)
+    s19 = v["vetoes"]["S19"]
+    assert s19["status"] == "BUG", s19
+    assert "distinct run_ids" in s19["detail"]
+
+
+def test_s19_paired_arms_must_share_the_hardware_and_engine_fingerprint(tmp_path):
+    """A paired comparison across two cards is not a weights comparison."""
+    def mutate(rows, specs):
+        for row in rows["BP.clean.none.jsonl"]:
+            row["provenance"]["driver_version"] = "999.99.99"
+    v = _mini(tmp_path, mutate)
+    s19 = v["vetoes"]["S19"]
+    assert s19["status"] == "BUG", s19
+    assert ("not the only difference" in s19["detail"]
+            or "distinct engine fingerprints" in s19["detail"])
+
+
+def test_s19_thinking_left_on_contradicts_the_registered_engine_contract(tmp_path):
+    """Outcome 4 of 4: a mixed/contradicted ENGINE fingerprint is a BUG.
+
+    The live probe showed this checkpoint defaults thinking ON, so a run that
+    never disabled it is measuring a different apparatus from the registered one.
+    """
+    def mutate(rows, specs):
+        for arm in ("BP", "TP"):
+            for row in rows[f"{arm}.clean.none.jsonl"] + rows[f"{arm}.faulted.none.jsonl"]:
+                row["provenance"]["enable_thinking_effective"] = True
+                row["provenance"]["engine_fingerprint"] = engine_fingerprint(
+                    enable_thinking=True)
+    v = _mini(tmp_path, mutate)
+    s19 = v["vetoes"]["S19"]
+    assert s19["status"] == "BUG", s19
+    assert "enable_thinking" in s19["detail"]
+    assert v["any_bug"]
+
+
+def test_s19_off_contract_engine_settings_are_a_bug(tmp_path):
+    """gpu_memory_utilization 0.85 is not the registered 0.80."""
+    off = _M["engine_contract"]["gpu_memory_utilization"] + 0.05
+
+    def mutate(rows, specs):
+        for arm in ("BP", "TP"):
+            for row in rows[f"{arm}.clean.none.jsonl"] + rows[f"{arm}.faulted.none.jsonl"]:
+                row["provenance"]["engine_fingerprint"] = engine_fingerprint(
+                    gpu_memory_utilization=off)
+    v = _mini(tmp_path, mutate)
+    s19 = v["vetoes"]["S19"]
+    assert s19["status"] == "BUG", s19
+    assert "engine contract" in s19["detail"]
+
+
+# ---------------------------------------------------------------------------
+# the GRPO stage disposition: not a gate state, and required when there is no
+# GRPO checkpoint
+# ---------------------------------------------------------------------------
+
+def test_the_registered_grpo_disposition_is_recorded_and_is_not_a_gate_state(
+        full_results):
+    d = full_results["grpo_stage_disposition"]
+    assert d["disposition"] == _M["grpo_disposition"][
+        "registered_disposition_for_this_run"] == "GRPO_NOT_RUN_HARDWARE_INFEASIBLE"
+    assert d["check_status"] == "OK" and d["required"] is True
+    # a DISPOSITION is not one of the four capability outcome states, and never
+    # leaks into a gate, a claim, a floor or the winner
+    prereg = load_preregister(PREREG)
+    assert d["disposition"] not in prereg["outcome_states"]
+    assert d["disposition"] not in _M["status_precedence"]["official_order"]
+    blob = json.dumps({"gates": full_results["gates"],
+                       "claims": full_results["claims"],
+                       "floors": full_results["floors"],
+                       "winner": full_results["winner"]})
+    assert "GRPO_NOT_RUN" not in blob
+    text = render_agentic_verdict(full_results)
+    assert "GRPO stage disposition" in text
+    assert "never a gate state" in text
+    # and the probe is NOT_EVALUATED, never "closed"
+    assert "NOT_EVALUATED_HARDWARE_SHORT_CIRCUIT" in text
+    assert "VARIANCE_GATE_CLOSED" not in text
+
+
+def test_a_missing_grpo_checkpoint_with_no_disposition_never_selects_rs_sft(tmp_path):
+    """The error state the council asked for: silence is not a disposition.
+
+    RS-SFT is the sole trained candidate only because the GRPO branch is
+    registered as hardware-infeasible. Without that receipt, "RS-SFT was locked"
+    is indistinguishable from "GRPO ran and lost", and only one of those is a
+    reportable outcome -- so the analyzer refuses rather than selecting by default.
+    """
+    traces = tmp_path / "traces"
+    specs = [chain_spec(i, horizon=2) for i in range(4)]
+    for arm in ("BP", "TP"):
+        _write(traces / f"{arm}.clean.none.jsonl",
+               [run(s, ScriptedOracle(s), arm=arm, condition="clean",
+                    prompt_sha=P8_SHA) for s in specs])
+    (tmp_path / "secret.hex").write_text(SECRET.hex())
+    _locks_and_reveal(tmp_path)
+
+    def verdict():
+        return agentic_verdict(str(traces), str(PREREG),
+                               str(tmp_path / "secret.hex"),
+                               results_dir=str(tmp_path))
+
+    assert verdict()["vetoes"]["S16"]["status"] == "OK"
+    (tmp_path / "grpo_disposition.json").unlink()
+    v = verdict()
+    assert v["grpo_stage_disposition"]["check_status"] == "BUG"
+    assert v["vetoes"]["S16"]["status"] == "BUG", v["vetoes"]["S16"]
+    assert "no allowed disposition" in v["vetoes"]["S16"]["detail"]
+    assert v["any_bug"] and v["winner_rank"] == 1 and "NO VERDICT" in v["winner"]
+
+
+@pytest.mark.parametrize("overrides,expect", [
+    ({"outcome": "GRPO_SKIPPED"}, "not one of the registered dispositions"),
+    ({"optimizer_steps": 1}, "requires exactly 0"),
+    ({"variance_gate": "CLOSED"}, "registered value for"),
+    ({"arithmetic": {"vllm_allocation_gib": 9.0, "vllm_policy_copy_gib": 8.455}},
+     "does not show the shortfall"),
+    ({"arithmetic": {}}, "arithmetic must record"),
+    ({"gpu_name": "NVIDIA RTX A6000"}, "is not the registered"),
+    ({"substituted_variant": "microbatch 1"}, "DIFFERENT treatment"),
+    ({"outcome": "GRPO_NOT_RUN_VARIANCE_GATE_CLOSED"}, "not interchangeable"),
+])
+def test_an_unfrozen_grpo_disposition_is_a_bug(tmp_path, overrides, expect):
+    """Each frozen precondition is enforced, including the label distinction.
+
+    The last case is the one the council was most explicit about: labelling a
+    hardware short-circuit as a CLOSED VARIANCE GATE would assert evidence about
+    the RS-SFT policy's reward variance that the run never collected.
+    """
+    traces = tmp_path / "traces"
+    specs = [chain_spec(i, horizon=2) for i in range(4)]
+    for arm in ("BP", "TP"):
+        _write(traces / f"{arm}.clean.none.jsonl",
+               [run(s, ScriptedOracle(s), arm=arm, condition="clean",
+                    prompt_sha=P8_SHA) for s in specs])
+    (tmp_path / "secret.hex").write_text(SECRET.hex())
+    _locks_and_reveal(tmp_path)
+    _write_disposition(tmp_path, **overrides)
+    v = agentic_verdict(str(traces), str(PREREG), str(tmp_path / "secret.hex"),
+                        results_dir=str(tmp_path))
+    d = v["grpo_stage_disposition"]
+    assert d["check_status"] == "BUG", d
+    assert expect in d["detail"], d["detail"]
+    assert v["vetoes"]["S16"]["status"] == "BUG"
+    assert v["any_bug"]
+
+
+def test_grpo_arm_traces_cannot_coexist_with_a_not_run_disposition(tmp_path):
+    """R0/RP are ABSENT BY DESIGN: a GRPO arm that ran contradicts the receipt."""
+    traces = tmp_path / "traces"
+    specs = [chain_spec(i, horizon=2) for i in range(4)]
+    for arm in ("BP", "TP", "RP"):
+        _write(traces / f"{arm}.clean.none.jsonl",
+               [run(s, ScriptedOracle(s), arm=arm, condition="clean",
+                    prompt_sha=P8_SHA) for s in specs])
+    (tmp_path / "secret.hex").write_text(SECRET.hex())
+    _locks_and_reveal(tmp_path)
+    v = agentic_verdict(str(traces), str(PREREG), str(tmp_path / "secret.hex"),
+                        results_dir=str(tmp_path))
+    d = v["grpo_stage_disposition"]
+    assert d["check_status"] == "BUG", d
+    assert "absent by design" in d["detail"]
+
+
+# ---------------------------------------------------------------------------
+# the single-card pivot: budget, census, and what did NOT change
+# ---------------------------------------------------------------------------
+
+def test_the_ceiling_is_120_measured_a5000_hours_with_its_derivation():
+    prereg = load_preregister(PREREG)
+    b = prereg["budget"]
+    assert b["ceiling_gpu_hours"] == 120.0
+    assert "A5000" in b["ceiling_hardware"]
+    der = b["ceiling_derivation"]
+    assert der["previous_ceiling_gpu_hours"] == 36.0
+    assert der["mandatory_episodes"] == 7800
+    # the derivation is anchored on DIRECTLY MEASURED evaluator rates
+    assert der["measured_rates"]["base_arm_s_per_episode"] == 25.10
+    assert der["measured_rates"]["trained_arm_s_per_episode"] == 44.27
+    lo, hi = der["projection_gpu_hours"]["paired_total"]
+    assert 70 < lo < hi < 100
+    # the fast path is an EXPECTATION and is labelled as one
+    assert der["engineering_target_expectation_gpu_hours"] == [14, 21]
+    assert "UNVALIDATED EXPECTATION" in der["engineering_target_status"]
+    assert "NEVER A REGISTERED MEASUREMENT" in der["engineering_target_status"]
+    # and the never-shrink rule survives the raise
+    assert "120.0-hour ceiling" in b["mandatory"]["infeasibility_rule"]
+    assert "NEVER shrink" in b["mandatory"]["rule"]
+
+
+def test_the_mandatory_census_is_the_corrected_7800_episodes():
+    c = load_preregister(PREREG)["budget"]["mandatory_episode_census"]
+    parts = [c["core_1200_tasks_x_clean_faulted_x_2_arms"],
+             c["mt_600_x_2_arms"],
+             c["h8_200_additional_tasks_x_2_arms"],
+             c["absent_information_600_x_2_arms_clean_only"],
+             c["permutation_100_x_2_arms"]]
+    assert parts == [4800, 1200, 400, 1200, 200]
+    assert sum(parts) == c["mandatory_total"] == 7800
+    # H8: 400 registered paired tasks, only 200 of them ADDITIONAL to core
+    assert _M["registered_cardinalities"]["h8_total"] == 400
+    # the controls stay clean-only; adding faulted controls would be new
+    assert "clean_only" in "".join(c)
+    assert "NEW pre-registration choice" in c["note"]
+
+
+def test_the_hardware_pivot_changed_no_threshold_margin_or_sample_size():
+    """The claim the receipt makes, enforced.
+
+    Every decision threshold keeps the value it had before the pivot (the shared
+    FROZEN_VALUES table), every registered cardinality is unchanged, and the cut
+    order keeps its frozen ranks. The only numeric change is the operational
+    budget ceiling, which decides no gate.
+    """
+    prereg = load_preregister(PREREG)
+    m = prereg["machine"]
+    for path, want in FROZEN_VALUES:          # the pre-pivot values, byte-identical
+        node = m
+        for key in path:
+            node = node[key]
+        assert node == want, f"machine.{'.'.join(path)} moved to {node}"
+    card = m["registered_cardinalities"]
+    assert (card["eval_core"], card["fault_groups_each"], card["mt_total"],
+            card["h8_total"], card["stress_total"],
+            card["absent_information_per_family_per_arm"],
+            card["permutation_per_arm"]) == (1200, 400, 600, 400, 280, 200, 100)
+    assert [c["rank"] for c in prereg["budget"][
+        "cut_order_if_calibration_projects_overrun"]] == [1, 2, 3, 4]
+    assert "GRPO branch" in prereg["budget"][
+        "cut_order_if_calibration_projects_overrun"][0]["cut"]
+    assert "UNCHANGED BY THE HARDWARE PIVOT" in prereg["budget"]["cut_order_rule"]
+    # the GRPO hyperparameters are NOT rewritten to fit the smaller card
+    probe = prereg["grpo"]["variance_probe"]
+    assert (probe["groups_total"], probe["generations_per_group"],
+            probe["rollouts_total"]) == (144, 8, 1152)
+    assert probe["binding_gates"]["nonzero_total_reward_sd_fraction_min"] == 0.60
+    assert probe["binding_gates"]["terminal_success_disagreement_fraction_min"] == 0.40
+
+
+def test_the_pivot_receipt_records_zero_gpu_hours_and_zero_heldout_results():
+    """What makes the pivot outcome-blind rather than a moved goalpost."""
+    r = load_preregister(PREREG)["hardware_pivot_receipt"]
+    assert r["date"] == "2026-08-05"
+    state = r["state_of_the_study_when_the_card_changed"]
+    assert state["measured_study_gpu_hours"] == 0.0
+    assert state["gpu_ledger_records"] == 0
+    assert state["heldout_results"] == 0
+    assert state["trained_checkpoints"] == 0
+    assert state["locks_json"] == state["seed_reveal_json"] == "absent"
+    assert "ZERO study GPU-hours" in r["why_this_is_outcome_blind"]
+    assert "36.0 -> 120.0" in r["what_did_not_change"]
+    assert r["future_a6000_work"].startswith("A future A6000 experiment would be a "
+                                             "SEPARATE registered run")
+
+
+def test_the_registered_engine_contract_is_the_measured_a5000_one():
+    e = _M["engine_contract"]
+    assert e["dtype"] == "bfloat16"
+    assert e["gpu_memory_utilization"] == 0.80      # not 0.85, not 0.8725
+    assert e["max_model_len"] == 8192
+    assert e["max_num_seqs"] == 8
+    assert e["max_num_batched_tokens"] == 8192
+    assert e["enforce_eager"] is False
+    assert e["enable_thinking"] is False
+    assert e["multimodal_inputs"] == "REJECTED"
+    hw = load_preregister(PREREG)["hardware"]
+    assert hw["gpu_count"] == 1
+    assert hw["expected_name"] == "NVIDIA RTX A5000"
+    assert hw["cuda_visible_total_bytes"] == 25282805760
+    assert hw["conditional_a6000_branch"] is False
+    assert hw["single_physical_gpu_for_all_stages"] is True
+
+
+def test_the_protocol_prose_mirrors_the_single_card_pivot():
+    """The human mirror may not still describe two cards or a 36-hour ceiling."""
+    text = (REPO / "docs" / "AGENTIC_PROTOCOL.md").read_text(encoding="utf-8")
+    assert "hardware pivot" in text.lower()
+    assert "RTX A5000" in text and "25,282,805,760" in text
+    assert "120.0 measured" in text
+    assert "GRPO_NOT_RUN_HARDWARE_INFEASIBLE" in text
+    assert "NOT_EVALUATED_HARDWARE_SHORT_CIRCUIT" in text
+    assert "S19 HARDWARE-INTEGRITY" in text
+    assert "7,800" in text
+    # no surviving hardware DECLARATION for the released card: the only A6000
+    # mentions are the release itself and the separate-future-run rule
+    for banned in ("48 GB", "48GB", "EXPECT_GPU=A6000"):
+        assert banned not in text, banned
+    for line in text.splitlines():
+        if "A6000" in line:
+            assert ("released" in line or "future" in line.lower()), line
+    # and 36.0 is no longer a live ceiling anywhere
+    assert "36.0 measured" not in text
+    assert "the 36-hour ceiling" not in text

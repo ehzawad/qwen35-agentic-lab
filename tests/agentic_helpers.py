@@ -9,11 +9,67 @@ analyzer) is exercised end to end on CPU.
 from __future__ import annotations
 
 import json
+import pathlib
 
 from agentlab import provenance
 from agentlab.suite import evaluate, faults as faults_mod, rng
 
 SECRET = bytes.fromhex("aa" * 32)
+
+_REPO = pathlib.Path(__file__).resolve().parents[1]
+_PREREG = json.loads((_REPO / "configs" / "agentic_preregister.json")
+                     .read_text(encoding="utf-8"))
+_HW = _PREREG["machine"]["hardware_integrity"]
+_ENGINE = _PREREG["machine"]["engine_contract"]
+
+# One synthetic physical card, standing in for the registered single RTX A5000.
+A5000_UUID = "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567"
+DRIVER_VERSION = "610.43.02"
+
+
+def engine_fingerprint(**overrides) -> dict:
+    """The engine half of the fingerprint: library versions + the REGISTERED
+    engine contract, read from the preregistration rather than retyped.
+
+    S19 compares every engine setting a trace declares against
+    `machine.engine_contract`, so a fixture that hardcoded 0.85 or
+    `enable_thinking: true` here would be declaring a different apparatus.
+    """
+    fp = {"vllm": "0.25.1", "torch": "2.10.0", "transformers": "5.1.0"}
+    for key, value in _ENGINE.items():
+        if key == "note" or key.endswith("_note"):
+            continue
+        fp[key] = value
+    fp.update(overrides)
+    return fp
+
+
+def fingerprint(**overrides) -> dict:
+    """The FROZEN cross-agent hardware fingerprint every claim-bearing row carries.
+
+    ---- SEAM (frozen contract, owed by the runtime/evaluator layer) ------------
+    `agentlab.suite.evaluate._trace_row` copies the evaluator's `run_meta`
+    verbatim into every trace row's `provenance` block, so these fields reach the
+    analyzer with no further plumbing: whoever launches an episode owns putting
+    them into `run_meta`, and the analyzer only READS them (S19). This fixture
+    supplies them the way the production evaluator must, and invents nothing the
+    contract does not name -- the field list itself comes from
+    `machine.hardware_integrity.required_trace_fields`.
+    """
+    fp = {
+        "run_id": "test",
+        "git_sha": "test",
+        "config_hash": "cfg-0123456789ab",
+        "gpu_name": _HW["expected_gpu_name"],
+        "gpu_uuid": A5000_UUID,
+        "cuda_visible_bytes": _HW["expected_cuda_visible_bytes"],
+        "driver_version": DRIVER_VERSION,
+        "engine_fingerprint": engine_fingerprint(),
+        "enable_thinking_effective": _HW["enable_thinking_effective_required"],
+        "timestamp_utc": "2026-08-05T00:00:00Z",
+    }
+    fp.update(overrides)
+    return fp
 
 # The frozen cross-agent field contract: every scored spec carries
 # `template_cluster_id`, a STRUCTURAL cluster identity (family + horizon +
@@ -236,17 +292,22 @@ def make_arm_policy(arm: str, spec: dict, *, recover_pct: dict | None = None):
 def run(spec: dict, policy, *, arm: str = "TP", condition: str = "clean",
         control: str = "none", prompt_sha: str = "0" * 64,
         adapter: str | None = "out/adapter", secret: bytes = SECRET,
-        fault_seed: int = 0xA61E0007, base_id: str = "Qwen/Qwen3.5-4B") -> dict:
+        fault_seed: int = 0xA61E0007, base_id: str = "Qwen/Qwen3.5-4B",
+        hardware: dict | None = None) -> dict:
+    """Run one scripted episode. `hardware` overrides the S19 fingerprint fields
+    (pass e.g. `hardware={"gpu_name": "NVIDIA RTX A6000"}` to build a wrong-card
+    trace, or `{"gpu_uuid": None}` to build one with missing provenance)."""
+    run_meta = {"git_sha": "test", "server_model": "m", "base_id": base_id,
+                "adapter": (None if arm in ("B0", "BP") else adapter)}
+    run_meta.update(fingerprint(**(hardware or {})))
     trace = evaluate.run_episode(
         spec, arm=arm, condition=condition, control=control, secret=secret,
         fault_seed=fault_seed, system_prompt="test prompt",
         prompt_meta={"path": "prompts/agentic/p8_combined.txt", "sha256": prompt_sha},
         chat_fn=policy,
         decode={"temperature": 0.0, "top_p": 1.0, "seed": 2786983945,
-                "max_tokens": 1024},
-        run_meta={"git_sha": "test", "server_model": "m", "base_id": base_id,
-                  "adapter": (None if arm in ("B0", "BP") else adapter),
-                  "run_id": "test"},
+                "max_tokens": 1024, "enable_thinking": False},
+        run_meta=run_meta,
     )
     # ---- SEAM (frozen contract, one line owed by the trace writer) ----------
     # The analyzer clusters the bootstrap on `template_cluster_id`. The spec

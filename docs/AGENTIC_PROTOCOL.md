@@ -27,6 +27,69 @@ No held-out GPU result exists at the time of this commit, so every
 specification repair recorded here is **outcome-blind by construction**: there
 is no result it could have been fitted to.
 
+## 0. Pre-run hardware pivot receipt — 2026-08-05
+
+**This study is preregistered as a SINGLE-CARD NVIDIA RTX A5000 study.** The
+RTX A6000 is **released completely**: it is not waited for, not reserved, not
+probed, and no opportunistic branch runs on it. Its co-tenant processes are
+never touched. A future A6000 experiment would be a **separate registered run**
+with its own locks, seeds, ledger and hardware declaration, and may never be
+spliced into this run's trace set.
+
+**The state of the study at the moment the card changed:**
+
+| Quantity | Value |
+|---|---|
+| measured study GPU-hours | **0.0** |
+| rows in `results/agentic/gpu_ledger.jsonl` | **0** |
+| held-out results in existence | **0** |
+| trained checkpoints | **0** |
+| `results/agentic/locks.json` | absent |
+| `results/agentic/seed_reveal.json` | absent |
+| verdicts computed | **0** |
+
+**That is what makes this outcome-blind rather than a moved goalpost.** ZERO
+study GPU-hours and ZERO held-out results existed when the card changed, so
+there is no number this pivot could have been fitted to. The test of a moved
+goalpost is whether a result was visible when the rule moved; none was.
+
+**The registered hardware is exactly one card:**
+
+| Field | Registered value |
+|---|---|
+| GPU count | 1 |
+| GPU name | `NVIDIA RTX A5000` |
+| CUDA-visible bytes | **25,282,805,760** (23.546 GiB) |
+| single physical GPU for every stage | yes, one UUID bound for the whole run |
+| conditional second-card branch | **none** |
+
+**Registered engine contract for every inference stage** (`machine.engine_contract`;
+the single copy the analyzer reads): dtype **bfloat16**, `gpu_memory_utilization`
+**0.80** — *not* the 0.85 the probe used, and deliberately **not** compensated
+upward to 0.8725 — `max_model_len` **8192**, `max_num_seqs` **8**,
+`max_num_batched_tokens` **8192**, `enforce_eager` **false**, thinking
+**DISABLED**, multimodal inputs **explicitly REJECTED** rather than merely
+unused, `tensor_parallel_size` 1.
+
+The live A5000 probe that fixed those settings (measured operational facts, not
+thresholds): 25,282,805,760 CUDA-visible bytes = 23.546 GiB; at
+`gpu_memory_utilization` 0.85 / `max_model_len` 8192, vLLM 0.25.1 reported
+checkpoint 8.68 GiB, CUDA-graph pool 0.54 GiB, available KV cache 9.08 GiB =
+242,741 tokens, 19.857 GiB used, 3.69 GiB free; engine startup 289.7 s; one
+48-token greedy generation 1.08 s. Measured non-KV footprint =
+19.857 − 9.080 = **10.777 GiB = 0.4577 of the card**. **Thinking is ON by
+default in this checkpoint**, which is why the contract disables it explicitly
+instead of relying on a default.
+
+**Nothing scientific changed with the card.** No threshold, margin, sample size,
+seed, estimand, cluster rule, launch floor, claim definition or training recipe
+was edited as a consequence of the pivot. The only registered numeric change in
+the whole preregistration is the operational budget ceiling (§9: 36.0 → 120.0
+measured A5000 GPU-hours), which decides no gate. Two semantics are
+*strengthened*: the new **S19 HARDWARE-INTEGRITY** veto (§7) and the explicit
+`enable_thinking = false` engine contract. Both can only veto a result or make
+it INCONCLUSIVE; neither can make any result more favourable.
+
 The verdict is computed, not narrated:
 
 ```bash
@@ -77,12 +140,18 @@ measured-only extrapolation probe; B0/T0 arms quantifying elicitation.
 | BP | base | frozen tournament winner |
 | T0 | trained (locked) | neutral |
 | TP | trained (locked) | frozen tournament winner (identical bytes to BP's) |
-| R0/RP | GRPO checkpoint | only if GRPO ran and was the locked selection |
+| R0/RP | GRPO checkpoint | **absent by design** in this run (§9 GRPO disposition) |
 
 The primary comparison is always **TP vs BP**: identical prompt, identical
-task IDs, values, budgets, schemas, parser, server, and seeds (veto S8), so
-the weight change is the only difference. Deterministic decoding: temperature
-0.0, top_p 1.0, committed seed, 1024 tokens per decision.
+task IDs, values, budgets, schemas, parser, server, and seeds (veto S8), **and
+an identical hardware-and-engine fingerprint — same physical GPU UUID, GPU
+model, CUDA-visible bytes, driver version, engine fingerprint and effective
+thinking mode (veto S19)** — so the weight change is the only difference. That
+last clause is not decoration: the protocol *asserts* weights are the only
+difference, and the assertion is unverifiable unless the card and the engine are
+held fixed too, which is why S19 is a mandatory veto and not a convention.
+Deterministic decoding: temperature 0.0, top_p 1.0, committed seed, 1024 tokens
+per decision, **thinking disabled**.
 
 The elicitation control is mandatory because round 1 of this lab measured a
 one-sentence prompt recovering 81.8% of an SFT gain. Eight prompt candidates
@@ -244,9 +313,36 @@ scorer decision).
 
 S8 PAIRING · S9 ORACLE · S10 SPLITS · S11 ABSENT-INFO · S12 INJECTION ·
 S13 RECEIPTS · S14 COUNTERFACTUAL · S15 ATTRITION · S16 CONTROL-INTEGRITY ·
-S17 TRACE-SUMMARY · S18 TEST-BLINDNESS — semantics exactly as in the
-preregistration JSON. **All eleven are MANDATORY**
+S17 TRACE-SUMMARY · S18 TEST-BLINDNESS · **S19 HARDWARE-INTEGRITY** — semantics
+exactly as in the preregistration JSON. **All twelve are MANDATORY**
 (`machine.mandatory_harness_checks`).
+
+### S19 HARDWARE-INTEGRITY (new with the single-card pivot)
+
+Every claim-bearing trace row carries the **frozen cross-agent fingerprint**:
+`gpu_name`, `gpu_uuid`, `cuda_visible_bytes`, `driver_version`,
+`engine_fingerprint` (vLLM/torch/transformers versions plus the §0 engine
+contract), `enable_thinking_effective`, `run_id`, `git_sha`, `config_hash` and a
+UTC timestamp. Every `gpu_ledger.jsonl` row carries the same fields. The
+fingerprint reaches the analyzer through the trace row's `provenance` block —
+the evaluator's `run_meta`, copied verbatim by the runtime layer — so the
+analyzer only ever *reads* it and never infers a missing field.
+
+| Condition | Outcome |
+|---|---|
+| every claim-bearing trace in one `run_id` carries the full fingerprint, one physical GPU UUID, one engine fingerprint, and every paired comparison matches | OK |
+| **missing** hardware provenance on any claim-bearing trace | **INCONCLUSIVE**, no winner |
+| a **known-wrong card** (GPU name or CUDA-visible byte count that is not the registered one) | **BUG** |
+| **mixed** GPU UUID inside one `run_id`, more than one `run_id` in one trace set, or more than one engine fingerprint | **BUG** |
+| a paired **BP/TP** or **B0/T0** comparison whose members disagree on any fingerprint field | **BUG** |
+| an engine fingerprint that contradicts the registered engine contract (utilisation, context length, thinking) | **BUG** |
+
+An **independent replication on another A5000** is legitimate science and
+requires a **new `run_id`** with its own trace set; it may **never append** to an
+existing trace set, because appending is precisely how two cards end up inside
+one paired claim. Every direction S19 can move a verdict is unfavourable — it
+vetoes or withholds, never promotes — which is what makes adding it before any
+GPU-hour exists an outcome-blind strengthening.
 
 **Official status precedence is `BUG > FAIL > INCONCLUSIVE > PASS`.** A real
 FAIL outranks missing evidence; INCONCLUSIVE never reads as support; **`SKIP` is
@@ -274,6 +370,14 @@ S16 additionally enforces the **exactly-one-locked-checkpoint** rule:
 `{rs_sft, grpo}`, and every TP/T0 trace's adapter must equal that path. An arm
 labelled TP that is not demonstrably the locked checkpoint makes every trained
 number unattributable, so a missing, ambiguous or disagreeing lock is a BUG.
+
+S16 also owns the **missing-GRPO-checkpoint** rule. When the locked stage is not
+`grpo`, no GRPO checkpoint exists, and the run must say why in the durable
+disposition artifact `results/agentic/grpo_disposition.json` carrying an allowed
+label (§9). **A missing checkpoint with no allowed disposition is a BUG and never
+silently selects RS-SFT**: "GRPO was skipped for a reason nobody wrote down" is
+indistinguishable from "GRPO ran and lost the dev comparison", and only one of
+those is a reportable outcome.
 
 S18 uses a self-referential seed commitment: `heldout_seed =
 SHA256(<preregistration commit sha> + ":agentic-heldout-v1")[:8]` as a big-
@@ -319,25 +423,66 @@ preregistered outcome and may not quietly degrade into "no successful pipeline"
 just because the trained leg disappointed. Rank 7 is a reportable scientific
 outcome, not a failure of the harness.
 
-## 9. Budget: the 36-hour ceiling, and what is conditional on it
+## 9. Budget: the 120-hour A5000 ceiling, and what is conditional on it
 
-The ceiling is **36.0 measured GPU-hours** summed over every GPU stage —
+The ceiling is **120.0 measured A5000 GPU-hours** summed over every GPU stage —
 measured from the ledger, never a nominal per-stage range and never a
-caller-supplied projection.
+caller-supplied projection. Server startup, compilation and CUDA-graph capture
+count as measured occupancy.
 
-**The final paired evaluation, not GRPO, is the stage most likely to consume
-it.** Registered episode counts: **≈ 8,360** episodes for BP/TP alone (4,800
-core = 1,200 tasks × clean/faulted × 2 arms; 1,200 MT; 400 H8 augmentation;
-1,200 redacted; 200 permuted; 560 stress), **≈ 15,320** including B0/T0, and
-**≈ 22,280** including R0/RP. Even at the historically favourable fully batched
-rate of ~7.85 decision-generations/s with nine decisions per episode, the
-all-arm evaluation is around seven GPU-hours — and the production evaluator runs
-concurrency 8, longer contexts and up to 1,024 tokens per decision instead of
-the 384-token rejection-sampling setting, so that rate is optimistic.
-Production rejection sampling is the likely second-largest stage.
+**Hardware.** One RTX A5000, 25,282,805,760 CUDA-visible bytes, one physical
+UUID bound for the whole run, no conditional second-card branch, engine contract
+per §0 (S19 enforces all of it).
+
+**Why the previous 36.0-hour envelope was raised, before any hour was spent.**
+The mandatory BP/TP paired evaluation — which may never shrink — projects to
+**75–99 A5000 GPU-hours** from *directly measured* prior evaluator rates:
+**25.10 s/episode** for the base arm (5,019.8 s / 200 episodes) and
+**44.27 s/episode** for the trained arm (8,854 s / 200 episodes), over the
+**7,800** mandatory episodes below. That is 27.19–35.78 h for BP plus
+47.96–63.10 h for TP; with the non-evaluation stages the whole-program evidence
+envelope is roughly **87–118 h**. Keeping the old figure would not have made the
+work cheaper — it would have silently forced a mandatory-sample shrinkage, which
+this protocol forbids. **120.0 is the minimum defensible pre-calibration
+budget.** Raising an accounting envelope while the ledger is empty, no checkpoint
+exists and no held-out result exists is legitimate; shrinking a mandatory sample
+after a number is visible is not.
+
+**The ~14–21 hour figure is an unvalidated EXPECTATION, never a registered
+measurement.** If the new concurrent vLLM evaluator validates a 3.3–3.9×
+speed-up over the old serial evaluator, the whole program may finish in about
+14–21 h. That number may not be cited as a measured cost, may not be used to
+justify a smaller ceiling, and may not be entered into the ledger. Only measured
+seconds are accounting.
+
+**Mandatory episode census (corrected): 7,800.**
+
+| Stratum | Episodes |
+|---|---:|
+| core: 1,200 tasks × clean/faulted × 2 arms | 4,800 |
+| MT augmentation: 600 × 2 arms | 1,200 |
+| H8: **200 ADDITIONAL** tasks × 2 arms (the other 200 of the registered 400 are already in core) | 400 |
+| absent-information control: 600 × 2 arms (clean only) | 1,200 |
+| permutation control: 100 × 2 arms | 200 |
+| **mandatory total** | **7,800** |
+
+Optional and outside that total: the two-fault stress set (280 × 2 = 560) and
+the descriptive B0/T0 arms; R0/RP are absent by design. The controls are
+registered as **clean** controls — adding faulted controls would be a **new
+pre-registration choice** and is deliberately not made here. No registered
+cardinality changed: this corrects an arithmetic census, not a sample size.
+
+**The final paired evaluation, not GRPO, is the stage most likely to consume the
+ceiling** — 75–99 projected hours for those 7,800 episodes. The earlier
+"around seven GPU-hours at ~7.85 decision-generations/s" figure translated a
+fully batched rejection-sampling rate into dependency-serial online tool
+episodes and is superseded as a forecast; the registered episode counts it
+referred to are unchanged. If continuous batching is validated, production
+rejection sampling (≈ 16,400 rollouts, mean H ≈ 9.07) becomes the largest stage
+instead — which is exactly why calibration is load-bearing.
 
 **MANDATORY (never budget-conditional):** BP and TP across core (clean and
-faulted), MT, H8, and **all** controls.
+faulted), MT, H8, and **all** controls — the 7,800 episodes above.
 
 **Cut order if calibration projects an overrun** — in this order and only this
 order, and only on a projection made *before* the relevant stage runs, never
@@ -347,6 +492,13 @@ after seeing a held-out result from any arm:
 2. its **variance probe** and the **R0/RP** arms;
 3. the descriptive **B0/T0** arms;
 4. the two-fault **stress** set.
+
+**The order is unchanged by the hardware pivot.** Ranks 1 and 2 are now *moot*
+rather than reordered: GRPO is not run at all (the disposition below) and the
+variance probe is `NOT_EVALUATED_HARDWARE_SHORT_CIRCUIT`, so the first cut
+actually available to a calibration overrun is rank 3, then rank 4. Nothing was
+promoted, demoted or reclassified; no mandatory arm became optional and no
+optional arm became mandatory.
 
 Everything in that list is declared budget-conditional **here, before the
 push** — which is the only thing that makes dropping it honest. Anything not in
@@ -363,20 +515,82 @@ run is a reportable outcome; a silently shrunk one is not.
 episodes/hour *and* decision-generations/hour separately for base and adapter
 arms, stratified by horizon (H2/H4/H8/H12/H14/H20) and clean/faulted, and project
 the remaining registered work from those measurements including server restarts.
+**Calibration is load-bearing under this ceiling**: the pre-calibration evidence
+envelope (87–118 h) and the unvalidated concurrent-evaluator expectation
+(14–21 h) differ by roughly 5×, and which of them is true decides whether the
+mandatory program fits. It runs on dev-only task IDs, before the held-out seed
+reveal, on the exact production engine contract; concurrency is chosen from
+timing, OOM/preemption and latency stability **only**, never from a capability
+outcome. If the post-calibration projection exceeds the ceiling, cut optional
+arms in the frozen order above; **if MANDATORY work still does not fit, STOP and
+report INCOMPLETE / INCONCLUSIVE.** Mandatory samples may never shrink.
 
 **Ledger accounting.** `results/agentic/gpu_ledger.jsonl` is append-only; every
 GPU stage records stage name, start/end UTC, **measured** elapsed GPU seconds,
-git sha, GPU identity, and the episode or step count actually completed. The
-ceiling is enforced against the **sum of measured seconds**. A stage may not
-start when its calibrated projection plus the ledger total would cross 36.0
-hours. A shard that overruns its projection is still charged its measured time
-and the overrun is reported, not absorbed. Every GPU consumer — **including the
-final evaluator** — must read and append to the ledger; a stage absent from the
-ledger is unaccounted time and makes the budget claim INCONCLUSIVE.
+git sha, the full S19 fingerprint (GPU name, GPU UUID, CUDA-visible bytes, driver
+version, engine fingerprint, effective thinking mode, `run_id`, config hash), and
+the episode or step count actually completed. The ceiling is enforced against the
+**sum of measured seconds**, and server startup, compilation and graph capture
+count. A stage may not start when its calibrated projection plus the ledger total
+would cross 120.0 hours. A shard that overruns its projection is still charged
+its measured time and the overrun is reported, not absorbed. Every GPU consumer —
+**including the final evaluator** — must read and append to the ledger; a stage
+absent from the ledger is unaccounted time and makes the budget claim
+INCONCLUSIVE. A ledger row whose GPU UUID disagrees with the run's first bound
+UUID is fatal.
 
-### GRPO (optional, cut rank 1)
+### GRPO: NOT RUN — `GRPO_NOT_RUN_HARDWARE_INFEASIBLE`
 
 Nothing in the primary or secondary claims depends on GRPO running.
+
+**The registered GRPO recipe cannot instantiate on the registered card.** The
+arithmetic, recorded before any GPU-hour was spent: the registered
+`vllm_gpu_memory_utilization` 0.24 × 23.546 GiB = **5.651 GiB** is *smaller than*
+vLLM's own **8.455 GiB** colocated policy copy — a 2.804 GiB shortfall before any
+trainer weight — and the trainer's **9.420 GiB** plus that copy is already
+**17.875 GiB** of 23.546 GiB before any KV cache, CUDA graphs, or the
+**1.53 GiB per 3,072-token sequence** of logits. The configuration is infeasible,
+not merely tight.
+
+**The exact stage-outcome label is `GRPO_NOT_RUN_HARDWARE_INFEASIBLE`.** It is a
+**stage DISPOSITION**, never one of the gate states PASS / FAIL / INCONCLUSIVE /
+BUG, is never written into a gate, claim, floor or winner field, and is
+deliberately absent from `outcome_states`: "the trainer could not be
+instantiated" is not a statement about the model.
+
+It is **not interchangeable** with `GRPO_NOT_RUN_VARIANCE_GATE_CLOSED`, which
+would mean the complete 144-group / 1,152-rollout probe ran and a binding pooled
+gate failed — real evidence about the RS-SFT policy's reward and outcome
+variance. **The variance probe is not run either**: its status is
+`NOT_EVALUATED_HARDWARE_SHORT_CIRCUIT`, and it may never be described as
+"closed".
+
+Frozen preconditions for the disposition:
+
+1. the registered hardware is exactly one RTX A5000 with 25,282,805,760
+   CUDA-visible bytes;
+2. the registered GRPO recipe is **unchanged** — bf16 Qwen3.5-4B, LoRA r=32, 8
+   generations, per-device batch 4, accumulation 2, `max_completion_length` 3072,
+   `vllm_max_model_length` 6144, `vllm_gpu_memory_utilization` 0.24 (an
+   infeasible recipe is still the *registered* recipe; rewriting it would define
+   a different experiment);
+3. a **deterministic preflight** records that 5.651 GiB < 8.455 GiB;
+4. **no optimizer step and no held-out evaluation** precedes the disposition;
+5. **no substituted variant** runs under this registered branch — not microbatch
+   1, not 2,048-token completions, not no-vLLM generation, not quantization, not
+   offload, not an alternate optimizer, not another card; each defines a
+   **different treatment**;
+6. a **durable artifact** `results/agentic/grpo_disposition.json` records GPU
+   name, CUDA-visible bytes, config hash, checkpoint hash, git SHA, the
+   arithmetic, the UTC time and **zero** GRPO optimizer steps;
+7. **no GRPO checkpoint exists; R0/RP are absent by design; RS-SFT is the sole
+   trained candidate** eligible for the checkpoint lock.
+
+`agentlab.multigrpo` is **not written**: the GRPO branch is out of v1 scope. A
+future GRPO study — on different hardware, or with a redesigned batch — is a
+separate pre-registration with its own locks, seeds, ledger and hardware
+declaration. The analyzer **requires** the artifact whenever the locked stage is
+not `grpo` (§7, S16), so RS-SFT can never be selected by default and by silence.
 
 **`scenario_seed` rule.** GRPO training data is a **map-style** dataset keyed by
 `scenario_seed`. All G generations in a group must reconstruct byte-identically
@@ -385,13 +599,17 @@ budgets from that one seed; **only the sampling seed differs**. A group whose
 members cannot be shown to share one reconstructed scenario is discarded, not
 repaired.
 
-**Variance probe** (`src/agentlab/variance.py`, which must exist and be tested
-before GRPO is implementable): run on the locked RS-SFT checkpoint **before any
-GRPO update**, on a disjoint committed probe split, with the exact GRPO decoding
-settings and the **exact production reward function** — one shared reward
-implementation imported by both probe and GRPO. **48 groups per family × 3
-families = 144 groups × 8 generations = 1,152 rollouts**, eight distinct
-committed sampling seeds per group with every non-sampling input identical.
+**Variance probe** — registered, and **NOT RUN** in this study
+(`NOT_EVALUATED_HARDWARE_SHORT_CIRCUIT`; the hardware result already settles the
+branch, and a probe result would answer a question no arm of this run asks). The
+registered definition is preserved verbatim so that a future run cannot quietly
+weaken it: `src/agentlab/variance.py`, which must exist and be tested before GRPO
+is implementable, run on the locked RS-SFT checkpoint **before any GRPO update**,
+on a disjoint committed probe split, with the exact GRPO decoding settings and the
+**exact production reward function** — one shared reward implementation imported
+by both probe and GRPO. **48 groups per family × 3 families = 144 groups × 8
+generations = 1,152 rollouts**, eight distinct committed sampling seeds per group
+with every non-sampling input identical.
 
 Binding gates, evaluated **POOLED** over all 144 groups:
 
@@ -417,7 +635,12 @@ and would belong to a short GRPO preflight. These two were unregistered values
 in the retired `multifaceted.yaml`; recording them as readiness checks means
 neither they nor their absence can be presented as evidence.
 
-**Checkpoint selection (RS-SFT vs GRPO).** Exactly one trained checkpoint is
+**Checkpoint selection (RS-SFT vs GRPO).** In this run there is nothing to
+select between: hardware-infeasible GRPO leaves **RS-SFT as the sole trained
+candidate**, so the comparison below is never reached. The rule stays registered
+verbatim because a future run that does produce a GRPO checkpoint must implement
+it, and because deleting it would let "RS-SFT was locked" read as the outcome of a
+comparison that never happened. Exactly one trained checkpoint is
 locked as TP. The choice is made on the **committed dev split only**, before the
 held-out seed reveal, and recorded in `locks.json` with its stage. Metric: **mean
 certified strict success on the dev split, pooling clean and faulted dev

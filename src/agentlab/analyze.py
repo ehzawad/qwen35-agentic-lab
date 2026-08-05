@@ -1029,6 +1029,344 @@ def veto_s18_test_blindness(results_dir: str | pathlib.Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# S19 HARDWARE-INTEGRITY
+# ---------------------------------------------------------------------------
+
+def _canon(value) -> str:
+    """Order-insensitive canonical form of a fingerprint value, for equality."""
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def _engine_contract_problems(fingerprint, contract: dict, where: str) -> list[str]:
+    """Every engine setting a trace DECLARES must equal the registered contract.
+
+    The fingerprint is allowed to be richer than the contract (library versions,
+    attention backend, ...), but it may not declare a *registered* setting and
+    disagree: an engine running at a different `gpu_memory_utilization`,
+    `max_model_len`, or with thinking left on, is a different measurement
+    apparatus from the one the run registered.
+    """
+    if not isinstance(fingerprint, dict):
+        return []
+    problems = []
+    for key, want in contract.items():
+        if key == "note" or key.endswith("_note") or key not in fingerprint:
+            continue
+        got = fingerprint[key]
+        if isinstance(want, (int, float)) and isinstance(got, (int, float)) \
+                and not isinstance(want, bool) and not isinstance(got, bool):
+            same = float(got) == float(want)
+        else:
+            same = _canon(got) == _canon(want)
+        if not same:
+            problems.append(f"{where}: engine {key}={got!r} contradicts the registered "
+                            f"engine contract {want!r}")
+    return problems
+
+
+def veto_s19_hardware_integrity(eps: dict, prereg: dict) -> dict:
+    """Same physical card, same engine, full provenance -- or no winner.
+
+    The protocol's central paired claim is that the *weights* are the only
+    difference between BP and TP. That is not verifiable unless every
+    claim-bearing trace says which physical GPU and which engine produced it, so
+    this veto is mandatory rather than conventional:
+
+      * MISSING provenance     -> INCONCLUSIVE and no winner. Missing evidence is
+                                  never a favourable default, and an unlabelled
+                                  trace is never *assumed* to be the registered
+                                  card.
+      * a known-wrong card     -> BUG (name or CUDA-visible byte count that is not
+                                  the registered one).
+      * mixed UUID / run_id /
+        engine fingerprint     -> BUG. One run_id must sit on exactly one physical
+                                  GPU UUID, and an independent replication on
+                                  another A5000 needs a NEW run_id and its own
+                                  trace set: appending to an existing one silently
+                                  mixes two cards inside one claim.
+      * a paired BP/TP or B0/T0
+        pair whose two members
+        disagree on the
+        fingerprint            -> BUG. Then the weight change was not the only
+                                  difference.
+
+    Every direction this check can move a verdict is unfavourable: it can veto or
+    withhold, never promote. That is what makes adding it before any GPU-hour
+    exists an outcome-blind strengthening rather than a moved goalpost.
+    """
+    required = list(registered(prereg, "hardware_integrity", "required_trace_fields"))
+    want_name = registered(prereg, "hardware_integrity", "expected_gpu_name")
+    want_bytes = registered(prereg, "hardware_integrity",
+                            "expected_cuda_visible_bytes")
+    want_thinking = registered(prereg, "hardware_integrity",
+                               "enable_thinking_effective_required")
+    one_uuid = bool(registered(prereg, "hardware_integrity", "one_gpu_uuid_per_run_id"))
+    one_run = bool(registered(prereg, "hardware_integrity", "one_run_id_per_trace_set"))
+    paired_sets = [list(p) for p in registered(prereg, "hardware_integrity",
+                                               "paired_arm_sets")]
+    paired_fields = list(registered(prereg, "hardware_integrity",
+                                    "paired_fingerprint_fields"))
+    contract = dict(registered(prereg, "engine_contract"))
+
+    if not eps:
+        return _g("INCONCLUSIVE", "no traces loaded; hardware provenance unverified")
+
+    # Three buckets, reported run-level first, then per-trace, then paired, so the
+    # most structural defect leads the message: a mixed card, a spliced
+    # replication or a wrong card EXPLAINS the paired mismatches downstream of it,
+    # and truncating the detail must not hide the cause behind its symptoms.
+    run_bugs: list[str] = []
+    pair_bugs: list[str] = []
+    bugs: list[str] = []
+    missing: list[str] = []
+    prints: dict = {}
+    uuids_by_run: dict = {}
+    engines: set = set()
+    for (arm, condition, control), tasks in eps.items():
+        for tid, ep in tasks.items():
+            prov = ep["trace"].get("provenance") or {}
+            absent = [f for f in required
+                      if prov.get(f) is None or prov.get(f) == ""]
+            if absent:
+                missing.append(f"{arm}/{condition}/{control}/{tid}: "
+                               f"{','.join(absent)}")
+                continue
+            fp = {f: prov.get(f) for f in required}
+            prints[(arm, condition, control, tid)] = fp
+            where = f"{arm}/{condition}/{control}/{tid}"
+            uuids_by_run.setdefault(str(fp["run_id"]), set()).add(str(fp["gpu_uuid"]))
+            engines.add(_canon(fp["engine_fingerprint"]))
+            if str(fp["gpu_name"]) != str(want_name):
+                bugs.append(f"{where}: gpu_name {fp['gpu_name']!r} is not the "
+                            f"registered {want_name!r} (known-wrong card)")
+            try:
+                same_bytes = int(fp["cuda_visible_bytes"]) == int(want_bytes)
+            except (TypeError, ValueError):
+                same_bytes = False
+            if not same_bytes:
+                bugs.append(f"{where}: cuda_visible_bytes "
+                            f"{fp['cuda_visible_bytes']!r} is not the registered "
+                            f"{want_bytes} (known-wrong card)")
+            if bool(fp["enable_thinking_effective"]) != bool(want_thinking):
+                bugs.append(f"{where}: enable_thinking_effective "
+                            f"{fp['enable_thinking_effective']!r} contradicts the "
+                            f"registered engine contract {bool(want_thinking)!r}")
+            bugs.extend(_engine_contract_problems(fp["engine_fingerprint"],
+                                                  contract, where))
+
+    if one_uuid:
+        for run_id, uuids in sorted(uuids_by_run.items()):
+            if len(uuids) > 1:
+                run_bugs.append(f"run_id {run_id}: {len(uuids)} distinct physical GPU "
+                                f"UUIDs in one run ({sorted(uuids)}) -- one run_id "
+                                f"must sit on exactly one card")
+    if one_run and len(uuids_by_run) > 1:
+        run_bugs.append(f"{len(uuids_by_run)} distinct run_ids in one trace set "
+                        f"({sorted(uuids_by_run)}) -- a replication needs a NEW "
+                        f"run_id and its own trace set, it may not append to this one")
+    if len(engines) > 1:
+        run_bugs.append(f"{len(engines)} distinct engine fingerprints among the "
+                        f"claim-bearing traces; a paired claim needs one engine")
+
+    for pair in paired_sets:
+        if len(pair) != 2:
+            raise KeyError("machine.hardware_integrity.paired_arm_sets must hold "
+                           f"two-arm comparisons; got {pair}")
+        a, b = pair
+        for (arm, condition, control, tid), fp in sorted(
+                prints.items(), key=lambda kv: _canon(kv[0])):
+            if arm != a:
+                continue
+            other = prints.get((b, condition, control, tid))
+            if other is None:
+                continue
+            for field in paired_fields:
+                if _canon(fp.get(field)) != _canon(other.get(field)):
+                    pair_bugs.append(f"{condition}/{control}/{tid}: {a} and {b} "
+                                     f"disagree on {field} ({fp.get(field)!r} vs "
+                                     f"{other.get(field)!r}) -- the weight change is "
+                                     f"not the only difference")
+                    break
+
+    all_bugs = run_bugs + sorted(set(bugs)) + sorted(set(pair_bugs))
+    if all_bugs:
+        return _g("BUG", "; ".join(all_bugs[:4]),
+                  n_bugs=len(all_bugs), n_traces=len(prints))
+    if missing:
+        return _g("INCONCLUSIVE",
+                  f"{len(missing)} claim-bearing traces carry incomplete hardware "
+                  f"provenance, e.g. {sorted(missing)[:3]}; the registered "
+                  f"fingerprint is {required}",
+                  n_missing=len(missing), n_traces=len(prints) + len(missing))
+    run_id = next(iter(uuids_by_run))
+    uuid = next(iter(uuids_by_run[run_id]))
+    return _g("OK", f"all {len(prints)} claim-bearing traces share run_id {run_id}, "
+              f"one physical {want_name} ({uuid}) and one engine fingerprint; "
+              f"every paired comparison matches",
+              n_traces=len(prints), run_id=run_id, gpu_uuid=uuid)
+
+
+# ---------------------------------------------------------------------------
+# GRPO stage disposition (NOT a gate state)
+# ---------------------------------------------------------------------------
+
+def grpo_stage_disposition(eps: dict, prereg: dict, locks: dict | None,
+                           artifact: dict | None) -> dict:
+    """Validate the registered GRPO STAGE DISPOSITION when no GRPO checkpoint exists.
+
+    A stage *disposition* says what happened to a stage. It is never one of the
+    capability gate states PASS / FAIL / INCONCLUSIVE / BUG, is never written into
+    a gate, claim, floor or winner field, and is deliberately absent from
+    `outcome_states`: "the trainer could not be instantiated on the registered
+    card" is not a statement about the model.
+
+    The rule this implements is the one that keeps a missing stage honest: when
+    `locks.json` locks a trained checkpoint whose stage is not `grpo`, *no GRPO
+    checkpoint exists*, and the run must say why in a durable artifact carrying an
+    allowed disposition label. Without it, "GRPO was skipped for a reason nobody
+    wrote down" is indistinguishable from "GRPO ran and lost the dev comparison",
+    and only one of those is reportable. So a missing artifact is a BUG and RS-SFT
+    is never silently selected.
+
+    The two allowed labels are NOT interchangeable:
+      * GRPO_NOT_RUN_HARDWARE_INFEASIBLE  -- the registered trainer cannot even
+        instantiate on the registered card (the arithmetic is checked here). It
+        says nothing about whether the variance gate would have opened, so the
+        probe is recorded NOT_EVALUATED_HARDWARE_SHORT_CIRCUIT, never "closed".
+      * GRPO_NOT_RUN_VARIANCE_GATE_CLOSED -- the complete registered probe ran and
+        a binding pooled gate failed. That IS evidence about the policy's variance.
+    """
+    allowed = list(registered(prereg, "grpo_disposition", "allowed_dispositions"))
+    required_fields = list(registered(prereg, "grpo_disposition",
+                                      "required_artifact_fields"))
+    grpo_stage = registered(prereg, "grpo_disposition", "expected_branch")
+    infeasible = dict(registered(prereg, "grpo_disposition", "hardware_infeasible"))
+    path = registered(prereg, "grpo_disposition", "artifact_path")
+    want_name = registered(prereg, "hardware_integrity", "expected_gpu_name")
+    want_bytes = registered(prereg, "hardware_integrity",
+                            "expected_cuda_visible_bytes")
+    stages = list(prereg["grpo"]["dev_selection"]["stages"])
+
+    stage = ((locks or {}).get("checkpoint") or {}).get("stage")
+    if stage is None or stage not in stages:
+        # No trained checkpoint is locked (or the lock itself is malformed, which
+        # S16 reports on its own): there is no selection to keep honest yet.
+        return {"check_status": "OK", "disposition": None,
+                "disposition_kind": "STAGE DISPOSITION (never a gate state)",
+                "detail": "no locked trained checkpoint; the GRPO stage disposition "
+                          "is not yet required",
+                "required": False, "problems": []}
+    if stage == grpo_stage:
+        return {"check_status": "OK", "disposition": None,
+                "disposition_kind": "STAGE DISPOSITION (never a gate state)",
+                "detail": f"a {grpo_stage} checkpoint is locked; no not-run "
+                          f"disposition applies",
+                "required": False, "problems": []}
+
+    problems: list[str] = []
+    if artifact is None:
+        return {"check_status": "BUG", "disposition": None,
+                "disposition_kind": "STAGE DISPOSITION (never a gate state)",
+                "detail": f"locks.json locks the {stage!r} checkpoint, so NO GRPO "
+                          f"checkpoint exists, but the registered disposition "
+                          f"artifact {path} is absent. A missing checkpoint with no "
+                          f"allowed disposition is an ERROR: {stage} may not be "
+                          f"silently selected. Allowed dispositions: {allowed}",
+                "required": True, "problems": ["disposition artifact absent"]}
+
+    absent = [f for f in required_fields
+              if artifact.get(f) is None or artifact.get(f) == ""]
+    # `optimizer_steps: 0` is required content, and 0 is falsy, so presence is
+    # tested against None/"" rather than truthiness.
+    if absent:
+        problems.append(f"{path} is missing required fields {absent}")
+    outcome = artifact.get("outcome")
+    if outcome not in allowed:
+        problems.append(f"{path} outcome {outcome!r} is not one of the registered "
+                        f"dispositions {allowed}")
+    if artifact.get("branch") not in (None, grpo_stage):
+        problems.append(f"{path} branch {artifact.get('branch')!r} is not "
+                        f"{grpo_stage!r}")
+    if artifact.get("substituted_variant"):
+        problems.append(f"{path} records a substituted variant "
+                        f"{artifact['substituted_variant']!r}; a substitution is a "
+                        f"DIFFERENT treatment and may not be reported under this "
+                        f"registered branch")
+    if outcome == infeasible["outcome"]:
+        for field in ("variance_gate", "trainer_feasibility"):
+            if str(artifact.get(field)) != str(infeasible[field]):
+                problems.append(f"{path} {field}={artifact.get(field)!r} but the "
+                                f"registered value for {outcome} is "
+                                f"{infeasible[field]!r}")
+        try:
+            steps_ok = int(artifact.get("optimizer_steps")) == int(
+                infeasible["optimizer_steps"])
+        except (TypeError, ValueError):
+            steps_ok = False
+        if not steps_ok:
+            problems.append(f"{path} optimizer_steps="
+                            f"{artifact.get('optimizer_steps')!r}; {outcome} "
+                            f"requires exactly {infeasible['optimizer_steps']}")
+        arith = artifact.get("arithmetic") or {}
+        keys = list(infeasible["arithmetic_fields"])
+        if not isinstance(arith, dict) or any(k not in arith for k in keys):
+            problems.append(f"{path} arithmetic must record {keys}; the disposition "
+                            f"is only established by the recorded shortfall")
+        else:
+            try:
+                alloc, copy_gib = float(arith[keys[0]]), float(arith[keys[1]])
+            except (TypeError, ValueError):
+                alloc, copy_gib = float("nan"), float("nan")
+            if not alloc < copy_gib:
+                problems.append(f"{path} arithmetic does not show the shortfall: "
+                                f"{keys[0]}={arith[keys[0]]!r} is not smaller than "
+                                f"{keys[1]}={arith[keys[1]]!r}")
+    elif outcome == registered(prereg, "grpo_disposition", "variance_gate_closed",
+                               "outcome"):
+        if str(artifact.get("variance_gate")) == str(infeasible["variance_gate"]):
+            problems.append(f"{path} claims {outcome} while recording the "
+                            f"hardware short-circuit variance_gate "
+                            f"{infeasible['variance_gate']!r}; those two labels are "
+                            f"not interchangeable -- a closed gate requires the "
+                            f"complete probe to have run")
+        if str(artifact.get("trainer_feasibility")) == str(
+                infeasible["trainer_feasibility"]):
+            problems.append(f"{path} claims {outcome} while recording "
+                            f"trainer_feasibility {infeasible['trainer_feasibility']!r}; "
+                            f"an infeasible trainer cannot have closed a variance gate")
+    if str(artifact.get("gpu_name", want_name)) != str(want_name):
+        problems.append(f"{path} gpu_name {artifact.get('gpu_name')!r} is not the "
+                        f"registered {want_name!r}")
+    try:
+        if int(artifact.get("cuda_visible_bytes", want_bytes)) != int(want_bytes):
+            problems.append(f"{path} cuda_visible_bytes "
+                            f"{artifact.get('cuda_visible_bytes')!r} is not the "
+                            f"registered {want_bytes}")
+    except (TypeError, ValueError):
+        problems.append(f"{path} cuda_visible_bytes "
+                        f"{artifact.get('cuda_visible_bytes')!r} is not an integer")
+    grpo_arms = sorted({arm for (arm, _c, _ctl) in eps
+                        if arm and arm in prereg["arms"] and arm.startswith("R")})
+    if grpo_arms and outcome in allowed:
+        problems.append(f"traces exist for GRPO arms {grpo_arms} while the "
+                        f"registered disposition is {outcome}; R0/RP are absent by "
+                        f"design when GRPO did not run")
+
+    if problems:
+        return {"check_status": "BUG", "disposition": outcome,
+                "disposition_kind": "STAGE DISPOSITION (never a gate state)",
+                "detail": "; ".join(problems[:4]), "required": True,
+                "problems": problems}
+    return {"check_status": "OK", "disposition": outcome,
+            "disposition_kind": "STAGE DISPOSITION (never a gate state)",
+            "detail": f"{outcome}: no GRPO checkpoint exists, {stage} is the sole "
+                      f"trained candidate, R0/RP absent by design, "
+                      f"variance probe {artifact.get('variance_gate')}, "
+                      f"{artifact.get('optimizer_steps')} optimizer steps",
+            "required": True, "problems": []}
+
+
+# ---------------------------------------------------------------------------
 # paired data assembly + gates
 # ---------------------------------------------------------------------------
 
@@ -1719,6 +2057,17 @@ def agentic_verdict(traces_dir: str, preregister: str, secret_path: str,
     if locks_p.exists():
         locks = json.loads(locks_p.read_text())
 
+    # The GRPO stage-disposition artifact. Its registered path is repo-relative;
+    # it is read from the same results directory as locks.json so a fixture or a
+    # relocated run reads its own artifact rather than the repo's.
+    disposition_artifact = None
+    disp_p = pathlib.Path(rdir) / pathlib.Path(
+        registered(prereg, "grpo_disposition", "artifact_path")).name
+    if disp_p.exists():
+        disposition_artifact = json.loads(disp_p.read_text())
+    grpo_disposition = grpo_stage_disposition(eps, prereg, locks,
+                                              disposition_artifact)
+
     vetoes = {
         "S8": veto_s8_pairing(eps),
         "S9": veto_s9_oracle(specs),
@@ -1731,7 +2080,19 @@ def agentic_verdict(traces_dir: str, preregister: str, secret_path: str,
         "S16": veto_s16_control_integrity(eps, prereg, locks),
         "S17": veto_s17_trace_summary(eps),
         "S18": veto_s18_test_blindness(rdir),
+        "S19": veto_s19_hardware_integrity(eps, prereg),
     }
+    # The one-locked-checkpoint veto also owns the missing-GRPO-checkpoint rule:
+    # a locked non-GRPO checkpoint with no allowed stage disposition means the
+    # sole trained candidate was selected by default rather than by the
+    # registered route, which makes every trained number unattributable exactly
+    # as an ambiguous lock does.
+    if grpo_disposition["check_status"] == "BUG":
+        prior = vetoes["S16"]
+        detail = f"GRPO stage disposition: {grpo_disposition['detail']}"
+        if prior["status"] == "BUG":
+            detail = f"{prior['detail']}; {detail}"
+        vetoes["S16"] = _g("BUG", detail, **prior.get("numbers", {}))
     mandatory = list(registered(prereg, "mandatory_harness_checks"))
     unknown = sorted(set(mandatory) - set(vetoes))
     if unknown:
@@ -1847,6 +2208,10 @@ def agentic_verdict(traces_dir: str, preregister: str, secret_path: str,
             "mandatory_harness_checks": mandatory,
             "mandatory_bug": bug_names,
             "mandatory_inconclusive": mandatory_inconclusive,
+            # A STAGE disposition, kept in its own namespace: it is not a gate, not
+            # a claim, not a floor and not a winner, and its labels are absent from
+            # `outcome_states` so nothing can read one as a capability result.
+            "grpo_stage_disposition": grpo_disposition,
             "gates": gates, "claims": claims,
             "floors": {"TP": floors_tp, "BP": floors_bp},
             "winner": winner, "winner_rank": winner_rank,
@@ -1858,11 +2223,17 @@ def agentic_verdict(traces_dir: str, preregister: str, secret_path: str,
 
 def render_agentic_verdict(v: dict) -> str:
     lines = ["# Agentic machine verdict", ""]
-    lines.append("## Harness vetoes S8-S18 (ALL mandatory: any BUG makes the whole "
+    lines.append("## Harness vetoes S8-S19 (ALL mandatory: any BUG makes the whole "
                  "verdict BUG, any INCONCLUSIVE means NO VERDICT)")
     for name, res in v["vetoes"].items():
         lines.append(f"  {res['status']:<13} {name}: {res['detail']}")
     lines.append("")
+    d = v.get("grpo_stage_disposition")
+    if d and d.get("disposition"):
+        lines.append("## GRPO stage disposition (a STAGE DISPOSITION, never a gate "
+                     "state: not PASS/FAIL/INCONCLUSIVE/BUG about the model)")
+        lines.append(f"  {d['disposition']} [{d['check_status']}]: {d['detail']}")
+        lines.append("")
     lines.append("## Gates")
     for name, res in v["gates"].items():
         lines.append(f"  {res['status']:<13} {name}: {res['detail']}")

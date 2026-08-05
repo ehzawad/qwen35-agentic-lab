@@ -4,6 +4,49 @@
   "frozen": true,
   "amendment_rule": "After this file is committed, no threshold, margin, sample size, seed, estimand, or interpretation rule in it may be edited in place. A genuinely broken gate gets a dated AMENDMENT section in docs/AGENTIC_PROTOCOL.md plus entirely fresh held-out seeds; the original gate is still reported.",
 
+  "hardware_pivot_receipt": {
+    "date": "2026-08-05",
+    "change": "The study is pre-registered as a SINGLE-CARD NVIDIA RTX A5000 study. The RTX A6000 is released completely: it is not waited for, not reserved, not probed, and no opportunistic branch runs on it. Every hardware declaration in this file and in docs/AGENTIC_PROTOCOL.md now names one A5000 with 25282805760 CUDA-visible bytes.",
+    "state_of_the_study_when_the_card_changed": {
+      "measured_study_gpu_hours": 0.0,
+      "gpu_ledger_records": 0,
+      "heldout_results": 0,
+      "locks_json": "absent",
+      "seed_reveal_json": "absent",
+      "trained_checkpoints": 0,
+      "verdicts_computed": 0
+    },
+    "why_this_is_outcome_blind": "ZERO study GPU-hours and ZERO held-out results existed at the moment the card changed. There is no result this pivot could have been fitted to, so it is a hardware and specification repair rather than a moved goalpost. The test of a moved goalpost is whether a number was visible when the rule moved; none was.",
+    "what_did_not_change": "No threshold, margin, sample size, seed, estimand, claim definition, cluster rule, launch floor or training recipe changed as a consequence of the pivot. The only registered numeric change anywhere in this file is the operational budget ceiling (budget.ceiling_gpu_hours 36.0 -> 120.0), which is an accounting envelope and not a decision threshold; its derivation is recorded in budget.ceiling_derivation. Two semantics are STRENGTHENED (the new S19 HARDWARE-INTEGRITY veto, and the explicit enable_thinking=false engine contract); both can only veto a result or make it INCONCLUSIVE, never make one more favourable.",
+    "future_a6000_work": "A future A6000 experiment would be a SEPARATE registered run with its own locks, seeds, ledger and hardware declaration. It may never be spliced into this run's trace set (see machine.hardware_integrity.replication_rule)."
+  },
+
+  "hardware": {
+    "gpu_count": 1,
+    "expected_name": "NVIDIA RTX A5000",
+    "cuda_visible_total_bytes": 25282805760,
+    "cuda_visible_total_gib": 23.54644775390625,
+    "single_physical_gpu_for_all_stages": true,
+    "conditional_a6000_branch": false,
+    "measured_probe": {
+      "date": "2026-08-05",
+      "note": "Live probe under vLLM 0.25.1 at gpu_memory_utilization 0.85 and max_model_len 8192. These are MEASURED OPERATIONAL FACTS, not statistical thresholds, and the registered engine contract below deliberately runs at 0.80 rather than at the probed 0.85.",
+      "checkpoint_gib": 8.68,
+      "cuda_graph_pool_gib": 0.54,
+      "kv_cache_gib": 9.08,
+      "kv_cache_tokens": 242741,
+      "used_gib": 19.857,
+      "free_gib": 3.69,
+      "non_kv_footprint_gib": 10.777,
+      "non_kv_fraction_of_card": 0.4577,
+      "engine_startup_s": 289.7,
+      "greedy_48_token_generation_s": 1.08,
+      "thinking_default": "ON by default in this checkpoint, which is why the engine contract disables it EXPLICITLY rather than relying on a default"
+    },
+    "engine_contract_pointer": "the registered per-stage engine settings live in machine.engine_contract, which is the single copy the analyzer reads",
+    "provenance_rule": "Every claim-bearing trace row and every ledger row carries the fingerprint in machine.hardware_integrity.required_trace_fields. Enforced by the S19 HARDWARE-INTEGRITY veto."
+  },
+
   "model": {
     "base_id": "Qwen/Qwen3.5-4B",
     "trained_candidate": "exactly one locked checkpoint (RS-SFT, or GRPO if it wins dev selection), chosen on dev data and recorded in results/agentic/locks.json BEFORE the held-out seed reveal"
@@ -14,9 +57,9 @@
     "BP": {"weights": "base", "prompt": "frozen tournament winner", "role": "elicitation control; primary comparator"},
     "T0": {"weights": "trained", "prompt": "neutral (p1_minimal.txt)", "role": "descriptive"},
     "TP": {"weights": "trained", "prompt": "frozen tournament winner (identical to BP)", "role": "primary candidate"},
-    "R0": {"weights": "grpo", "prompt": "neutral", "role": "descriptive, only if GRPO ran"},
-    "RP": {"weights": "grpo", "prompt": "frozen tournament winner", "role": "candidate, only if GRPO ran and was the locked selection"},
-    "pairing": "identical task IDs, values, budgets, schemas, decoding, and seeds across compared arms (S8)"
+    "R0": {"weights": "grpo", "prompt": "neutral", "role": "descriptive, ABSENT BY DESIGN in this run: see grpo.stage_disposition"},
+    "RP": {"weights": "grpo", "prompt": "frozen tournament winner", "role": "candidate, ABSENT BY DESIGN in this run: see grpo.stage_disposition"},
+    "pairing": "identical task IDs, values, budgets, schemas, decoding, and seeds across compared arms (S8), AND an identical hardware-and-engine fingerprint -- same physical GPU UUID, GPU model, CUDA-visible bytes, driver version, engine fingerprint and effective thinking mode (S19). The protocol claims the weight change is the only difference between BP and TP; that claim is only true if the card and the engine are held fixed too."
   },
 
   "decoding": {
@@ -24,6 +67,8 @@
     "top_p": 1.0,
     "seed": 2786983945,
     "max_tokens_per_decision": 1024,
+    "enable_thinking": false,
+    "enable_thinking_note": "Thinking is DISABLED explicitly in every inference stage, offline and served. The live probe proved this checkpoint defaults thinking ON, so the previously intended contract ('deterministic decoding, 1024 tokens per decision') was not actually being enforced over the wire. Recording false here changes no threshold: it makes the already-intended decoding contract explicit and machine-checkable (machine.engine_contract.enable_thinking, S19).",
     "note": "deterministic decoding for all preregistered claims; stochastic robustness is out of scope"
   },
 
@@ -158,6 +203,87 @@
   "machine": {
     "purpose": "THE NUMBERS THE ANALYZER READS. Every threshold, margin, floor, sample-size minimum and rate ceiling used by src/agentlab/analyze.py lives here as a numeric field and nowhere else. The prose gate rules above and in docs/AGENTIC_PROTOCOL.md are the human mirror; where they could ever disagree, THIS BLOCK governs, because it is the only copy the code consumes. Every value below is byte-identical to the value the analyzer previously carried as a literal (see `moved_from` provenance strings): the conversion was a governance fix, not a threshold change. tests/test_agentic_analyze.py proves (a) no gate literal survives in the analyzer source, (b) each value is unchanged, and (c) editing a value here changes the verdict.",
 
+    "engine_contract": {
+      "note": "THE REGISTERED ENGINE CONTRACT for every inference stage of this run, and the single copy the analyzer reads. These are hardware/operational settings, not statistical thresholds; they are registered here so that S19 can check the engine fingerprint every trace carries against the contract the run declared. They were chosen from the live A5000 probe BEFORE any study GPU-hour was spent.",
+      "dtype": "bfloat16",
+      "gpu_memory_utilization": 0.80,
+      "gpu_memory_utilization_note": "0.80, NOT the 0.85 the probe used, and deliberately NOT compensated upward to 0.8725. The measured non-KV footprint is 10.777 GiB (0.4577 of the card), so 0.80 leaves a real KV budget while holding a margin against the probe's 3.69 GiB free.",
+      "max_model_len": 8192,
+      "max_num_seqs": 8,
+      "max_num_batched_tokens": 8192,
+      "enforce_eager": false,
+      "enable_thinking": false,
+      "multimodal_inputs": "REJECTED",
+      "multimodal_inputs_note": "Multimodal inputs are explicitly REJECTED rather than merely unused: the claim-rejection list already forbids multimodal claims, and a rejected input path cannot silently contribute an episode.",
+      "tensor_parallel_size": 1
+    },
+
+    "hardware_integrity": {
+      "veto": "S19",
+      "note": "THE S19 HARDWARE-INTEGRITY CONTRACT the analyzer enforces. The protocol asserts that weights are the only difference between paired arms; that assertion is unverifiable unless every claim-bearing trace says which physical card and which engine produced it. This veto can only veto a result or make it INCONCLUSIVE -- it can never make a result more favourable.",
+      "trace_field_location": "trace.provenance",
+      "trace_field_location_note": "FROZEN SEAM: agentlab.suite.evaluate._trace_row copies the evaluator's `run_meta` verbatim into every trace row's `provenance` block, so the fingerprint is owned by the runtime/evaluator layer and merely READ here. The analyzer never invents or infers a fingerprint field.",
+      "required_trace_fields": ["run_id", "git_sha", "config_hash", "gpu_name", "gpu_uuid", "cuda_visible_bytes", "driver_version", "engine_fingerprint", "enable_thinking_effective", "timestamp_utc"],
+      "expected_gpu_name": "NVIDIA RTX A5000",
+      "expected_cuda_visible_bytes": 25282805760,
+      "enable_thinking_effective_required": false,
+      "one_gpu_uuid_per_run_id": true,
+      "one_run_id_per_trace_set": true,
+      "paired_arm_sets": [["BP", "TP"], ["B0", "T0"]],
+      "paired_fingerprint_fields": ["gpu_name", "gpu_uuid", "cuda_visible_bytes", "driver_version", "engine_fingerprint", "enable_thinking_effective"],
+      "outcomes": {
+        "missing_provenance": "INCONCLUSIVE",
+        "missing_provenance_rule": "A claim-bearing trace that does not carry every required field yields INCONCLUSIVE and NO WINNER. Missing provenance is missing evidence, never a favourable default and never an assumed A5000.",
+        "wrong_card": "BUG",
+        "wrong_card_rule": "A gpu_name that is not the registered expected_name, or cuda_visible_bytes that is not the registered expected_cuda_visible_bytes, is a known-wrong card: BUG.",
+        "mixed_fingerprint": "BUG",
+        "mixed_fingerprint_rule": "More than one physical gpu_uuid within one run_id, more than one run_id in one trace set, or more than one engine_fingerprint anywhere in the claim-bearing traces is a BUG.",
+        "paired_fingerprint_mismatch": "BUG",
+        "paired_fingerprint_mismatch_rule": "Any paired BP/TP or B0/T0 comparison whose two members disagree on any paired_fingerprint_field is a BUG: the weight change is then not the only difference.",
+        "engine_contract_violation": "BUG",
+        "engine_contract_violation_rule": "An engine_fingerprint that declares a value for any machine.engine_contract key and disagrees with the registered value -- including enable_thinking, gpu_memory_utilization and max_model_len -- is a BUG."
+      },
+      "richer_fingerprint_allowed": "required_trace_fields is the FROZEN CROSS-AGENT MINIMUM, not a maximum. A trace may carry more (PCI bus id, visible ordinal, compute capability, MIG mode, a runtime-manifest SHA-256, CUDA driver/runtime versions, tokenizer/adapter hashes, attention backend, concurrency); the runtime/evaluator layer owns those and S19 neither requires nor rejects them. What S19 requires is that the frozen minimum is present, single-valued per run, and consistent across every paired comparison -- so enriching the fingerprint later cannot weaken this veto.",
+      "replication_rule": "An independent replication on ANOTHER physical A5000 is legitimate science but requires a NEW run_id and its own trace set. It may NEVER append to an existing trace set: appending would silently mix two cards inside one claim, which is precisely what this veto exists to catch.",
+      "ledger_rule": "Every gpu_ledger.jsonl row carries the same fingerprint fields. A ledger whose first bound UUID disagrees with a later row is fatal to the run (enforced by the driver/ledger layer, which owns that file)."
+    },
+
+    "grpo_disposition": {
+      "note": "THE REGISTERED GRPO STAGE DISPOSITION the analyzer requires. A stage DISPOSITION is not a gate state: it says what happened to a stage, never whether a claim passed. These labels therefore live here and in grpo.stage_disposition, and are deliberately NOT added to outcome_states.",
+      "artifact_path": "results/agentic/grpo_disposition.json",
+      "required_when": "whenever no GRPO checkpoint exists -- i.e. whenever locks.json locks a trained checkpoint whose stage is not `grpo`",
+      "missing_artifact_status": "BUG",
+      "missing_artifact_rule": "A missing GRPO checkpoint with no allowed disposition artifact is an ERROR (BUG), never a silent selection of RS-SFT. 'GRPO was skipped for a reason nobody wrote down' is indistinguishable from 'GRPO ran and lost', and only one of those is reportable.",
+      "allowed_dispositions": ["GRPO_NOT_RUN_HARDWARE_INFEASIBLE", "GRPO_NOT_RUN_VARIANCE_GATE_CLOSED"],
+      "registered_disposition_for_this_run": "GRPO_NOT_RUN_HARDWARE_INFEASIBLE",
+      "required_artifact_fields": ["branch", "outcome", "variance_gate", "trainer_feasibility", "optimizer_steps", "gpu_name", "cuda_visible_bytes", "config_hash", "checkpoint_hash", "git_sha", "arithmetic", "timestamp_utc"],
+      "expected_branch": "grpo",
+      "hardware_infeasible": {
+        "outcome": "GRPO_NOT_RUN_HARDWARE_INFEASIBLE",
+        "variance_gate": "NOT_EVALUATED_HARDWARE_SHORT_CIRCUIT",
+        "trainer_feasibility": "INFEASIBLE",
+        "optimizer_steps": 0,
+        "arithmetic_fields": ["vllm_allocation_gib", "vllm_policy_copy_gib"],
+        "vllm_allocation_gib": 5.651,
+        "vllm_policy_copy_gib": 8.455,
+        "arithmetic_rule": "The artifact must record vllm_allocation_gib < vllm_policy_copy_gib, i.e. the registered vllm_gpu_memory_utilization 0.24 x 23.54644775390625 GiB = 5.651 GiB carve is smaller than vLLM's own 8.455 GiB colocated policy copy. An artifact whose arithmetic does not show the shortfall does not establish infeasibility and is a BUG."
+      },
+      "variance_gate_closed": {
+        "outcome": "GRPO_NOT_RUN_VARIANCE_GATE_CLOSED",
+        "meaning": "The COMPLETE 144-group / 1152-rollout variance probe ran and at least one of the two registered POOLED binding gates failed. This is evidence about the RS-SFT policy's reward and outcome variance.",
+        "not_interchangeable": "It is NOT interchangeable with GRPO_NOT_RUN_HARDWARE_INFEASIBLE, which says only that the registered trainer cannot instantiate on the registered card and says NOTHING about whether the variance gate would have opened.",
+        "requires_probe_run": true
+      },
+      "forbidden_substitutions": ["microbatch 1", "2048-token completions", "no-vLLM (transformers) generation", "quantization", "CPU/disk offload", "an alternate optimizer", "another GPU model"],
+      "forbidden_substitutions_rule": "Each of these defines a DIFFERENT treatment. Running one of them under this registered branch and reporting it as the registered GRPO stage is forbidden; it would be a new pre-registration.",
+      "consequences": {
+        "grpo_checkpoint": "none exists",
+        "r0_rp": "ABSENT BY DESIGN",
+        "sole_trained_candidate": "rs_sft",
+        "dev_selection": "no RS-SFT-vs-GRPO comparison is performed, because there is no second candidate to compare"
+      }
+    },
+
     "strata": {
       "note": "Stratum membership is keyed on the spec/trace `split` field, which the suite generator already stamps. A gated sample may ONLY draw from its declared splits, so oversampled secondary strata (MT and H8 augmentation) can never leak into a core denominator and silently move a floor or a runaway rate.",
       "core": ["eval"],
@@ -282,8 +408,8 @@
       "note": "DESCRIPTIVE only. H50 is reported solely when the OBSERVED curve crosses this rate; otherwise it is left- or right-censored. No logistic or other extrapolation is ever fitted."
     },
 
-    "mandatory_harness_checks": ["S8", "S9", "S10", "S11", "S12", "S13", "S14", "S15", "S16", "S17", "S18"],
-    "mandatory_harness_checks_note": "All eleven registered vetoes are MANDATORY. A BUG in any of them makes the whole verdict BUG. An INCONCLUSIVE in any of them means NO VERDICT: a winner may not be declared while the harness that would make a winner meaningful is unverified. Before this was frozen the analyzer could ship a winner while S9, S10, S14 or S18 was INCONCLUSIVE.",
+    "mandatory_harness_checks": ["S8", "S9", "S10", "S11", "S12", "S13", "S14", "S15", "S16", "S17", "S18", "S19"],
+    "mandatory_harness_checks_note": "All TWELVE registered vetoes are MANDATORY. A BUG in any of them makes the whole verdict BUG. An INCONCLUSIVE in any of them means NO VERDICT: a winner may not be declared while the harness that would make a winner meaningful is unverified. Before this was frozen the analyzer could ship a winner while S9, S10, S14 or S18 was INCONCLUSIVE. S19 HARDWARE-INTEGRITY is the twelfth and newest: it was added with the single-card pivot, when zero study GPU-hours and zero held-out results existed, and it can only veto a result or make it INCONCLUSIVE.",
 
     "registered_cardinalities": {
       "note": "EXACT counts, not minimums. These govern the suite generator (sibling layer); the analyzer's gate minimums above are the separate, unchanged decision thresholds. Where an exact cardinality exceeds a gate minimum the surplus is registered sampling, not slack to be trimmed after results.",
@@ -347,6 +473,7 @@
 
   "harness_vetoes": {
     "S8": "PAIRING: identical task IDs, values, budgets, schemas, decoding, and seeds across compared arms",
+    "S19": "HARDWARE-INTEGRITY (MANDATORY): every claim-bearing trace within one run_id carries the full runtime fingerprint (machine.hardware_integrity.required_trace_fields) and shares ONE physical GPU UUID; every paired BP/TP and B0/T0 comparison has an IDENTICAL hardware-and-engine fingerprint. MISSING hardware provenance -> INCONCLUSIVE and no winner. A known-wrong card, a mixed UUID/run_id/engine fingerprint, a paired-arm fingerprint mismatch, or an engine fingerprint that contradicts machine.engine_contract -> BUG. An independent replication on another A5000 requires a NEW run_id and may not append to an existing trace set.",
     "S9": "ORACLE: every task reachable; registered minimum horizon independently verified by replay",
     "S10": "SPLITS: no train/dev/test overlap in task IDs, KB namespace or keys, graph isomorphism, or template hashes",
     "S11": "ABSENT-INFO: redacted controls have zero certified AND zero raw exact success",
@@ -357,7 +484,7 @@
     "S16": "CONTROL-INTEGRITY: base checkpoint and prompt hashes match this preregistration; no adapter loaded in prompt-only arms",
     "S17": "TRACE-SUMMARY: independent recomputation agrees on calls, failures, exposure, recovery, hallucinations, and final score",
     "S18": "TEST-BLINDNESS: checkpoint and prompt winners locked (results/agentic/locks.json) before the held-out seed reveal (results/agentic/seed_reveal.json)",
-    "mandatory": "ALL of S8-S18 (machine.mandatory_harness_checks)",
+    "mandatory": "ALL of S8-S19 (machine.mandatory_harness_checks)",
     "precedence": "any BUG vetoes every capability gate, every launch floor and the winner rule -- the raw arithmetic survives only under the non-verdict field `observed_status`, and no official field may read PASS in a verdict containing a BUG. Any mandatory veto left INCONCLUSIVE yields NO VERDICT: a winner may not ship while the harness that would make it meaningful is unverified. Missing traces or an underpowered common-clean subset yield INCONCLUSIVE, never a favourable interpretation."
   },
 
@@ -373,17 +500,44 @@
   },
 
   "budget": {
-    "ceiling_gpu_hours": 36.0,
-    "ceiling_note": "36.0 MEASURED GPU-hours summed over every GPU stage of the whole pipeline. Measured, not nominal: a stage's own wall-clock GPU seconds are appended to the ledger, and a caller-supplied projection is never accepted as the accounting record.",
+    "ceiling_gpu_hours": 120.0,
+    "ceiling_hardware": "measured RTX A5000 GPU-hours (one physical card; see hardware and machine.hardware_integrity)",
+    "ceiling_note": "120.0 MEASURED A5000 GPU-hours summed over every GPU stage of the whole pipeline. Measured, not nominal: a stage's own wall-clock GPU seconds are appended to the ledger, and a caller-supplied projection is never accepted as the accounting record. Server startup, compilation and CUDA-graph capture count as measured occupancy.",
+    "ceiling_derivation": {
+      "previous_ceiling_gpu_hours": 36.0,
+      "why_raised": "The mandatory BP/TP paired evaluation -- which may never shrink -- projects to 75-99 A5000 GPU-hours from DIRECTLY MEASURED prior evaluator rates. Keeping 36.0 would not have made the work cheaper; it would have silently forced a mandatory-sample shrinkage, which this preregistration forbids. Raising an accounting envelope before any GPU-hour is spent is legitimate; shrinking a mandatory sample after a number is visible is not.",
+      "measured_rates": {
+        "base_arm_s_per_episode": 25.10,
+        "base_arm_basis": "prior measured base evaluation 5019.8 s / 200 episodes",
+        "trained_arm_s_per_episode": 44.27,
+        "trained_arm_basis": "prior measured RS-SFT evaluation 8854 s / 200 episodes"
+      },
+      "mandatory_episodes": 7800,
+      "projection_gpu_hours": {"bp_mandatory": [27.19, 35.78], "tp_mandatory": [47.96, 63.10], "paired_total": [75.15, 98.88], "whole_program_envelope": [87, 118]},
+      "chosen_ceiling_rationale": "120.0 is the forecaster's minimum defensible PRE-CALIBRATION budget: it covers the 87-118 h evidence envelope with a small margin and no contingency padding beyond it.",
+      "engineering_target_expectation_gpu_hours": [14, 21],
+      "engineering_target_status": "UNVALIDATED EXPECTATION, NEVER A REGISTERED MEASUREMENT. If the new concurrent vLLM evaluator validates a 3.3-3.9x speedup over the old serial evaluator, the whole program may finish in about 14-21 h. That number may not be cited as a measured cost, may not be used to justify a smaller ceiling, and may not be entered into the ledger. Only measured seconds are accounting.",
+      "outcome_blind": "Recorded when the gpu ledger was empty, no checkpoint existed, and no held-out result existed. The derivation follows measured evaluator rates and a declared hardware change, never an observed model outcome."
+    },
     "dominant_stage": "final_paired_evaluation",
-    "dominant_stage_evidence": "The final paired evaluation, NOT GRPO, is the stage most likely to consume the ceiling. Registered episode counts: ~8360 episodes for BP/TP alone (4800 core = 1200 tasks x clean/faulted x 2 arms; 1200 MT; 400 H8 augmentation; 1200 redacted control; 200 permuted; 560 stress), ~15320 including B0/T0, ~22280 including R0/RP. Even at the historically favourable fully batched rate of ~7.85 decision-generations/s and nine decisions per episode the all-arm evaluation is around seven GPU-hours, and the production evaluator uses concurrency 8, longer contexts and up to 1024 tokens per decision rather than the 384-token rejection-sampling setting, so that rate is optimistic. Production rejection sampling is the likely second-largest stage.",
-    "episode_projection": {"bp_tp_only": 8360, "with_b0_t0": 15320, "with_r0_rp": 22280},
+    "dominant_stage_evidence": "The final paired evaluation, NOT GRPO, is the stage most likely to consume the ceiling: 75-99 projected A5000 GPU-hours for the 7800 mandatory BP/TP episodes at the directly measured 25.10 s/episode (base) and 44.27 s/episode (trained) rates. The earlier 'around seven GPU-hours at ~7.85 decision-generations/s' estimate translated a fully batched rejection-sampling rate into dependency-serial online tool episodes and is superseded as a forecast; the registered episode counts it referred to are unchanged. If continuous batching is validated, production rejection sampling (about 16400 rollouts, mean H about 9.07) becomes the largest stage instead -- which is exactly why calibration is load-bearing.",
+    "mandatory_episode_census": {
+      "note": "CORRECTED mandatory census: 7800 episodes. The registered H8 denominator is 400 paired tasks, but 200 of those are already inside eval_core, so only 200 are ADDITIONAL. The absent-information and permutation controls are registered as CLEAN controls; adding faulted controls would be a NEW pre-registration choice and is deliberately not made here. No registered cardinality changed: this corrects an arithmetic census, not a sample size.",
+      "core_1200_tasks_x_clean_faulted_x_2_arms": 4800,
+      "mt_600_x_2_arms": 1200,
+      "h8_200_additional_tasks_x_2_arms": 400,
+      "absent_information_600_x_2_arms_clean_only": 1200,
+      "permutation_100_x_2_arms": 200,
+      "mandatory_total": 7800,
+      "optional_not_in_the_mandatory_total": {"stress_280_x_2_arms": 560, "b0_t0_descriptive_arms": "cut rank 3", "r0_rp": "ABSENT BY DESIGN (grpo.stage_disposition)"}
+    },
+    "episode_projection": {"bp_tp_mandatory": 7800, "bp_tp_with_optional_stress": 8360, "with_b0_t0": 15320, "with_r0_rp": "not applicable: R0/RP are absent by design"},
 
     "mandatory": {
       "arms": ["BP", "TP"],
       "samples": ["eval_core clean", "eval_core faulted", "MT", "H8", "absent_information control", "counterfactual_permutation control"],
-      "rule": "BP and TP across core (clean and faulted), MT, H8 and ALL controls are MANDATORY. Mandatory sample sizes may NEVER shrink after any result is visible -- not by one episode, and not for a stated budget reason discovered after a number was seen.",
-      "infeasibility_rule": "If the mandatory work cannot fit inside the 36.0-hour ceiling, the run STOPS and reports INCOMPLETE / INCONCLUSIVE. It does not trim a mandatory sample, does not substitute a smaller sample, and does not report a partial mandatory sample as if it were the registered one. An unfinished run is a reportable outcome; a silently shrunk one is not."
+      "rule": "BP and TP across core (clean and faulted), MT, H8 and ALL controls are MANDATORY -- 7800 episodes (budget.mandatory_episode_census). Mandatory sample sizes may NEVER shrink after any result is visible -- not by one episode, and not for a stated budget reason discovered after a number was seen.",
+      "infeasibility_rule": "If the mandatory work cannot fit inside the 120.0-hour ceiling, the run STOPS and reports INCOMPLETE / INCONCLUSIVE. It does not trim a mandatory sample, does not substitute a smaller sample, and does not report a partial mandatory sample as if it were the registered one. An unfinished run is a reportable outcome; a silently shrunk one is not."
     },
 
     "cut_order_if_calibration_projects_overrun": [
@@ -392,21 +546,54 @@
       {"rank": 3, "cut": "the descriptive B0/T0 arms"},
       {"rank": 4, "cut": "the two-fault stress set"}
     ],
-    "cut_order_rule": "Cuts are taken in this order and only this order, and only on a CALIBRATION projection made before the relevant stage runs -- never after seeing a held-out result from any arm. Everything in this list is declared budget-conditional HERE, before the push, which is the only thing that makes dropping it honest. Anything not in this list is mandatory.",
+    "cut_order_rule": "Cuts are taken in this order and only this order, and only on a CALIBRATION projection made before the relevant stage runs -- never after seeing a held-out result from any arm. Everything in this list is declared budget-conditional HERE, before the push, which is the only thing that makes dropping it honest. Anything not in this list is mandatory. THE ORDER IS UNCHANGED BY THE HARDWARE PIVOT.",
+    "cut_order_status_note": "Ranks 1 and 2 (the GRPO branch, its variance probe and the R0/RP arms) are now moot rather than reordered: GRPO is NOT RUN at all under grpo.stage_disposition GRPO_NOT_RUN_HARDWARE_INFEASIBLE, and the variance probe is NOT_EVALUATED_HARDWARE_SHORT_CIRCUIT. The first cut actually available to a calibration overrun is therefore rank 3 (B0/T0), then rank 4 (stress). Nothing was promoted, demoted or reclassified; no mandatory arm becomes optional, and no optional arm becomes mandatory.",
 
     "calibration": {
       "rule": "Before the final paired evaluation, measure completed episodes/hour AND decision-generations/hour separately for the base and adapter arms, stratified by horizon (H2/H4/H8/H12/H14/H20) and by clean/faulted, and project the remaining registered work from those measurements including server restarts. The projection is a measurement, not an estimate supplied by the caller.",
-      "decision_point": "if the projection for mandatory work alone exceeds the remaining ledger budget, apply the cut order; if mandatory work alone still does not fit, STOP and report INCOMPLETE"
+      "decision_point": "if the projection for mandatory work alone exceeds the remaining ledger budget, apply the cut order; if mandatory work alone still does not fit, STOP and report INCOMPLETE",
+      "load_bearing_note": "Calibration is LOAD-BEARING under the 120.0-hour ceiling: the pre-calibration evidence envelope (87-118 h) and the unvalidated concurrent-evaluator expectation (14-21 h) differ by roughly 5x, and which of them is true decides whether the mandatory program fits. Calibration runs on dev-only task IDs, before the held-out seed reveal, on the exact production engine contract; concurrency is selected from timing, OOM/preemption and latency stability ONLY, never from a capability outcome.",
+      "if_mandatory_still_does_not_fit": "STOP and report INCOMPLETE / INCONCLUSIVE. Mandatory samples may never shrink."
     },
 
     "ledger": {
       "path": "results/agentic/gpu_ledger.jsonl",
-      "accounting_rule": "Every GPU stage appends one append-only record carrying stage name, start and end UTC timestamps, MEASURED elapsed GPU seconds, git sha, GPU identity, and the episode or step count actually completed. The ceiling is enforced against the SUM of measured elapsed GPU seconds over all records, never against nominal per-stage ranges. A stage may not start when its calibrated projection plus the ledger total would cross 36.0 hours. A shard that overruns its projection is still charged its measured time, and the overrun is reported rather than absorbed. Every GPU consumer -- including the final evaluator -- must read and append to this ledger; a stage that does not appear in the ledger counts as unaccounted time and makes the budget claim INCONCLUSIVE."
+      "accounting_rule": "Every GPU stage appends one append-only record carrying stage name, start and end UTC timestamps, MEASURED elapsed GPU seconds, git sha, the full hardware fingerprint of machine.hardware_integrity.required_trace_fields (GPU name, GPU UUID, CUDA-visible bytes, driver version, engine fingerprint, effective thinking mode, run_id, config hash), and the episode or step count actually completed. The ceiling is enforced against the SUM of measured elapsed GPU seconds over all records, never against nominal per-stage ranges. A stage may not start when its calibrated projection plus the ledger total would cross 120.0 hours. Server startup, compilation and CUDA-graph capture count as measured occupancy. A shard that overruns its projection is still charged its measured time, and the overrun is reported rather than absorbed. Every GPU consumer -- including the final evaluator -- must read and append to this ledger; a stage that does not appear in the ledger counts as unaccounted time and makes the budget claim INCONCLUSIVE. A ledger row whose GPU UUID disagrees with the first bound UUID of the run is fatal."
     }
   },
 
   "grpo": {
-    "status": "OPTIONAL and budget-conditional (cut rank 1). Nothing in the primary or secondary claims depends on GRPO running.",
+    "status": "NOT RUN in this registered run: the exact registered recipe is HARDWARE-INFEASIBLE on the registered single RTX A5000. It remains OPTIONAL and budget-conditional (cut rank 1) as a matter of registration; the disposition below is why it is not executed. Nothing in the primary or secondary claims depends on GRPO running. The registered hyperparameters below are UNCHANGED -- an infeasible recipe is still the registered recipe, and rewriting it would define a different experiment.",
+    "stage_disposition": {
+      "label": "GRPO_NOT_RUN_HARDWARE_INFEASIBLE",
+      "kind": "STAGE DISPOSITION",
+      "kind_rule": "A stage disposition says what happened to a STAGE. It is NEVER one of the capability gate states PASS / FAIL / INCONCLUSIVE / BUG, is never written into any gate, claim, floor or winner field, and is deliberately absent from outcome_states. Reporting it as a gate state would turn 'the trainer could not start' into a statement about the model.",
+      "variance_probe": "NOT_EVALUATED_HARDWARE_SHORT_CIRCUIT",
+      "variance_probe_rule": "The probe is NOT RUN and its status is NOT_EVALUATED_HARDWARE_SHORT_CIRCUIT. It may never be described as 'closed': a closed gate would be evidence about the RS-SFT policy's variance, and no such evidence exists. The distinct label GRPO_NOT_RUN_VARIANCE_GATE_CLOSED is reserved for the case where the complete 144-group probe ran and a binding pooled gate failed.",
+      "arithmetic": {
+        "card_gib": 23.54644775390625,
+        "vllm_gpu_memory_utilization": 0.24,
+        "vllm_allocation_gib": 5.651,
+        "vllm_independent_policy_copy_gib": 8.455,
+        "shortfall_gib": 2.804,
+        "trainer_static_gib": 9.420,
+        "trainer_plus_policy_copy_gib": 17.875,
+        "logits_gib_per_3072_token_sequence": 1.53,
+        "conclusion": "0.24 x 23.546 GiB = 5.651 GiB is smaller than vLLM's own 8.455 GiB colocated policy copy, so the engine cannot even instantiate; and the trainer's 9.420 GiB plus that copy is already 17.875 GiB of 23.546 GiB before any KV cache, CUDA graphs, or the 1.53 GiB-per-3072-token-sequence logits. The registered configuration is infeasible, not merely tight."
+      },
+      "frozen_preconditions": [
+        "the registered hardware is exactly one NVIDIA RTX A5000 with 25282805760 CUDA-visible bytes",
+        "the registered GRPO recipe is UNCHANGED: bf16 Qwen3.5-4B, LoRA r=32, 8 generations, per-device batch 4, accumulation 2, max_completion_length 3072, vllm_max_model_length 6144, vllm_gpu_memory_utilization 0.24",
+        "a DETERMINISTIC preflight records that the 5.651 GiB vLLM allocation is smaller than the 8.455 GiB independent policy copy",
+        "NO optimizer step and NO held-out evaluation precedes this disposition",
+        "NO substituted variant runs under the same registered branch: not microbatch 1, not 2048-token completions, not no-vLLM generation, not quantization, not offload, not an alternate optimizer, not another card",
+        "a DURABLE artifact (results/agentic/grpo_disposition.json) records GPU name, CUDA-visible bytes, config hash, checkpoint hash, git SHA, the arithmetic, the UTC time and zero GRPO optimizer steps",
+        "no GRPO checkpoint exists; R0/RP are ABSENT BY DESIGN; RS-SFT is the SOLE trained candidate eligible for the checkpoint lock"
+      ],
+      "artifact_contract": "machine.grpo_disposition (the copy the analyzer reads). The analyzer REQUIRES this artifact whenever locks.json locks a trained checkpoint whose stage is not `grpo`: a missing GRPO checkpoint with no allowed disposition is a BUG and must never silently select RS-SFT.",
+      "out_of_v1_scope": "agentlab.multigrpo is NOT written and the GRPO branch is out of v1 scope. A future GRPO study on different hardware, or with a redesigned batch, is a SEPARATE pre-registration with its own locks, seeds, ledger and hardware declaration.",
+      "outcome_blind": "Registered when zero study GPU-hours and zero held-out results existed. The disposition follows from a memory arithmetic over declared hardware, never from an observed model outcome."
+    },
     "scenario_seed_rule": "GRPO training data is a MAP-STYLE dataset keyed by `scenario_seed`. Every one of the G generations in a group must reconstruct byte-identically the same prompt, KB, environment, fault target, fault class, node index and budgets from that single `scenario_seed`; ONLY the sampling seed differs across the group. A group whose members cannot be shown to share one reconstructed scenario is discarded, not repaired.",
     "variance_probe": {
       "must_exist_before_grpo": "src/agentlab/variance.py, run on the locked RS-SFT checkpoint BEFORE any GRPO update, on a disjoint committed probe split, using the EXACT GRPO decoding settings and the EXACT production reward function (one shared reward implementation, imported by both the probe and GRPO).",
@@ -435,6 +622,7 @@
       "provenance": "record checkpoint hash, prompt hash, config hash, suite SHA256SUMS hash, git sha, model and server versions, GPU identity, elapsed GPU seconds and the exact group IDs; also report unique completion hashes so that accidentally reusing one seed eight times is detectable"
     },
     "dev_selection": {
+      "this_run": "Hardware-infeasible GRPO leaves RS-SFT as the SOLE trained candidate: there is no second candidate, so no dev comparison is performed and the tie rule below is never reached. The rule stays registered verbatim because a future run that does produce a GRPO checkpoint must implement it, and because deleting it would let 'RS-SFT was locked' look like the outcome of a comparison that never happened.",
       "rule": "EXACTLY ONE trained checkpoint is locked as TP. The selection between RS-SFT and GRPO is made on the committed DEV split only, before the held-out seed reveal, and recorded in results/agentic/locks.json with its stage.",
       "metric": "mean certified strict success on the committed dev split, pooling clean and faulted dev episodes with equal weight per episode, under the frozen decoding settings and the frozen tournament-winner prompt",
       "tie_rule": "if the two checkpoints differ by less than 0.005 absolute on that metric, the tie goes to RS-SFT (the shorter, cheaper pipeline). A tie NEVER goes to GRPO, so an unresolved comparison cannot manufacture a GRPO claim.",
