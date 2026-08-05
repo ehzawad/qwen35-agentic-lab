@@ -495,10 +495,45 @@ def report(tags: list[str], out_dir: str = "out", trace_dirs: list[str] | None =
 
 OUTCOME_STATES = ("PASS", "FAIL", "INCONCLUSIVE", "BUG")
 
+# Official statuses only. `observed_status` / `measured_status` are explicitly
+# NOT verdicts: they carry the raw arithmetic of a gate that has been vetoed by a
+# harness BUG or downgraded for underpower, so nothing is deleted, but a reader
+# or a script pulling a status can never mistake them for a result.
+NON_VERDICT_FIELDS = ("observed_status", "measured_status")
+
 
 def _g(status: str, detail: str, **numbers) -> dict:
-    assert status in OUTCOME_STATES + ("OK", "WARN")
+    # SKIP is forbidden in the agentic path: the legacy analyzer above uses it,
+    # but a preregistered gate that cannot be computed is INCONCLUSIVE and a gate
+    # in an unknown state is a BUG. Translating either into SKIP is how a missing
+    # measurement stops being visible.
+    assert status in OUTCOME_STATES + ("OK", "WARN"), f"forbidden gate state {status!r}"
     return {"status": status, "detail": detail, "numbers": numbers}
+
+
+def registered(prereg: dict, *path):
+    """Read one numeric/structural field from the governing preregistration.
+
+    Every threshold, margin, floor, sample-size minimum and rate ceiling the
+    agentic analyzer applies is fetched through here, out of the `machine` block
+    of configs/agentic_preregister.json. Nothing is defaulted: a missing field
+    raises rather than falling back to a literal, because a silent default is
+    exactly the failure this indirection exists to prevent -- the protocol used
+    to declare the JSON authoritative while the code carried its own copies of
+    500, 900, +0.05, -0.03 and -0.05, so editing the governing file changed no
+    verdict at all.
+    """
+    node = prereg.get("machine")
+    if not isinstance(node, dict):
+        raise KeyError("configs/agentic_preregister.json has no `machine` block: "
+                       "the analyzer has no thresholds to apply")
+    for i, key in enumerate(path):
+        if not isinstance(node, dict) or key not in node:
+            raise KeyError("the preregistration is missing the registered field "
+                           f"machine.{'.'.join(map(str, path))} "
+                           f"(stopped at machine.{'.'.join(map(str, path[:i + 1]))})")
+        node = node[key]
+    return node
 
 
 def _no_verdict(res: dict, why: str) -> dict:
@@ -515,6 +550,21 @@ def _no_verdict(res: dict, why: str) -> dict:
              f"[{res['status']}]: {res['detail']}", **res["numbers"])
     out["measured_status"] = res["status"]
     return out
+
+
+def _n_clusters(eps_list) -> dict:
+    """Structural-cluster census for a Wilson (non-resampled) sample.
+
+    Wilson intervals are not clustered, but every interval report still has to
+    say how many structural templates its denominator actually spans: an upper
+    bound computed over 400 value instantiations of three structural templates is
+    a different claim from the same bound over 400 instantiations of 80.
+    """
+    ids = [ep.get("template_cluster_id") for ep in eps_list]
+    known = {str(c) for c in ids if c is not None and str(c) != ""}
+    return {"n_clusters": len(known),
+            "missing_cluster_id": sum(1 for c in ids
+                                      if c is None or str(c) == "")}
 
 
 def _wilson_ub_gate(name: str, k: int, n: int, threshold: float, detail: str,
@@ -598,7 +648,14 @@ def load_agentic_episodes(traces_dir: str | pathlib.Path, secret: bytes) -> dict
             key = (rec.get("arm"), rec.get("condition"), rec.get("control", "none"))
             rep = provenance.certify_episode(rec, secret)
             ep = {"task_id": rec.get("task_id"), "family": rec.get("family"),
-                  "horizon": rec.get("horizon"), "template": rec.get("template_id"),
+                  "horizon": rec.get("horizon"), "split": rec.get("split"),
+                  # `template` is the PARAPHRASE/wording id. It is carried for the
+                  # record and is deliberately NOT used for clustering.
+                  "template": rec.get("template_id"),
+                  # the SOLE bootstrap clustering field (frozen contract): a
+                  # structural identity -- family + horizon + oracle-DAG shape +
+                  # tool-order pattern + operand roles.
+                  "template_cluster_id": rec.get("template_cluster_id"),
                   "pattern_id": rec.get("pattern_id"),
                   "all_tools_required": bool(rec.get("all_tools_required")),
                   "rep": rep, "trace": rec}
@@ -692,19 +749,25 @@ def veto_s11_absent_info(eps: dict, prereg: dict, arms=("BP", "TP")) -> dict:
     INCONCLUSIVE.
     """
     need = int(prereg["controls"]["absent_information"]["n_per_family"])
-    per_family: dict = {}
+    # Coverage is counted PER (family, arm), never pooled across arms: 400
+    # redacted lookup_chain episodes all in TP is not "200 per family per arm",
+    # and a family that appears in the capability numbers but not in the control
+    # has no evidence that its answers require the hidden value at all.
+    per_cell: dict = {}
     leaks, unexecuted = [], []
     for (arm, condition, control), tasks in eps.items():
         if control != "redacted" or arm not in arms:
             continue
         for ep in tasks.values():
-            per_family[ep["family"]] = per_family.get(ep["family"], 0) + 1
+            runner = ep["trace"].get("runner") or {}
+            harness_failed = (runner.get("termination_reason") == "spec_error"
+                              or not runner.get("n_decisions"))
             if ep["rep"]["raw_success"] or ep["rep"]["certified_success"]:
                 leaks.append(f"{arm}/{ep['task_id']}")
-            runner = ep["trace"].get("runner") or {}
-            if (runner.get("termination_reason") == "spec_error"
-                    or not runner.get("n_decisions")):
+            if harness_failed:
                 unexecuted.append(f"{arm}/{ep['task_id']}")
+                continue  # a control that never ran contributes no coverage
+            per_cell[(ep["family"], arm)] = per_cell.get((ep["family"], arm), 0) + 1
     if leaks:
         return _g("BUG", f"redacted-control SUCCESS (harness leakage): {leaks[:3]}",
                   leaks=len(leaks))
@@ -713,14 +776,25 @@ def veto_s11_absent_info(eps: dict, prereg: dict, arms=("BP", "TP")) -> dict:
                   f"single decision, e.g. {unexecuted[:3]} -- their zero success rate "
                   f"is vacuous, not evidence that the hidden value is required",
                   unexecuted=len(unexecuted))
-    if not per_family:
+    if not per_cell:
         return _g("INCONCLUSIVE", "no redacted-control traces found")
-    short = {f: n for f, n in per_family.items() if n < need * len(arms)}
-    if short:
-        return _g("INCONCLUSIVE", f"redacted coverage below {need}/family/arm: {short}",
-                  counts=per_family)
-    return _g("OK", f"zero raw and certified success on {sum(per_family.values())} "
-              f"redacted instances", counts=per_family)
+    counts = {f"{fam}/{arm}": n for (fam, arm), n in sorted(per_cell.items())}
+    scored_families = {ep["family"] for (arm, cond, ctl), tasks in eps.items()
+                       if ctl == "none" and arm in arms
+                       for ep in tasks.values()}
+    short = {k: n for k, n in counts.items() if n < need}
+    uncovered = sorted({f"{fam}/{arm}" for fam in scored_families for arm in arms
+                        if (fam, arm) not in per_cell})
+    if short or uncovered:
+        why = []
+        if short:
+            why.append(f"redacted coverage below {need} per family per arm: {short}")
+        if uncovered:
+            why.append(f"scored families with NO redacted control: {uncovered}")
+        return _g("INCONCLUSIVE", "; ".join(why), counts=counts, need=need)
+    return _g("OK", f"zero raw and certified success on {sum(per_cell.values())} "
+              f"redacted instances, >= {need} per family per arm", counts=counts,
+              need=need)
 
 
 def veto_s12_injection(eps: dict, specs_by_id: dict | None) -> dict:
@@ -783,6 +857,7 @@ def veto_s14_counterfactual(eps: dict, specs: list[dict] | None, prereg: dict,
     # the replayed answer and the scorer decision.
     if specs:
         import copy
+        cap = int(registered(prereg, "controls_checks", "s14_generation_check_cap"))
         checked = 0
         for spec in specs:
             hk, field = spec.get("hidden_key"), spec.get("answer_field", "code")
@@ -801,7 +876,7 @@ def veto_s14_counterfactual(eps: dict, specs: list[dict] | None, prereg: dict,
                 problems.append(f"{spec.get('task_id')}: answer insensitive to the "
                                 f"hidden value")
             checked += 1
-            if checked >= 200:
+            if checked >= cap:
                 break
     # (b) permuted replays must be scored against the permuted answer.
     n_perm = 0
@@ -851,28 +926,53 @@ def veto_s15_attrition(eps: dict, specs_by_id: dict | None, arms=("BP", "TP")) -
 
 
 def veto_s16_control_integrity(eps: dict, prereg: dict, locks: dict | None) -> dict:
+    """Prompt/base/adapter integrity, plus the ONE-locked-checkpoint rule.
+
+    "Exactly one locked trained checkpoint maps to TP" is a harness property, not
+    a matter of interpretation: if locks.json names no stage, an unregistered
+    stage, or a path that the TP traces' adapter disagrees with, then the arm
+    labelled TP is not demonstrably the arm that was locked before the reveal,
+    and every trained-arm number is unattributable.
+    """
     problems = []
-    registered = set(prereg["prompt_candidates"]["sha256"].values())
+    registered_shas = set(prereg["prompt_candidates"]["sha256"].values())
     winner_sha = (locks or {}).get("prompt_winner", {}).get("sha256")
     base_id = prereg["model"]["base_id"]
+    ckpt = (locks or {}).get("checkpoint") or {}
+    stages = list(prereg["grpo"]["dev_selection"]["stages"])
+    trained_arms = ("T0", "TP", "R0", "RP")
+    if locks is not None:
+        if not ckpt.get("path"):
+            problems.append("locks.json names no trained checkpoint path")
+        elif not isinstance(ckpt.get("path"), str):
+            problems.append("locks.json checkpoint path is not a single path")
+        if ckpt.get("stage") not in stages:
+            problems.append(f"locked checkpoint stage {ckpt.get('stage')!r} is not one "
+                            f"of the registered {stages}")
     for (arm, condition, control), tasks in eps.items():
         for ep in tasks.values():
             prov = ep["trace"].get("provenance", {})
             psha = ep["trace"].get("prompt", {}).get("sha256")
             if prov.get("base_id") != base_id:
                 problems.append(f"{arm}: base_id {prov.get('base_id')!r} != registered")
-            if psha not in registered:
+            if psha not in registered_shas:
                 problems.append(f"{arm}: prompt hash not among the eight registered")
             if winner_sha and arm in ("BP", "TP", "RP") and psha != winner_sha:
                 problems.append(f"{arm}: prompt is not the locked winner")
             if arm in ("B0", "BP") and prov.get("adapter"):
                 problems.append(f"{arm}: adapter loaded in a prompt-only arm")
+            if ckpt.get("path") and arm in trained_arms:
+                if prov.get("adapter") != ckpt["path"]:
+                    problems.append(f"{arm}: adapter {prov.get('adapter')!r} is not the "
+                                    f"locked checkpoint {ckpt['path']!r}")
             break  # provenance is constant per file; one episode suffices
     if problems:
         return _g("BUG", "; ".join(sorted(set(problems))[:4]))
     if not eps:
         return _g("INCONCLUSIVE", "no traces loaded")
-    return _g("OK", "checkpoints, prompts, and adapters match the preregistration")
+    return _g("OK", "checkpoints, prompts, and adapters match the preregistration; "
+              + (f"exactly one locked checkpoint ({ckpt.get('stage')}) maps to TP"
+                 if ckpt.get("path") else "no locks supplied to check against"))
 
 
 def veto_s17_trace_summary(eps: dict) -> dict:
@@ -932,10 +1032,22 @@ def veto_s18_test_blindness(results_dir: str | pathlib.Path) -> dict:
 # paired data assembly + gates
 # ---------------------------------------------------------------------------
 
-def _pairs(eps: dict, condition: str, arms=("BP", "TP")) -> dict:
+def _pairs(eps: dict, condition: str, arms=("BP", "TP"),
+           splits: set | None = None) -> dict:
+    """Paired episodes for one condition, restricted to a declared stratum.
+
+    `splits` is the registered stratum membership (machine.strata). Restricting
+    it is load-bearing: MT and H8 augmentation traces also run with
+    condition="clean", so an unrestricted join let a separately-sized secondary
+    sample into core denominators, where oversampling it could move a launch
+    floor or a runaway rate and therefore the winner.
+    """
     a = eps.get((arms[0], condition, "none"), {})
     b = eps.get((arms[1], condition, "none"), {})
-    return {tid: (a[tid], b[tid]) for tid in set(a) & set(b)}
+    common = set(a) & set(b)
+    if splits is not None:
+        common = {tid for tid in common if a[tid].get("split") in splits}
+    return {tid: (a[tid], b[tid]) for tid in common}
 
 
 def _recovery_ok(ep: dict) -> bool:
@@ -943,78 +1055,183 @@ def _recovery_ok(ep: dict) -> bool:
 
 
 def _bootstrap_gate(pairs: list[tuple], outcome_fn, *, label: str, seed: int,
-                    margin: float, replicates: int = 100_000) -> dict:
+                    margin: float, replicates: int, block: int,
+                    min_clusters: int, max_per_cluster: int | None = None) -> dict:
+    """Clustered paired difference on the registered STRUCTURAL cluster field.
+
+    Clustering is on `template_cluster_id` and nothing else. The previous key,
+    `template_id or task_id`, silently swapped between two incomparable
+    resampling units: with a two-wording paraphrase pool it collapsed 1,200 core
+    tasks into two clusters, and where the field was absent it fell back to
+    `task_id`, i.e. one cluster per observation, which is not a clustered
+    bootstrap at all. Both mistakes make the interval NARROWER than the design
+    supports, so neither may be reached by a silent fallback.
+
+    A sample with too few clusters, with any missing cluster id, or with more
+    value instantiations per cluster than registered gets an INCONCLUSIVE reason
+    rather than a bound: an interval over a handful of structural templates is a
+    statement about those templates, not about the generator distribution.
+    """
+    from collections import Counter
+
     from agentlab.suite.stats import cluster_bootstrap_lb, mcnemar_exact
 
     diffs, clusters, b_cnt, c_cnt = [], [], 0, 0
+    missing = 0
     for bp, tp in pairs:
         yb, yt = int(outcome_fn(bp)), int(outcome_fn(tp))
         diffs.append(yt - yb)
-        clusters.append(str(bp.get("template") or bp["task_id"]))
+        cid = bp.get("template_cluster_id")
+        if cid is None or str(cid) == "":
+            missing += 1
+            # a distinct sentinel per observation, so a missing field can never
+            # masquerade as membership of one big well-populated cluster
+            clusters.append(f"\x00missing:{bp['task_id']}")
+        else:
+            clusters.append(str(cid))
         if yb and not yt:
             b_cnt += 1
         if yt and not yb:
             c_cnt += 1
-    boot = cluster_bootstrap_lb(diffs, clusters, seed, label, replicates=replicates)
+    boot = cluster_bootstrap_lb(diffs, clusters, seed, label,
+                               replicates=replicates, block=block)
     mc = mcnemar_exact(b_cnt, c_cnt)
+    sizes = Counter(clusters)
+    biggest = max(sizes.values()) if sizes else 0
+
+    reasons = []
+    if missing:
+        reasons.append(f"{missing}/{len(diffs)} pairs carry no "
+                       f"`template_cluster_id`; the registered clustering field "
+                       f"is unavailable for this sample")
+    if boot["n_clusters"] < min_clusters:
+        reasons.append(f"only {boot['n_clusters']} structural clusters "
+                       f"(< registered minimum {min_clusters})")
+    if max_per_cluster is not None and biggest > max_per_cluster:
+        reasons.append(f"largest cluster holds {biggest} value instantiations "
+                       f"(> registered maximum {max_per_cluster})")
+    if boot["degenerate"]:
+        reasons.append("the resampling distribution is degenerate (a single "
+                       "cluster or an empty sample)")
     return {"point": boot["point"], "lb": boot["lb"], "margin": margin,
             "n_pairs": len(diffs), "n_clusters": boot["n_clusters"],
+            "min_clusters": min_clusters, "missing_cluster_id": missing,
+            "max_cluster_size": biggest, "block": block,
+            "replicates": boot["replicates"],
             "degenerate": boot["degenerate"], "mcnemar": mc,
-            "pass": (not boot["degenerate"]) and boot["lb"] > margin}
+            "inconclusive": reasons,
+            "pass": (not reasons) and boot["lb"] > margin}
+
+
+def _bootstrap_verdict(res: dict, detail: str) -> dict:
+    """PASS/FAIL on a computable bound; INCONCLUSIVE with the arithmetic kept."""
+    numbers = {k: v for k, v in res.items() if k != "mcnemar"}
+    if res["inconclusive"]:
+        return _g("INCONCLUSIVE",
+                  f"{detail}; NO VERDICT: " + "; ".join(res["inconclusive"]),
+                  **numbers, mcnemar=res["mcnemar"])
+    return _g("PASS" if res["pass"] else "FAIL", detail, **numbers,
+              mcnemar=res["mcnemar"])
+
+
+def _median(sorted_vals: list, convention: str):
+    """Median under the REGISTERED even-sample convention.
+
+    An even sample has no unique middle observation, and MT3 is an at-most gate,
+    so the choice is a real (if small) part of the gate. The registered value is
+    `upper_middle` -- sorted[n//2], 0-based -- which is what the analyzer computed
+    at registration and the more conservative of the two for an at-most gate.
+    `lower_middle` is implemented so the JSON field genuinely governs rather than
+    being a comment on a hard-coded choice.
+    """
+    n = len(sorted_vals)
+    if n == 0:
+        raise ValueError("median of an empty sample")
+    if convention == "upper_middle":
+        return sorted_vals[n // 2]
+    if convention == "lower_middle":
+        return sorted_vals[(n - 1) // 2]
+    raise ValueError(f"unregistered median convention {convention!r}")
 
 
 def evaluate_agentic_gates(eps: dict, prereg: dict) -> dict:
-    seed = int(prereg["statistics"]["clustered_bootstrap"]["seed"])
-    replicates = int(prereg["statistics"]["clustered_bootstrap"]["replicates"])
+    boot_cfg = prereg["statistics"]["clustered_bootstrap"]
+    seed = int(boot_cfg["seed"])
+    replicates = int(boot_cfg["replicates"])
+    block = int(boot_cfg["chunk_block"])
+    min_clusters = int(registered(prereg, "clustering", "min_clusters_default"))
+    per_gate_clusters = registered(prereg, "clustering", "min_clusters_per_gate")
+    per_gate_max_inst = registered(prereg, "clustering",
+                                   "max_instantiations_per_cluster")
+
+    def _boot(pairs, fn, *, label, margin):
+        return _bootstrap_gate(
+            pairs, fn, label=label, seed=seed, margin=margin,
+            replicates=replicates, block=block,
+            min_clusters=int(per_gate_clusters.get(label, min_clusters)),
+            max_per_cluster=(int(per_gate_max_inst[label])
+                             if label in per_gate_max_inst else None))
+
+    core_splits = set(registered(prereg, "strata", "core"))
+    mt_splits = set(registered(prereg, "strata", "mt"))
+    h8_splits = set(registered(prereg, "strata", "h8"))
     gates: dict = {}
 
-    clean = _pairs(eps, "clean")
-    faulted = _pairs(eps, "faulted")
+    clean = _pairs(eps, "clean", splits=core_splits)
+    faulted = _pairs(eps, "faulted", splits=core_splits)
 
     # ---- ER: primary claim ------------------------------------------------
+    min_c = int(registered(prereg, "er", "min_common_clean"))
+    er2_margin = float(registered(prereg, "er", "er2_margin"))
+    er3_lb = float(registered(prereg, "er", "er3_wilson_lb"))
+    er4_margin = float(registered(prereg, "er", "er4_margin"))
+
     common_clean = {tid for tid, (bp, tp) in clean.items()
                     if bp["rep"]["certified_success"] and tp["rep"]["certified_success"]}
     c_set = sorted(common_clean & set(faulted))
-    min_c = 500
     if len(c_set) < min_c:
         gates["ER1"] = _g("INCONCLUSIVE",
                           f"|C|={len(c_set)} < {min_c}: underpowered; the recovery claim "
-                          f"receives NO verdict regardless of point estimates", C=len(c_set))
+                          f"receives NO verdict regardless of point estimates", C=len(c_set),
+                          min_c=min_c)
     else:
-        gates["ER1"] = _g("PASS", f"|C|={len(c_set)} >= {min_c}", C=len(c_set))
+        gates["ER1"] = _g("PASS", f"|C|={len(c_set)} >= {min_c}", C=len(c_set),
+                          min_c=min_c)
 
     if c_set:
-        er2 = _bootstrap_gate([faulted[t] for t in c_set], _recovery_ok,
-                              label="ER2", seed=seed, margin=0.05, replicates=replicates)
-        gates["ER2"] = _g("PASS" if er2["pass"] else "FAIL",
-                          f"certified recovery diff on C: point {er2['point']:+.3f}, "
-                          f"97.5% clustered LB {er2['lb']:+.3f} vs margin +0.05; exact "
-                          f"McNemar b={er2['mcnemar']['b']} c={er2['mcnemar']['c']} "
-                          f"p={er2['mcnemar']['p_two_sided']:.4g}", **{k: v for k, v in
-                          er2.items() if k != "mcnemar"}, mcnemar=er2["mcnemar"])
+        er2 = _boot([faulted[t] for t in c_set], _recovery_ok, label="ER2",
+                    margin=er2_margin)
+        gates["ER2"] = _bootstrap_verdict(
+            er2, f"certified recovery diff on C: point {er2['point']:+.3f}, "
+                 f"97.5% clustered LB {er2['lb']:+.3f} vs margin {er2_margin:+.2f} "
+                 f"over {er2['n_clusters']} structural clusters; exact McNemar "
+                 f"b={er2['mcnemar']['b']} c={er2['mcnemar']['c']} "
+                 f"p={er2['mcnemar']['p_two_sided']:.4g}")
         k = sum(1 for t in c_set if _recovery_ok(faulted[t][1]))
-        gates["ER3"] = _wilson_lb_gate("ER3", k, len(c_set), 0.60,
-                                       "TP certified recovery on C")
+        gates["ER3"] = _wilson_lb_gate("ER3", k, len(c_set), er3_lb,
+                                       "TP certified recovery on C",
+                                       **_n_clusters([faulted[t][1] for t in c_set]))
     else:
         gates["ER2"] = _g("INCONCLUSIVE", "no common-clean pairs with faulted replays")
         gates["ER3"] = _g("INCONCLUSIVE", "no common-clean pairs with faulted replays")
     if gates["ER1"]["status"] == "INCONCLUSIVE":
         for name in ("ER2", "ER3"):
-            gates[name] = _no_verdict(gates[name],
-                                      "|C| below the preregistered floor of 500")
+            gates[name] = _no_verdict(
+                gates[name], f"|C| below the preregistered floor of {min_c}")
 
     if clean:
-        er4 = _bootstrap_gate(list(clean.values()),
-                              lambda ep: ep["rep"]["certified_success"],
-                              label="ER4", seed=seed, margin=-0.03, replicates=replicates)
-        gates["ER4"] = _g("PASS" if er4["pass"] else "FAIL",
-                          f"clean non-inferiority: diff {er4['point']:+.3f}, 97.5% "
-                          f"clustered LB {er4['lb']:+.3f} vs margin -0.03",
-                          **{k: v for k, v in er4.items() if k != "mcnemar"})
+        er4 = _boot(list(clean.values()),
+                    lambda ep: ep["rep"]["certified_success"],
+                    label="ER4", margin=er4_margin)
+        gates["ER4"] = _bootstrap_verdict(
+            er4, f"clean non-inferiority: diff {er4['point']:+.3f}, 97.5% "
+                 f"clustered LB {er4['lb']:+.3f} vs margin {er4_margin:+.2f} over "
+                 f"{er4['n_clusters']} structural clusters")
     else:
         gates["ER4"] = _g("INCONCLUSIVE", "no paired clean episodes")
 
-    min_assigned = 900
+    min_assigned = int(registered(prereg, "er", "min_assigned_faults"))
+    er5_min_diff = float(registered(prereg, "er", "er5_min_diff"))
     if faulted:
         itt_tp = sum(_recovery_ok(tp) for _, tp in faulted.values()) / len(faulted)
         itt_bp = sum(_recovery_ok(bp) for bp, _ in faulted.values()) / len(faulted)
@@ -1025,29 +1242,43 @@ def evaluate_agentic_gates(eps: dict, prereg: dict) -> dict:
                               f"ITT diff {diff:+.3f} reported, not gated",
                               n=len(faulted), diff=diff)
         else:
-            gates["ER5"] = _g("PASS" if diff >= 0 else "FAIL",
+            gates["ER5"] = _g("PASS" if diff >= er5_min_diff else "FAIL",
                               f"intention-to-treat certified recovery diff {diff:+.3f} "
-                              f"over {len(faulted)} assigned pairs (must be >= 0)",
+                              f"over {len(faulted)} assigned pairs "
+                              f"(must be >= {er5_min_diff:g})",
                               n=len(faulted), diff=diff, tp=itt_tp, bp=itt_bp)
     else:
         gates["ER5"] = _g("INCONCLUSIVE", "no assigned fault pairs")
 
+    # ER6/ER7 read "all core TP episodes" literally: the CORE stratum only. MT and
+    # H8 augmentation traces also run with condition="clean", and they are a
+    # separately sized sample; letting them into this denominator would let the
+    # size of a secondary sample move the primary claim's runaway and
+    # hallucination bounds in either direction.
+    er67_conditions = tuple(registered(prereg, "er", "er67_conditions"))
+    er6_ub = float(registered(prereg, "er", "er6_runaway_ub"))
+    er7_ub = float(registered(prereg, "er", "er7_hallucination_ub"))
     tp_core = [ep for (arm, cond, ctl), tasks in eps.items() if arm == "TP"
-               and ctl == "none" and cond in ("clean", "faulted")
-               for ep in tasks.values()]
+               and ctl == "none" and cond in er67_conditions
+               for ep in tasks.values() if ep.get("split") in core_splits]
     if tp_core:
+        cl = _n_clusters(tp_core)
         k_run = sum(ep["rep"]["runaway"]["runaway"] for ep in tp_core)
-        gates["ER6"] = _wilson_ub_gate("ER6", k_run, len(tp_core), 0.03,
-                                       "TP runaway")
+        gates["ER6"] = _wilson_ub_gate("ER6", k_run, len(tp_core), er6_ub,
+                                       "TP runaway on the core stratum", **cl)
         k_h = sum(ep["rep"]["hallucination"]["hallucinated"] for ep in tp_core)
-        gates["ER7"] = _wilson_ub_gate("ER7", k_h, len(tp_core), 0.01,
-                                       "TP hallucinated-result")
+        gates["ER7"] = _wilson_ub_gate("ER7", k_h, len(tp_core), er7_ub,
+                                       "TP hallucinated-result on the core stratum",
+                                       **cl)
     else:
-        gates["ER6"] = _g("INCONCLUSIVE", "no TP episodes")
-        gates["ER7"] = _g("INCONCLUSIVE", "no TP episodes")
+        gates["ER6"] = _g("INCONCLUSIVE", "no core-stratum TP episodes")
+        gates["ER7"] = _g("INCONCLUSIVE", "no core-stratum TP episodes")
 
     from agentlab.suite.faults import group_of
 
+    er8_floor = float(registered(prereg, "er", "er8_group_floor"))
+    er8_groups = list(registered(prereg, "er", "er8_groups"))
+    er8_min = int(registered(prereg, "er", "er8_min_per_group"))
     groups: dict = {}
     for bp, tp in faulted.values():
         fault = bp["trace"].get("fault") or {}
@@ -1059,50 +1290,88 @@ def evaluate_agentic_gates(eps: dict, prereg: dict) -> dict:
         acc[0] += _recovery_ok(tp)
         acc[1] += _recovery_ok(bp)
         acc[2] += 1
-    if groups:
+    counts = {g: groups.get(g, [0, 0, 0])[2] for g in er8_groups}
+    # "no group fell below the floor" computed over two of three registered groups
+    # is not the registered gate: a missing or short group is INCONCLUSIVE, never
+    # a pass by omission.
+    short = {g: n for g, n in counts.items() if n < er8_min}
+    extra = sorted(set(groups) - set(er8_groups))
+    if short or extra:
+        why = []
+        if short:
+            why.append("fault groups below the registered "
+                       f"{er8_min} assigned episodes each: "
+                       + ", ".join(f"{g} n={n}" for g, n in sorted(short.items())))
+        if extra:
+            why.append(f"unregistered fault groups present: {extra}")
+        gates["ER8"] = _g("INCONCLUSIVE",
+                          "; ".join(why) + "; the per-group floor is only a gate "
+                          "when all three registered groups are present at size",
+                          counts=counts, min_per_group=er8_min)
+    else:
         worst = {g: (a[0] - a[1]) / a[2] for g, a in groups.items()}
-        bad = {g: d for g, d in worst.items() if d < -0.05}
+        bad = {g: d for g, d in worst.items() if d < er8_floor}
         gates["ER8"] = _g("FAIL" if bad else "PASS",
                           f"per-group ITT recovery diffs: "
                           + ", ".join(f"{g} {d:+.3f} (n={groups[g][2]})"
                                       for g, d in sorted(worst.items()))
-                          + ("; below -0.05: " + ",".join(bad) if bad else ""),
-                          diffs=worst)
-    else:
-        gates["ER8"] = _g("INCONCLUSIVE", "no fault-class metadata on faulted pairs")
+                          + (f"; below {er8_floor:+.2f}: " + ",".join(bad)
+                             if bad else ""),
+                          diffs=worst, counts=counts, min_per_group=er8_min,
+                          floor=er8_floor)
 
     # ---- MT: secondary (a) --------------------------------------------------
-    mt_pairs = {tid: pair for tid, pair in clean.items()
-                if pair[0]["all_tools_required"] and pair[0]["horizon"] == 4}
-    min_mt = 600
+    mt_horizon = int(registered(prereg, "mt", "horizon"))
+    min_mt = int(registered(prereg, "mt", "min_pairs"))
+    mt1_margin = float(registered(prereg, "mt", "mt1_margin"))
+    mt2_lb = float(registered(prereg, "mt", "mt2_wilson_lb"))
+    mt3_oracle = int(registered(prereg, "mt", "mt3_oracle_min_calls"))
+    mt3_slack = int(registered(prereg, "mt", "mt3_slack"))
+    mt3_convention = str(registered(prereg, "mt", "mt3_median_convention"))
+    mt4_run_ub = float(registered(prereg, "mt", "mt4_runaway_ub"))
+    mt4_hal_ub = float(registered(prereg, "mt", "mt4_hallucination_ub"))
+    mt5_n_patterns = int(registered(prereg, "mt", "mt5_n_patterns"))
+    mt5_min_cell = int(registered(prereg, "mt", "mt5_min_per_pattern"))
+    mt5_floor = float(registered(prereg, "mt", "mt5_pattern_floor"))
+
+    mt_clean = _pairs(eps, "clean", splits=mt_splits)
+    mt_pairs = {tid: pair for tid, pair in mt_clean.items()
+                if pair[0]["all_tools_required"]
+                and pair[0]["horizon"] == mt_horizon}
     if len(mt_pairs) < min_mt:
-        gates["MT1"] = _g("INCONCLUSIVE", f"only {len(mt_pairs)} all-tools H4 pairs "
-                          f"(< {min_mt})", n=len(mt_pairs))
+        gates["MT1"] = _g("INCONCLUSIVE", f"only {len(mt_pairs)} all-tools "
+                          f"H{mt_horizon} pairs (< {min_mt})", n=len(mt_pairs),
+                          min_pairs=min_mt)
     else:
-        mt1 = _bootstrap_gate(list(mt_pairs.values()),
-                              lambda ep: bool(ep.get("orch", {}).get(
-                                  "certified_orchestration")),
-                              label="MT1", seed=seed, margin=0.05, replicates=replicates)
-        gates["MT1"] = _g("PASS" if mt1["pass"] else "FAIL",
-                          f"certified all-tools diff: point {mt1['point']:+.3f}, 97.5% "
-                          f"clustered LB {mt1['lb']:+.3f} vs +0.05; exact McNemar "
-                          f"p={mt1['mcnemar']['p_two_sided']:.4g}",
-                          **{k: v for k, v in mt1.items() if k != "mcnemar"},
-                          mcnemar=mt1["mcnemar"])
+        mt1 = _boot(list(mt_pairs.values()),
+                    lambda ep: bool(ep.get("orch", {}).get(
+                        "certified_orchestration")),
+                    label="MT1", margin=mt1_margin)
+        gates["MT1"] = _bootstrap_verdict(
+            mt1, f"certified all-tools diff: point {mt1['point']:+.3f}, 97.5% "
+                 f"clustered LB {mt1['lb']:+.3f} vs {mt1_margin:+.2f} over "
+                 f"{mt1['n_clusters']} structural clusters; exact McNemar "
+                 f"p={mt1['mcnemar']['p_two_sided']:.4g}")
     if mt_pairs:
         tp_eps = [tp for _, tp in mt_pairs.values()]
+        cl = _n_clusters(tp_eps)
         k = sum(bool(ep.get("orch", {}).get("certified_orchestration")) for ep in tp_eps)
-        gates["MT2"] = _wilson_lb_gate("MT2", k, len(tp_eps), 0.60,
-                                       "TP certified all-tools")
+        gates["MT2"] = _wilson_lb_gate("MT2", k, len(tp_eps), mt2_lb,
+                                       "TP certified all-tools", **cl)
         calls = sorted(ep["rep"]["n_calls"] for ep in tp_eps)
-        med = calls[len(calls) // 2]
-        gates["MT3"] = _g("PASS" if med <= 4 + 2 else "FAIL",
-                          f"TP median calls {med} vs oracle 4 + 2", median=med)
+        med = _median(calls, mt3_convention)
+        gates["MT3"] = _g("PASS" if med <= mt3_oracle + mt3_slack else "FAIL",
+                          f"TP median calls {med} vs oracle {mt3_oracle} + "
+                          f"{mt3_slack} (n={len(calls)}, "
+                          f"{mt3_convention} median convention)",
+                          median=med, n=len(calls), convention=mt3_convention,
+                          threshold=mt3_oracle + mt3_slack)
         k_run = sum(ep["rep"]["runaway"]["runaway"] for ep in tp_eps)
         k_h = sum(ep["rep"]["hallucination"]["hallucinated"] for ep in tp_eps)
-        mt4_run = _wilson_ub_gate("MT4run", k_run, len(tp_eps), 0.03, "TP MT runaway")
-        mt4_h = _wilson_ub_gate("MT4hal", k_h, len(tp_eps), 0.01,
-                                "TP MT hallucinated-result")
+        mt4_run = _wilson_ub_gate("MT4run", k_run, len(tp_eps), mt4_run_ub,
+                                  "TP MT runaway", **cl)
+        mt4_h = _wilson_ub_gate("MT4hal", k_h, len(tp_eps), mt4_hal_ub,
+                                "TP MT hallucinated-result", **cl)
         # A compound gate is only as measurable as its weakest leg; a FAIL on
         # either leg is still a FAIL (never softened by the other's INCONCLUSIVE).
         legs = [mt4_run["status"], mt4_h["status"]]
@@ -1122,114 +1391,170 @@ def evaluate_agentic_gates(eps: dict, prereg: dict) -> dict:
             acc[0] += bool(tp.get("orch", {}).get("certified_orchestration"))
             acc[1] += bool(bp.get("orch", {}).get("certified_orchestration"))
             acc[2] += 1
-        if len(pat) >= 6 and all(a[2] >= 80 for a in pat.values()):
+        if (len(pat) >= mt5_n_patterns
+                and all(a[2] >= mt5_min_cell for a in pat.values())):
             diffs = {p_: (a[0] - a[1]) / a[2] for p_, a in pat.items()}
-            bad = {p_: d for p_, d in diffs.items() if d < -0.05}
+            bad = {p_: d for p_, d in diffs.items() if d < mt5_floor}
             gates["MT5"] = _g("FAIL" if bad else "PASS",
                               "per-pattern diffs: " + ", ".join(
                                   f"p{p_} {d:+.3f}" for p_, d in sorted(diffs.items()))
-                              + ("; below -0.05: " + ",".join(str(x) for x in bad)
-                                 if bad else ""), diffs=diffs)
+                              + (f"; below {mt5_floor:+.2f}: "
+                                 + ",".join(str(x) for x in bad) if bad else ""),
+                              diffs=diffs, floor=mt5_floor)
         else:
             gates["MT5"] = _g("INCONCLUSIVE",
                               f"order patterns incomplete: {len(pat)} patterns, "
                               f"min cell {min((a[2] for a in pat.values()), default=0)} "
-                              f"(need 6 patterns x >=80 pairs)")
+                              f"(need {mt5_n_patterns} patterns x "
+                              f">={mt5_min_cell} pairs)")
     else:
         for name in ("MT2", "MT3", "MT4", "MT5"):
-            gates[name] = _g("INCONCLUSIVE", "no all-tools H4 pairs")
+            gates[name] = _g("INCONCLUSIVE",
+                             f"no all-tools H{mt_horizon} pairs")
     # MT6 is stitched in from the S11 veto by the caller.
 
     # ---- HR: secondary (b) --------------------------------------------------
-    hr_pairs = {tid: pair for tid, pair in clean.items()
-                if pair[0]["horizon"] == 8
-                and pair[0]["family"] in ("lookup_chain", "typed_relay")}
-    min_hr, min_disc = 400, 20
+    hr_horizon = int(registered(prereg, "hr", "horizon"))
+    hr_families = tuple(registered(prereg, "hr", "families"))
+    min_hr = int(registered(prereg, "hr", "min_pairs"))
+    min_disc = int(registered(prereg, "hr", "min_discordant"))
+    hr1_margin = float(registered(prereg, "hr", "hr1_margin"))
+    hr2_ub = float(registered(prereg, "hr", "hr2_runaway_ub"))
+    hr3_ub = float(registered(prereg, "hr", "hr3_hallucination_ub"))
+
+    hr_clean = _pairs(eps, "clean", splits=h8_splits)
+    hr_pairs = {tid: pair for tid, pair in hr_clean.items()
+                if pair[0]["horizon"] == hr_horizon
+                and pair[0]["family"] in hr_families}
     if len(hr_pairs) < min_hr:
-        gates["HR1"] = _g("INCONCLUSIVE", f"only {len(hr_pairs)} H8 clean pairs "
-                          f"(< {min_hr})", n=len(hr_pairs))
+        gates["HR1"] = _g("INCONCLUSIVE", f"only {len(hr_pairs)} H{hr_horizon} clean "
+                          f"pairs (< {min_hr})", n=len(hr_pairs), min_pairs=min_hr)
     else:
-        hr1 = _bootstrap_gate(list(hr_pairs.values()),
-                              lambda ep: ep["rep"]["certified_success"],
-                              label="HR1", seed=seed, margin=0.05, replicates=replicates)
+        hr1 = _boot(list(hr_pairs.values()),
+                    lambda ep: ep["rep"]["certified_success"],
+                    label="HR1", margin=hr1_margin)
         if hr1["mcnemar"]["n_discordant"] < min_disc:
             gates["HR1"] = _g("INCONCLUSIVE",
-                              f"only {hr1['mcnemar']['n_discordant']} discordant H8 pairs "
-                              f"(< {min_disc}); diff {hr1['point']:+.3f} reported, not "
-                              f"gated", **{k: v for k, v in hr1.items() if k != "mcnemar"})
-        else:
-            gates["HR1"] = _g("PASS" if hr1["pass"] else "FAIL",
-                              f"H8 certified success diff: point {hr1['point']:+.3f}, "
-                              f"97.5% clustered LB {hr1['lb']:+.3f} vs +0.05",
+                              f"only {hr1['mcnemar']['n_discordant']} discordant "
+                              f"H{hr_horizon} pairs (< {min_disc}); diff "
+                              f"{hr1['point']:+.3f} reported, not gated",
                               **{k: v for k, v in hr1.items() if k != "mcnemar"},
                               mcnemar=hr1["mcnemar"])
+        else:
+            gates["HR1"] = _bootstrap_verdict(
+                hr1, f"H{hr_horizon} certified success diff: point "
+                     f"{hr1['point']:+.3f}, 97.5% clustered LB {hr1['lb']:+.3f} vs "
+                     f"{hr1_margin:+.2f} over {hr1['n_clusters']} structural clusters")
     if hr_pairs:
         tp_eps = [tp for _, tp in hr_pairs.values()]
+        cl = _n_clusters(tp_eps)
         k_run = sum(ep["rep"]["runaway"]["runaway"] for ep in tp_eps)
-        gates["HR2"] = _wilson_ub_gate("HR2", k_run, len(tp_eps), 0.03,
-                                       "TP H8 runaway")
+        gates["HR2"] = _wilson_ub_gate("HR2", k_run, len(tp_eps), hr2_ub,
+                                       f"TP H{hr_horizon} runaway", **cl)
         k_h = sum(ep["rep"]["hallucination"]["hallucinated"] for ep in tp_eps)
-        gates["HR3"] = _wilson_ub_gate("HR3", k_h, len(tp_eps), 0.01,
-                                       "TP H8 hallucinated-result")
+        gates["HR3"] = _wilson_ub_gate("HR3", k_h, len(tp_eps), hr3_ub,
+                                       f"TP H{hr_horizon} hallucinated-result", **cl)
     else:
-        gates["HR2"] = _g("INCONCLUSIVE", "no H8 clean pairs")
-        gates["HR3"] = _g("INCONCLUSIVE", "no H8 clean pairs")
+        gates["HR2"] = _g("INCONCLUSIVE", f"no H{hr_horizon} clean pairs")
+        gates["HR3"] = _g("INCONCLUSIVE", f"no H{hr_horizon} clean pairs")
 
     return gates
 
 
-def evaluate_floors(eps: dict, arm: str) -> dict:
-    """Absolute launch floors F1-F5 for one arm."""
-    from agentlab.suite.stats import wilson as _wilson  # noqa: F401
+def evaluate_floors(eps: dict, arm: str, prereg: dict) -> dict:
+    """Absolute launch floors F1-F5 for one arm, on the registered denominators.
 
-    clean = list(eps.get((arm, "clean", "none"), {}).values())
-    faulted = list(eps.get((arm, "faulted", "none"), {}).values())
+    Denominators are frozen in machine.floors: F1/F2 over the arm's CORE clean
+    episodes with control `none`, F3/F4 over its CORE faulted episodes (ITT --
+    every assigned fault episode stays in, including timeouts, parser failures,
+    crashes and runaways), F5 over the union. That restriction is the point: MT
+    and H8 augmentation traces also carry condition="clean", so an unrestricted
+    denominator let the SIZE of a secondary sample move a floor, and the floors
+    decide the winner.
+
+    Floors are POINT estimates against the threshold, as registered; Wilson
+    intervals are reported beside them for the reader but do not decide.
+    """
+    from agentlab.suite.stats import wilson as _wilson
+
+    core_splits = set(registered(prereg, "strata",
+                                 registered(prereg, "floors",
+                                            "denominator_stratum")))
+    f1_t = float(registered(prereg, "floors", "f1_clean_overall"))
+    f2_t = float(registered(prereg, "floors", "f2_clean_per_family"))
+    f3_t = float(registered(prereg, "floors", "f3_faulted_overall"))
+    f4_t = float(registered(prereg, "floors", "f4_faulted_per_family"))
+    f5_t = float(registered(prereg, "floors", "f5_loop_crash_max"))
+
+    def _core(condition):
+        return [ep for ep in eps.get((arm, condition, "none"), {}).values()
+                if ep.get("split") in core_splits]
+
+    clean, faulted = _core("clean"), _core("faulted")
     floors: dict = {}
     if not clean or not faulted:
         for f in ("F1", "F2", "F3", "F4", "F5"):
-            floors[f] = _g("INCONCLUSIVE", f"{arm}: missing clean or faulted traces")
+            floors[f] = _g("INCONCLUSIVE",
+                           f"{arm}: missing clean or faulted core-stratum traces "
+                           f"(clean n={len(clean)}, faulted n={len(faulted)}; "
+                           f"splits {sorted(core_splits)})")
         return floors
 
     def rate(eps_list, fn):
-        return sum(map(fn, eps_list)) / len(eps_list)
+        k = sum(1 for e in eps_list if fn(e))
+        return k, len(eps_list), k / len(eps_list)
 
     def by_family(eps_list, fn):
         fam: dict = {}
         for ep in eps_list:
-            fam.setdefault(ep["family"], []).append(fn(ep))
+            fam.setdefault(ep["family"], []).append(bool(fn(ep)))
         return {f: sum(v) / len(v) for f, v in fam.items()}
 
-    ok = rate(clean, lambda e: e["rep"]["certified_success"])
-    floors["F1"] = _g("PASS" if ok >= 0.65 else "FAIL",
-                      f"{arm} overall clean certified success {ok:.3f} vs 0.65", rate=ok)
+    k, n, ok = rate(clean, lambda e: e["rep"]["certified_success"])
+    _, lo, hi = _wilson(k, n)
+    floors["F1"] = _g("PASS" if ok >= f1_t else "FAIL",
+                      f"{arm} overall clean certified success {ok:.3f} "
+                      f"[{lo:.3f},{hi:.3f}] vs {f1_t} (point estimate decides; "
+                      f"n={n} core clean)", rate=ok, k=k, n=n, threshold=f1_t)
     fam = by_family(clean, lambda e: e["rep"]["certified_success"])
-    bad = {f: r for f, r in fam.items() if r < 0.50}
+    bad = {f: r for f, r in fam.items() if r < f2_t}
     floors["F2"] = _g("FAIL" if bad else "PASS",
                       f"{arm} clean by family: "
                       + ", ".join(f"{f} {r:.3f}" for f, r in sorted(fam.items()))
-                      + (f"; below 0.50: {sorted(bad)}" if bad else ""), by_family=fam)
-    okf = rate(faulted, lambda e: e["rep"]["certified_success"])
-    floors["F3"] = _g("PASS" if okf >= 0.40 else "FAIL",
-                      f"{arm} overall faulted strict success {okf:.3f} vs 0.40 "
-                      f"(intention-to-treat)", rate=okf)
+                      + (f"; below {f2_t}: {sorted(bad)}" if bad else ""),
+                      by_family=fam, threshold=f2_t)
+    kf, nf, okf = rate(faulted, lambda e: e["rep"]["certified_success"])
+    _, lof, hif = _wilson(kf, nf)
+    floors["F3"] = _g("PASS" if okf >= f3_t else "FAIL",
+                      f"{arm} overall faulted strict success {okf:.3f} "
+                      f"[{lof:.3f},{hif:.3f}] vs {f3_t} (intention-to-treat over "
+                      f"n={nf} assigned core fault episodes)", rate=okf, k=kf, n=nf,
+                      threshold=f3_t)
     famf = by_family(faulted, lambda e: e["rep"]["certified_success"])
-    badf = {f: r for f, r in famf.items() if r < 0.25}
+    badf = {f: r for f, r in famf.items() if r < f4_t}
     floors["F4"] = _g("FAIL" if badf else "PASS",
                       f"{arm} faulted by family: "
                       + ", ".join(f"{f} {r:.3f}" for f, r in sorted(famf.items()))
-                      + (f"; below 0.25: {sorted(badf)}" if badf else ""), by_family=famf)
-    allx = clean + faulted
-    crash = rate(allx, _crashish)
-    floors["F5"] = _g("PASS" if crash < 0.02 else "FAIL",
-                      f"{arm} loop/crash rate {crash:.4f} vs < 0.02", rate=crash)
+                      + (f"; below {f4_t}: {sorted(badf)}" if badf else ""),
+                      by_family=famf, threshold=f4_t)
+    kc, nc, crash = rate(clean + faulted, _crashish)
+    floors["F5"] = _g("PASS" if crash < f5_t else "FAIL",
+                      f"{arm} loop/crash rate {crash:.4f} vs < {f5_t} "
+                      f"({kc}/{nc} core episodes)", rate=crash, k=kc, n=nc,
+                      threshold=f5_t)
     return floors
 
 
-def horizon_curves(eps: dict, arms=("BP", "TP")) -> dict:
+def horizon_curves(eps: dict, arms=("BP", "TP"), *, prereg: dict) -> dict:
     """Descriptive success-vs-horizon curves with Wilson bands. No fitting;
-    H50 is reported only when the observed curve crosses 50%."""
+    H50 is reported only when the OBSERVED curve crosses the registered rate.
+
+    `prereg` is required rather than defaulted: the crossing rate is a registered
+    reporting rule, and a default here would be one more number living in code.
+    """
     from agentlab.suite.stats import wilson as _wilson
 
+    cross = float(registered(prereg, "curves", "h50_crossing_rate"))
     curves: dict = {}
     for arm in arms:
         for condition in ("clean", "faulted", "stress"):
@@ -1246,8 +1571,8 @@ def horizon_curves(eps: dict, arms=("BP", "TP")) -> dict:
                      "wilson_lo": round(lo, 4), "wilson_hi": round(hi, 4)})
     for key, pts in curves.items():
         pts.sort(key=lambda r: r["horizon"])
-        above = [r for r in pts if r["p"] >= 0.5]
-        below = [r for r in pts if r["p"] < 0.5]
+        above = [r for r in pts if r["p"] >= cross]
+        below = [r for r in pts if r["p"] < cross]
         if not below:
             h50 = f"right-censored (> H{pts[-1]['horizon']})"
         elif not above:
@@ -1259,6 +1584,112 @@ def horizon_curves(eps: dict, arms=("BP", "TP")) -> dict:
             h50 = f"crossed in [H{lo_h}, H{hi_h}]"
         curves[key] = {"points": pts, "H50": h50}
     return curves
+
+
+def _backfill_from_specs(eps: dict, specs_by_id: dict) -> int:
+    """Take `template_cluster_id` / `split` from the authoritative spec manifest.
+
+    Same registered field, second authoritative source -- not a fallback to a
+    different field. The manifest passed as --specs is the frozen definition of
+    the held-out sample, so when a trace writer has not yet propagated
+    `template_cluster_id` onto the trace row the manifest still carries it and
+    the clustered bounds stay computable. A task absent from the manifest is left
+    exactly as the trace had it, so nothing is invented.
+    """
+    filled = 0
+    for tasks in eps.values():
+        for tid, ep in tasks.items():
+            spec = specs_by_id.get(tid)
+            if not spec:
+                continue
+            if ep.get("template_cluster_id") in (None, "") and \
+                    spec.get("template_cluster_id") not in (None, ""):
+                ep["template_cluster_id"] = spec["template_cluster_id"]
+                filled += 1
+            if ep.get("split") in (None, "") and spec.get("split"):
+                ep["split"] = spec["split"]
+    return filled
+
+
+def strata_census(eps: dict, prereg: dict) -> dict:
+    """Every (arm, condition, control, split) count the verdict was computed on.
+
+    Emitted unconditionally so a reader never has to trust a denominator: if a
+    stratum is oversampled, mislabelled, or absent, it shows up here rather than
+    silently inside a rate.
+    """
+    declared = {}
+    for name in ("core", "mt", "h8", "stress"):
+        for split in registered(prereg, "strata", name):
+            declared.setdefault(split, []).append(name)
+    census: dict = {}
+    unassigned: dict = {}
+    for (arm, cond, ctl), tasks in eps.items():
+        for ep in tasks.values():
+            split = ep.get("split")
+            key = f"{arm}/{cond}/{ctl}/{split}"
+            census[key] = census.get(key, 0) + 1
+            if split not in declared:
+                unassigned[key] = unassigned.get(key, 0) + 1
+    return {"counts": dict(sorted(census.items())),
+            "declared_splits": {k: sorted(v) for k, v in sorted(declared.items())},
+            "unassigned_split_traces": dict(sorted(unassigned.items())),
+            "note": "traces whose split is in no declared stratum are excluded "
+                    "from every gated sample; exclusion can only widen an "
+                    "interval or lower a count, never favour an arm"}
+
+
+def holm_secondary_mcnemar(gates: dict, prereg: dict) -> dict:
+    """Holm-adjusted exact McNemar p-values across the two secondary claims.
+
+    The preregistration has always specified this table; nothing produced it, so
+    the supporting evidence for the two secondary claims was simply missing from
+    every report. It is REPORTED, never gated -- the gate is the clustered lower
+    bound -- and an absent or underpowered secondary enters the family with
+    p = 1.0 rather than being dropped, because dropping a member shrinks the
+    family and weakens the adjustment for the survivor.
+    """
+    from agentlab.suite.stats import holm
+
+    cfg = prereg["statistics"]["holm"]
+    family = list(cfg["family"])
+    p_kind = str(cfg["p_kind"])
+    raw, labels = [], []
+    for name in family:
+        g = gates.get(name) or {}
+        mc = (g.get("numbers") or {}).get("mcnemar") or {}
+        p = mc.get(p_kind)
+        if p is None:
+            raw.append(1.0)
+            labels.append("INCONCLUSIVE (no exact McNemar available)")
+        else:
+            raw.append(float(p))
+            labels.append(g.get("status", "INCONCLUSIVE"))
+    adj = holm(raw)
+    return {"family": family, "p_kind": p_kind, "alpha": float(cfg["alpha"]),
+            "raw": {n: raw[i] for i, n in enumerate(family)},
+            "adjusted": {n: adj[i] for i, n in enumerate(family)},
+            "member_status": {n: labels[i] for i, n in enumerate(family)},
+            "reported_never_gated": bool(cfg["reported_never_gated"])}
+
+
+def _overlay_bug(block: dict, bug_names: list[str]) -> None:
+    """Relabel every official status in `block` as BUG, in place.
+
+    The raw arithmetic moves to `observed_status`, which is declared a NON-VERDICT
+    field. Nothing is deleted -- but a script that reads
+    gates["ER2"]["status"] out of a vetoed run can no longer see "PASS" for a
+    number the run cannot support, and neither can a reader skimming the table.
+    """
+    for name, res in list(block.items()):
+        out = {"status": "BUG", "observed_status": res["status"],
+               "detail": f"vetoed by harness BUG {','.join(bug_names)}; "
+                         f"observed (NOT a verdict) [{res['status']}]: "
+                         f"{res['detail']}",
+               "numbers": res.get("numbers", {})}
+        if "measured_status" in res:
+            out["measured_status"] = res["measured_status"]
+        block[name] = out
 
 
 def agentic_verdict(traces_dir: str, preregister: str, secret_path: str,
@@ -1275,6 +1706,7 @@ def agentic_verdict(traces_dir: str, preregister: str, secret_path: str,
     if specs_path and pathlib.Path(specs_path).exists():
         specs = _load_jsonl(pathlib.Path(specs_path))
         specs_by_id = {s["task_id"]: s for s in specs}
+        _backfill_from_specs(eps, specs_by_id)
     splits = None
     if split_manifests:
         splits = {name: _load_jsonl(pathlib.Path(p))
@@ -1300,7 +1732,15 @@ def agentic_verdict(traces_dir: str, preregister: str, secret_path: str,
         "S17": veto_s17_trace_summary(eps),
         "S18": veto_s18_test_blindness(rdir),
     }
-    any_bug = any(v["status"] == "BUG" for v in vetoes.values())
+    mandatory = list(registered(prereg, "mandatory_harness_checks"))
+    unknown = sorted(set(mandatory) - set(vetoes))
+    if unknown:
+        raise KeyError(f"the preregistration declares mandatory harness checks the "
+                       f"analyzer does not implement: {unknown}")
+    bug_names = sorted(n for n, v in vetoes.items() if v["status"] == "BUG")
+    any_bug = bool(bug_names)
+    mandatory_inconclusive = sorted(
+        n for n in mandatory if vetoes[n]["status"] == "INCONCLUSIVE")
 
     gates = evaluate_agentic_gates(eps, prereg)
     # MT6 mirrors the absent-information veto restricted to the MT family.
@@ -1309,18 +1749,18 @@ def agentic_verdict(traces_dir: str, preregister: str, secret_path: str,
                     "detail": f"absent-information control (S11): {s11['detail']}",
                     "numbers": s11["numbers"]}
 
-    # A harness BUG vetoes every DOWNSTREAM model-level gate, not only the
-    # claims: a reader (or a script) that pulled gates["ER2"]["status"] out of a
-    # vetoed verdict would otherwise see "PASS" for a number the run cannot
-    # support. The measured value is kept under `measured_status` so nothing is
-    # hidden -- it is relabelled, not deleted.
-    bug_names = sorted(n for n, v in vetoes.items() if v["status"] == "BUG")
+    # A harness BUG vetoes every DOWNSTREAM official status -- gates, floors,
+    # claims and the winner -- not only the claims: a reader (or a script) that
+    # pulled gates["ER2"]["status"] out of a vetoed verdict would otherwise see
+    # "PASS" for a number the run cannot support. The arithmetic survives under
+    # the NON-VERDICT field `observed_status`: relabelled, not deleted.
     if any_bug:
-        for name, res in gates.items():
-            gates[name] = {"status": "BUG", "measured_status": res["status"],
-                           "detail": f"vetoed by harness BUG {','.join(bug_names)}; "
-                                     f"measured [{res['status']}]: {res['detail']}",
-                           "numbers": res["numbers"]}
+        _overlay_bug(gates, bug_names)
+
+    # After the overlay, so the reported member status is the OFFICIAL one: a
+    # supporting p-value beside a gate labelled INCONCLUSIVE in a run whose gate
+    # is officially BUG would read as if the gate had been evaluated.
+    holm_secondary = holm_secondary_mcnemar(gates, prereg)
 
     def claim_status(names: list[str]) -> str:
         # Reads the EFFECTIVE status. `measured_status` is deliberately not used:
@@ -1328,6 +1768,10 @@ def agentic_verdict(traces_dir: str, preregister: str, secret_path: str,
         # promoting its measured FAIL back into the claim would read an
         # underpowered sample as a refutation.
         st = [gates[n]["status"] for n in names]
+        bad = sorted({s for s in st} - set(OUTCOME_STATES))
+        if bad:
+            # SKIP is forbidden and an unknown state is a defect, not a nuance.
+            return "BUG"
         if any_bug:
             return "BUG"
         # A real FAIL outranks missing evidence: one refuted gate refutes the
@@ -1348,45 +1792,74 @@ def agentic_verdict(traces_dir: str, preregister: str, secret_path: str,
         "secondary_H8_execution_reliability": claim_status(["HR1", "HR2", "HR3"]),
     }
 
-    floors_tp = evaluate_floors(eps, "TP")
-    floors_bp = evaluate_floors(eps, "BP")
+    floors_tp = evaluate_floors(eps, "TP", prereg)
+    floors_bp = evaluate_floors(eps, "BP", prereg)
 
     def floors_pass(fl: dict) -> bool:
-        return all(v["status"] == "PASS" for v in fl.values())
+        return bool(fl) and all(v["status"] == "PASS" for v in fl.values())
 
     if any_bug:
         # Launch floors are model-level statements too; a vetoed run must not
         # show an arm "clearing the floor". Same relabel-not-delete rule.
-        for fl in (floors_tp, floors_bp):
-            for name, res in list(fl.items()):
-                fl[name] = {"status": "BUG", "measured_status": res["status"],
-                            "detail": f"vetoed by harness BUG "
-                                      f"{','.join(bug_names)}; measured "
-                                      f"[{res['status']}]: {res['detail']}",
-                            "numbers": res["numbers"]}
+        _overlay_bug(floors_tp, bug_names)
+        _overlay_bug(floors_bp, bug_names)
 
+    # ---- winner rule: the frozen truth table, evaluated in rank order -------
+    # Ranks come from winner_rule.truth_table in the preregistration. No
+    # discretion is left anywhere: in particular rank 2 is the fix for a real
+    # defect -- the analyzer used to ship a winner while S9, S10, S14 or S18 was
+    # INCONCLUSIVE, i.e. while the harness that makes a winner meaningful was
+    # unverified.
+    er4, er2 = gates["ER4"]["status"], gates["ER2"]["status"]
+    floors_incomplete = [f"{arm} {n}" for arm, fl in (("TP", floors_tp),
+                                                     ("BP", floors_bp))
+                         for n, v in fl.items() if v["status"] == "INCONCLUSIVE"]
     if any_bug:
-        winner = "NO VERDICT: harness BUG vetoes every claim and the winner rule"
-    elif (floors_pass(floors_tp) and gates["ER4"]["status"] == "PASS"
-          and gates["ER2"]["status"] == "PASS"):
-        winner = ("TP (trained arm ships: floors clear, clean-non-inferior at -0.03, "
-                  "certified recovery LB > +0.05)")
+        winner_rank = 1
+        winner = (f"BUG / NO VERDICT: mandatory harness check(s) "
+                  f"{','.join(bug_names)} are BUG; no winner, and no official "
+                  f"status above is a statement about the model")
+    elif mandatory_inconclusive:
+        winner_rank = 2
+        winner = (f"NO VERDICT: mandatory harness check(s) "
+                  f"{','.join(mandatory_inconclusive)} are INCONCLUSIVE; a winner "
+                  f"may not ship while the harness that would make it meaningful "
+                  f"is unverified")
+    elif floors_pass(floors_tp) and er4 == "PASS" and er2 == "PASS":
+        winner_rank = 4
+        winner = ("TP (trained arm ships: every launch floor clear, "
+                  "clean-non-inferior at ER4, certified recovery clustered LB "
+                  "above the ER2 margin)")
     elif floors_pass(floors_bp):
-        winner = "BP (frozen prompted base ships; the training leg is dropped and reported)"
-    elif any(v["status"] == "INCONCLUSIVE" for v in {**floors_tp, **floors_bp}.values()):
-        winner = "NO VERDICT: floor evidence incomplete (INCONCLUSIVE)"
+        winner_rank = 5
+        winner = ("BP (frozen prompted base ships; the trained comparison did not "
+                  f"clear ER2/ER4 [ER2 {er2}, ER4 {er4}] and the training leg is "
+                  f"dropped and reported)")
+    elif floors_incomplete:
+        winner_rank = 6
+        winner = ("NO VERDICT: floor evidence incomplete (INCONCLUSIVE): "
+                  + ", ".join(sorted(floors_incomplete)))
     else:
+        winner_rank = 7
         winner = "none: no successful multifaceted pipeline yet"
 
-    return {"vetoes": vetoes, "any_bug": any_bug, "gates": gates, "claims": claims,
-            "floors": {"TP": floors_tp, "BP": floors_bp}, "winner": winner,
-            "curves": horizon_curves(eps),
+    return {"vetoes": vetoes, "any_bug": any_bug,
+            "mandatory_harness_checks": mandatory,
+            "mandatory_bug": bug_names,
+            "mandatory_inconclusive": mandatory_inconclusive,
+            "gates": gates, "claims": claims,
+            "floors": {"TP": floors_tp, "BP": floors_bp},
+            "winner": winner, "winner_rank": winner_rank,
+            "holm_secondary_mcnemar": holm_secondary,
+            "strata_census": strata_census(eps, prereg),
+            "curves": horizon_curves(eps, prereg=prereg),
             "claims_to_reject": prereg["claims_to_reject"]}
 
 
 def render_agentic_verdict(v: dict) -> str:
     lines = ["# Agentic machine verdict", ""]
-    lines.append("## Harness vetoes S8-S18 (any BUG vetoes everything below)")
+    lines.append("## Harness vetoes S8-S18 (ALL mandatory: any BUG makes the whole "
+                 "verdict BUG, any INCONCLUSIVE means NO VERDICT)")
     for name, res in v["vetoes"].items():
         lines.append(f"  {res['status']:<13} {name}: {res['detail']}")
     lines.append("")
@@ -1403,16 +1876,42 @@ def render_agentic_verdict(v: dict) -> str:
     for claim, status in v["claims"].items():
         lines.append(f"  {status:<13} {claim}")
     lines.append("")
+    h = v.get("holm_secondary_mcnemar")
+    if h:
+        lines.append(f"## Holm-adjusted exact McNemar across the secondary claims "
+                     f"({h['p_kind']}, alpha {h['alpha']}; REPORTED, never gated -- "
+                     f"the gate is the clustered lower bound)")
+        for name in h["family"]:
+            lines.append(f"  {name}: raw p={h['raw'][name]:.4g}  "
+                         f"Holm-adjusted p={h['adjusted'][name]:.4g}  "
+                         f"[gate {h['member_status'][name]}]")
+        lines.append("")
+    cen = v.get("strata_census")
+    if cen:
+        lines.append("## Stratum census (the denominators every number above used)")
+        for key, n in cen["counts"].items():
+            lines.append(f"  {n:>6}  {key}")
+        if cen["unassigned_split_traces"]:
+            lines.append(f"  EXCLUDED (split in no declared stratum): "
+                         f"{cen['unassigned_split_traces']}")
+        lines.append("")
     lines.append("## Descriptive horizon curves (Wilson 95% bands; no extrapolation)")
     for key, cur in v["curves"].items():
         pts = " ".join(f"H{r['horizon']}:{r['p']:.2f}[{r['wilson_lo']:.2f},"
                        f"{r['wilson_hi']:.2f}]" for r in cur["points"])
         lines.append(f"  {key}: {pts}  H50 {cur['H50']}")
     lines.append("")
-    lines.append(f"## Winner: {v['winner']}")
+    lines.append(f"## Winner (truth-table rank {v.get('winner_rank')}): {v['winner']}")
     if v["any_bug"]:
         lines.append("HARNESS BUG DETECTED -- nothing above is a statement about the "
-                     "model. Fix the harness, then re-run.")
+                     "model; every official status is BUG and the raw arithmetic is "
+                     "kept only under the non-verdict field `observed_status`. Fix "
+                     "the harness, then re-run.")
+    elif v.get("mandatory_inconclusive"):
+        lines.append("MANDATORY HARNESS CHECKS UNVERIFIED "
+                     f"({','.join(v['mandatory_inconclusive'])}) -- NO VERDICT. This "
+                     "is not a negative result about the model; it is missing "
+                     "harness evidence.")
     lines.append("")
     lines.append("## Claims this run can NEVER support (preregistered rejections)")
     for c in v["claims_to_reject"]:

@@ -11,9 +11,18 @@ from __future__ import annotations
 import json
 
 from agentlab import provenance
-from agentlab.suite import evaluate, rng
+from agentlab.suite import evaluate, faults as faults_mod, rng
 
 SECRET = bytes.fromhex("aa" * 32)
+
+# The frozen cross-agent field contract: every scored spec carries
+# `template_cluster_id`, a STRUCTURAL cluster identity (family + horizon +
+# oracle-DAG shape + tool-order pattern + operand roles), distinct from the
+# paraphrase/wording `template_id`. It is the SOLE bootstrap clustering field.
+# `N_CLUSTERS_*` below keep <= 5 value instantiations per cluster at the sample
+# sizes these fixtures build, matching the registered MT cluster contract.
+N_CLUSTERS_CHAIN = 96
+N_CLUSTERS_RELAY = 96
 
 
 # ---------------------------------------------------------------------------
@@ -21,7 +30,8 @@ SECRET = bytes.fromhex("aa" * 32)
 # ---------------------------------------------------------------------------
 
 def chain_spec(i: int, *, horizon: int = 4, split: str = "eval", ns: str = "eval-a",
-               n_templates: int = 48) -> dict:
+               n_templates: int = 48, n_clusters: int = N_CLUSTERS_CHAIN,
+               fault_class: str | None = None) -> dict:
     """A lookup_chain task: follow `next` keys, report the terminal code."""
     keys = [f"{ns}-K{i:04d}-{j}" for j in range(horizon)]
     token = rng.stream_bytes(0xE0E0, f"tok:{ns}:{i}", 16).hex()
@@ -33,10 +43,12 @@ def chain_spec(i: int, *, horizon: int = 4, split: str = "eval", ns: str = "eval
             kb[k] = {"code": token}
         args = {"key": k} if j == 0 else {"key": {"$from": f"n{j}", "field": "next"}}
         oracle.append({"node": f"n{j + 1}", "tool": "kb_lookup", "args": args})
-    return {
+    spec = {
         "task_id": f"{ns}-t{i:05d}", "family": "lookup_chain", "split": split,
         "horizon": horizon, "template_id": f"{ns}-tpl{i % n_templates:03d}",
         "template_hash": f"{ns}-tplhash{i % n_templates:03d}",
+        "template_cluster_id": f"lookup_chain:H{horizon}:chain:"
+                               f"c{i % n_clusters:03d}",
         "kb_namespace": ns,
         "prompt": f"Start key: {keys[0]}. Follow the chain via kb_lookup and report "
                   f"the terminal code.",
@@ -44,10 +56,33 @@ def chain_spec(i: int, *, horizon: int = 4, split: str = "eval", ns: str = "eval
         "hidden_key": keys[-1], "answer_field": "code",
         "counterfactual_sensitive": True,
     }
+    _assign_fault(spec, fault_class)
+    return spec
+
+
+def _assign_fault(spec: dict, fault_class: str | None) -> None:
+    """Pin a spec's fault CLASS so a fixture can hit the registered group sizes.
+
+    ER8 gates all three registered fault groups at their registered cardinality,
+    so a fixture that leaves the class to the deterministic draw cannot reach 400
+    wrong-unit episodes without thousands of tasks. Pinning the class per spec is
+    exactly what the generator does in production (`spec["fault"]`); the node
+    index still comes from the frozen scheduler, so the injection point is not
+    hand-picked.
+    """
+    if fault_class is None:
+        return
+    sched = faults_mod.schedule_fault(spec["task_id"], spec["oracle"],
+                                      0xA61E0007, fault_class=fault_class)
+    if sched is None:
+        raise AssertionError(f"{spec['task_id']}: no eligible node for "
+                             f"fault class {fault_class!r}")
+    spec["fault"] = sched
 
 
 def relay_spec(i: int, *, split: str = "eval", ns: str = "eval-b",
-               n_templates: int = 40) -> dict:
+               n_templates: int = 40, n_clusters: int = N_CLUSTERS_RELAY,
+               fault_class: str | None = None) -> dict:
     """A typed_relay task at H4 whose ANSWER causally requires all three tools:
     kb_lookup(K1) -> kb_lookup(K2 from K1) -> unit_convert(grams->kg) ->
     calculator(kg * coeff) = the exact integer answer."""
@@ -68,10 +103,13 @@ def relay_spec(i: int, *, split: str = "eval", ns: str = "eval-b",
         {"node": "n4", "tool": "calculator",
          "args": {"expression": {"$from": "n3", "format": "{}*" + str(coeff)}}},
     ]
-    return {
+    spec = {
         "task_id": f"{ns}-t{i:05d}", "family": "typed_relay", "split": split,
         "horizon": 4, "template_id": f"{ns}-tpl{i % n_templates:03d}",
         "template_hash": f"{ns}-tplhash{i % n_templates:03d}",
+        # structural identity: family + horizon + DAG shape + tool-order pattern
+        "template_cluster_id": f"typed_relay:H4:kb-kb-unit-calc:p{i % 6}:"
+                               f"c{i % n_clusters:03d}",
         "kb_namespace": ns, "pattern_id": i % 6, "all_tools_required": True,
         "prompt": f"Look up {k1}, follow its next key, convert that record's grams "
                   f"to kg, multiply by its coeff, and report the exact result.",
@@ -79,6 +117,8 @@ def relay_spec(i: int, *, split: str = "eval", ns: str = "eval-b",
         "hidden_key": k2,
         "counterfactual_sensitive": True,
     }
+    _assign_fault(spec, fault_class)
+    return spec
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +237,7 @@ def run(spec: dict, policy, *, arm: str = "TP", condition: str = "clean",
         control: str = "none", prompt_sha: str = "0" * 64,
         adapter: str | None = "out/adapter", secret: bytes = SECRET,
         fault_seed: int = 0xA61E0007, base_id: str = "Qwen/Qwen3.5-4B") -> dict:
-    return evaluate.run_episode(
+    trace = evaluate.run_episode(
         spec, arm=arm, condition=condition, control=control, secret=secret,
         fault_seed=fault_seed, system_prompt="test prompt",
         prompt_meta={"path": "prompts/agentic/p8_combined.txt", "sha256": prompt_sha},
@@ -208,3 +248,18 @@ def run(spec: dict, policy, *, arm: str = "TP", condition: str = "clean",
                   "adapter": (None if arm in ("B0", "BP") else adapter),
                   "run_id": "test"},
     )
+    # ---- SEAM (frozen contract, one line owed by the trace writer) ----------
+    # The analyzer clusters the bootstrap on `template_cluster_id`. The spec
+    # carries it (frozen contract), but agentlab.suite.evaluate._trace_row copies
+    # a fixed field list from the spec onto the trace row and does not yet copy
+    # this one -- that line belongs to the suite/runtime owner, not here, and is
+    # reported as a seam rather than reimplemented.
+    #
+    # Two things make this shim safe. First, the analyzer ALSO reads the field
+    # from the authoritative --specs manifest (analyze._backfill_from_specs), so
+    # production works today without the shim. Second, the shim only propagates a
+    # value the spec already declares; it invents nothing. Delete it the moment
+    # _trace_row carries `template_cluster_id`.
+    if spec.get("template_cluster_id") is not None:
+        trace.setdefault("template_cluster_id", spec["template_cluster_id"])
+    return trace

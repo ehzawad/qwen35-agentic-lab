@@ -139,7 +139,14 @@ def _ep(family, horizon, ok):
 
 
 def test_h50_censoring_rules():
-    from agentlab.analyze import horizon_curves
+    import pathlib
+
+    from agentlab.analyze import horizon_curves, load_preregister
+
+    # the H50 crossing rate is a REGISTERED reporting rule, not a literal
+    prereg = load_preregister(pathlib.Path(__file__).resolve().parents[1]
+                              / "configs" / "agentic_preregister.json")
+    assert prereg["machine"]["curves"]["h50_crossing_rate"] == 0.5
 
     eps = {("TP", "clean", "none"): {}}
     tasks = eps[("TP", "clean", "none")]
@@ -150,7 +157,7 @@ def test_h50_censoring_rules():
             e["task_id"] = f"t{i}"
             i += 1
             tasks[e["task_id"]] = e
-    curves = horizon_curves(eps, arms=("TP",))
+    curves = horizon_curves(eps, arms=("TP",), prereg=prereg)
     cur = curves["TP/clean/fam"]
     assert "crossed in [H4, H8]" == cur["H50"]
     # all-high curve: right-censored, no extrapolated number
@@ -158,5 +165,5 @@ def test_h50_censoring_rules():
             for j, h in enumerate([2, 2, 4, 4, 8, 8])}}
     for j, (tid, e) in enumerate(eps2[("TP", "clean", "none")].items()):
         e["task_id"] = tid
-    curves2 = horizon_curves(eps2, arms=("TP",))
+    curves2 = horizon_curves(eps2, arms=("TP",), prereg=prereg)
     assert curves2["TP/clean/fam"]["H50"].startswith("right-censored")

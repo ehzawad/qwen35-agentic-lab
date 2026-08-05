@@ -77,17 +77,27 @@
   "statistics": {
     "paired_difference": "D_i = Y_TP,i - Y_BP,i in {-1,0,1} on identical task IDs",
     "clustered_bootstrap": {
-      "cluster_field": "template_id",
+      "cluster_field": "template_cluster_id",
+      "cluster_field_note": "STRUCTURAL cluster identity (family + horizon + oracle-DAG shape + tool-order pattern + operand roles), DISTINCT from the paraphrase/wording `template_id`. This is the SOLE bootstrap clustering field; `template_id` is never used for clustering because a paraphrase pool of two wordings would collapse 1,200 tasks into two clusters and manufacture a narrow interval.",
       "statistic": "ratio of sums: sum(resampled cluster diff sums) / sum(resampled cluster sizes)",
       "replicates": 100000,
       "seed": 2786983947,
       "stream": "SHAKE-256 over '0x{seed}:{label}:chunk{i}' (agentlab.suite.rng)",
+      "chunk_block": 2000,
+      "chunk_block_note": "The replicate stream is drawn chunk-by-chunk and each chunk takes a distinct SHAKE label, so the realised stream depends on this block size. It is therefore FROZEN here as a numeric field read by the analyzer, not left as an internal implementation detail.",
       "quantile_rule": "lower bound = the floor(alpha*R)-th order statistic, 0-based",
       "alpha_one_sided": 0.025,
       "note": "one-sided 97.5% lower confidence bound, fixed by the orchestrator's claim hierarchy (single primary claim)"
     },
     "mcnemar": "exact binomial on discordant pairs at any n, two-sided and one-sided reported; REPORTED as supporting evidence, the gate is the clustered lower bound",
-    "holm": "Holm-adjusted exact McNemar p-values reported across the two secondary claims",
+    "holm": {
+      "rule": "Holm step-down adjustment of the EXACT McNemar p-values of the two secondary claims (MT1, HR1). Reported, never gated: the gate is always the clustered lower bound.",
+      "family": ["MT1", "HR1"],
+      "p_kind": "p_one_sided",
+      "alpha": 0.05,
+      "reported_never_gated": true,
+      "missing_member_rule": "a secondary whose sample is absent or underpowered enters the family with p = 1.0 and is labelled INCONCLUSIVE in the emitted table; it is never dropped, because dropping it would shrink the family and shrink the adjustment"
+    },
     "wilson": "95% score intervals for every arm-level rate"
   },
 
@@ -133,7 +143,7 @@
     "ER5": {"rule": "intention-to-treat certified recovery diff (TP-BP) over all assigned faults >= 0"},
     "ER6": {"rule": "TP runaway rate Wilson 95% upper bound <= 0.03"},
     "ER7": {"rule": "TP hallucinated-result rate Wilson 95% upper bound <= 0.01"},
-    "ER8": {"rule": "no fault group (transient_or_rate_limit, malformed, wrong_unit) has TP-BP point diff < -0.05"},
+    "ER8": {"rule": "no fault group (transient_or_rate_limit, malformed, wrong_unit) has TP-BP point diff < -0.05; ALL THREE groups must be present at their registered 400 assigned episodes each, else INCONCLUSIVE"},
     "MT1": {"rule": "certified all-tools success diff (TP-BP) one-sided 97.5% clustered LB > +0.05; requires >= 600 pairs, else INCONCLUSIVE"},
     "MT2": {"rule": "TP certified all-tools success Wilson 95% lower bound >= 0.60"},
     "MT3": {"rule": "TP median tool calls <= oracle minimum + 2 on MT tasks"},
@@ -145,17 +155,172 @@
     "HR3": {"rule": "TP H8 hallucinated-result Wilson upper bound <= 0.01"}
   },
 
+  "machine": {
+    "purpose": "THE NUMBERS THE ANALYZER READS. Every threshold, margin, floor, sample-size minimum and rate ceiling used by src/agentlab/analyze.py lives here as a numeric field and nowhere else. The prose gate rules above and in docs/AGENTIC_PROTOCOL.md are the human mirror; where they could ever disagree, THIS BLOCK governs, because it is the only copy the code consumes. Every value below is byte-identical to the value the analyzer previously carried as a literal (see `moved_from` provenance strings): the conversion was a governance fix, not a threshold change. tests/test_agentic_analyze.py proves (a) no gate literal survives in the analyzer source, (b) each value is unchanged, and (c) editing a value here changes the verdict.",
+
+    "strata": {
+      "note": "Stratum membership is keyed on the spec/trace `split` field, which the suite generator already stamps. A gated sample may ONLY draw from its declared splits, so oversampled secondary strata (MT and H8 augmentation) can never leak into a core denominator and silently move a floor or a runaway rate.",
+      "core": ["eval"],
+      "mt": ["eval", "eval_mt"],
+      "h8": ["eval", "eval_h8"],
+      "stress": ["eval_stress"],
+      "unassigned_split_rule": "a trace whose `split` is in no declared stratum is excluded from EVERY gated sample and counted in the emitted strata census; exclusion can only ever widen an interval or lower a count, never favour an arm"
+    },
+
+    "clustering": {
+      "field": "template_cluster_id",
+      "min_clusters_default": 30,
+      "min_clusters_default_rationale": "Cluster-robust and cluster-bootstrap coverage degrades sharply below roughly 20-30 independent clusters. Below this count the resampling distribution is a statement about a handful of structural templates, not about the generator distribution, so the gate is INCONCLUSIVE rather than a narrow interval.",
+      "min_clusters_per_gate": {"MT1": 240},
+      "max_instantiations_per_cluster": {"MT1": 5},
+      "absent_field_rule": "if any episode in a gated sample carries no `template_cluster_id`, the registered clustering field is unavailable for that sample and the gate is INCONCLUSIVE. It is never silently clustered on task_id, and never silently clustered on the paraphrase `template_id`.",
+      "emit_n_clusters": true
+    },
+
+    "er": {
+      "min_common_clean": 500,
+      "min_common_clean_moved_from": "analyze.py min_c = 500",
+      "er2_margin": 0.05,
+      "er2_margin_moved_from": "analyze.py _bootstrap_gate(label=ER2, margin=0.05)",
+      "er3_wilson_lb": 0.60,
+      "er3_wilson_lb_moved_from": "analyze.py _wilson_lb_gate(ER3, ..., 0.60)",
+      "er4_margin": -0.03,
+      "er4_margin_moved_from": "analyze.py _bootstrap_gate(label=ER4, margin=-0.03)",
+      "min_assigned_faults": 900,
+      "min_assigned_faults_moved_from": "analyze.py min_assigned = 900",
+      "er5_min_diff": 0.0,
+      "er5_min_diff_moved_from": "analyze.py `diff >= 0`",
+      "er6_runaway_ub": 0.03,
+      "er6_runaway_ub_moved_from": "analyze.py _wilson_ub_gate(ER6, ..., 0.03)",
+      "er7_hallucination_ub": 0.01,
+      "er7_hallucination_ub_moved_from": "analyze.py _wilson_ub_gate(ER7, ..., 0.01)",
+      "er67_stratum": "core",
+      "er67_conditions": ["clean", "faulted"],
+      "er67_stratum_note": "ER6/ER7 read 'all core TP episodes' literally: the CORE stratum only, control `none`, conditions clean and faulted. MT and H8 augmentation traces are a different, separately-sized sample and must never dilute or inflate a core runaway/hallucination rate.",
+      "er8_group_floor": -0.05,
+      "er8_group_floor_moved_from": "analyze.py `d < -0.05` on per-group ITT diffs",
+      "er8_groups": ["transient_or_rate_limit", "malformed", "wrong_unit"],
+      "er8_min_per_group": 400,
+      "er8_min_per_group_note": "ER8 requires ALL THREE registered groups to be present at their registered cardinality of 400 assigned episodes each. A missing or short group makes ER8 INCONCLUSIVE: 'no group fell below -0.05' computed over two of three groups is not the registered gate. This raises the earlier 300 to the registered 400 (a TIGHTENING, never a relaxation) and follows the frozen cross-agent cardinality contract; total assigned then stands at 1,200, still above the unchanged min_assigned_faults floor of 900."
+    },
+
+    "mt": {
+      "horizon": 4,
+      "min_pairs": 600,
+      "min_pairs_moved_from": "analyze.py min_mt = 600",
+      "mt1_margin": 0.05,
+      "mt1_margin_moved_from": "analyze.py _bootstrap_gate(label=MT1, margin=0.05)",
+      "mt2_wilson_lb": 0.60,
+      "mt2_wilson_lb_moved_from": "analyze.py _wilson_lb_gate(MT2, ..., 0.60)",
+      "mt3_oracle_min_calls": 4,
+      "mt3_slack": 2,
+      "mt3_moved_from": "analyze.py `med <= 4 + 2`",
+      "mt3_median_convention": "upper_middle",
+      "mt3_median_convention_note": "For an EVEN sample the median is the upper middle order statistic, i.e. sorted[n//2] 0-based. Frozen because it is the convention the analyzer already implemented; the alternative `lower_middle` is also implemented so this field genuinely governs, but `upper_middle` is the registered value and is the more conservative of the two for an at-most gate.",
+      "mt4_runaway_ub": 0.03,
+      "mt4_runaway_ub_moved_from": "analyze.py _wilson_ub_gate(MT4run, ..., 0.03)",
+      "mt4_hallucination_ub": 0.01,
+      "mt4_hallucination_ub_moved_from": "analyze.py _wilson_ub_gate(MT4hal, ..., 0.01)",
+      "mt5_n_patterns": 6,
+      "mt5_min_per_pattern": 80,
+      "mt5_moved_from": "analyze.py `len(pat) >= 6 and all(a[2] >= 80 ...)`",
+      "mt5_pattern_floor": -0.05,
+      "mt5_pattern_floor_moved_from": "analyze.py `d < -0.05` on per-pattern diffs"
+    },
+
+    "hr": {
+      "horizon": 8,
+      "horizon_moved_from": "analyze.py `pair[0][\"horizon\"] == 8`",
+      "families": ["lookup_chain", "typed_relay"],
+      "families_moved_from": "analyze.py `family in (\"lookup_chain\", \"typed_relay\")`",
+      "min_pairs": 400,
+      "min_pairs_moved_from": "analyze.py min_hr = 400",
+      "min_discordant": 20,
+      "min_discordant_moved_from": "analyze.py min_disc = 20",
+      "hr1_margin": 0.05,
+      "hr1_margin_moved_from": "analyze.py _bootstrap_gate(label=HR1, margin=0.05)",
+      "hr2_runaway_ub": 0.03,
+      "hr2_runaway_ub_moved_from": "analyze.py _wilson_ub_gate(HR2, ..., 0.03)",
+      "hr3_hallucination_ub": 0.01,
+      "hr3_hallucination_ub_moved_from": "analyze.py _wilson_ub_gate(HR3, ..., 0.01)"
+    },
+
+    "floors": {
+      "f1_clean_overall": 0.65,
+      "f1_moved_from": "analyze.py `ok >= 0.65`",
+      "f2_clean_per_family": 0.50,
+      "f2_moved_from": "analyze.py `r < 0.50`",
+      "f3_faulted_overall": 0.40,
+      "f3_moved_from": "analyze.py `okf >= 0.40`",
+      "f4_faulted_per_family": 0.25,
+      "f4_moved_from": "analyze.py `r < 0.25`",
+      "f5_loop_crash_max": 0.02,
+      "f5_moved_from": "analyze.py `crash < 0.02`",
+      "denominator_stratum": "core",
+      "denominator": "F1/F2 over the arm's CORE clean episodes with control `none`; F3/F4 over the arm's CORE faulted episodes with control `none` (intention-to-treat: every assigned fault episode stays in the denominator, including timeouts, parser failures, crashes and runaways); F5 over the union of those two core sets. MT and H8 augmentation, stress, redacted and permuted traces are OUTSIDE every floor denominator.",
+      "estimator": "point_estimate",
+      "estimator_note": "Floors are POINT estimates, not interval bounds. Wilson intervals are still reported beside them for the reader, but the floor decision is the point rate against the threshold; this was the behaviour at registration and is frozen here so it cannot drift to an interval after results exist."
+    },
+
+    "status_precedence": {
+      "official_order": ["BUG", "FAIL", "INCONCLUSIVE", "PASS"],
+      "rule": "BUG > FAIL > INCONCLUSIVE > PASS. A real FAIL outranks missing evidence; INCONCLUSIVE never reads as support; SKIP is FORBIDDEN in the agentic path and any unknown state is treated as BUG.",
+      "forbidden_states": ["SKIP"],
+      "bug_overlay": "Any harness BUG overlays EVERY official gate, floor, claim and winner status with BUG. The raw arithmetic survives only under the explicitly non-verdict field `observed_status` (plus `measured_status` where a gate had already been downgraded for underpower). No official field may read PASS anywhere in a verdict that contains a harness BUG.",
+      "non_verdict_fields": ["observed_status", "measured_status"]
+    },
+
+    "controls_checks": {
+      "s14_generation_check_cap": 200,
+      "s14_generation_check_cap_note": "Number of specs whose hidden value is mutated to prove generation-time counterfactual sensitivity. A work cap, but a cap on evidence, so it is registered rather than left as an internal constant.",
+      "s14_generation_check_cap_moved_from": "analyze.py `if checked >= 200: break`"
+    },
+
+    "curves": {
+      "h50_crossing_rate": 0.5,
+      "h50_crossing_rate_moved_from": "analyze.py `r[\"p\"] >= 0.5` / `r[\"p\"] < 0.5`",
+      "note": "DESCRIPTIVE only. H50 is reported solely when the OBSERVED curve crosses this rate; otherwise it is left- or right-censored. No logistic or other extrapolation is ever fitted."
+    },
+
+    "mandatory_harness_checks": ["S8", "S9", "S10", "S11", "S12", "S13", "S14", "S15", "S16", "S17", "S18"],
+    "mandatory_harness_checks_note": "All eleven registered vetoes are MANDATORY. A BUG in any of them makes the whole verdict BUG. An INCONCLUSIVE in any of them means NO VERDICT: a winner may not be declared while the harness that would make a winner meaningful is unverified. Before this was frozen the analyzer could ship a winner while S9, S10, S14 or S18 was INCONCLUSIVE.",
+
+    "registered_cardinalities": {
+      "note": "EXACT counts, not minimums. These govern the suite generator (sibling layer); the analyzer's gate minimums above are the separate, unchanged decision thresholds. Where an exact cardinality exceeds a gate minimum the surplus is registered sampling, not slack to be trimmed after results.",
+      "eval_core": 1200,
+      "fault_groups_each": 400,
+      "mt_total": 600,
+      "mt_patterns": 6,
+      "mt_per_pattern": 100,
+      "mt_min_structural_clusters": 240,
+      "mt_max_instantiations_per_cluster": 5,
+      "h8_total": 400,
+      "h8_per_family": 200,
+      "stress_total": 280,
+      "absent_information_per_family_per_arm": 200,
+      "permutation_per_arm": 100,
+      "prompt_tournament_dev_pool_per_axis": 300,
+      "consumed_by": "the suite generator and its cardinality tests own these; the analyzer reads absent_information_per_family_per_arm and the fault-group count, and reports every other cardinality it can observe in the emitted census"
+    },
+
+    "typed_relay_mt_contract": {
+      "pattern_id_range": [0, 5],
+      "all_tools_required": true,
+      "note": "Every typed_relay MT task carries pattern_id in 0..5 (six registered tool-order patterns) and all_tools_required = true."
+    }
+  },
+
   "fault_protocol": {
     "classes": ["transient", "rate_limit", "malformed", "wrong_unit"],
-    "groups_for_ER": {"transient_or_rate_limit": 300, "malformed": 300, "wrong_unit": 300},
+    "groups_for_ER": {"transient_or_rate_limit": 400, "malformed": 400, "wrong_unit": 400},
     "assignment": "deterministic per (task_id, fault_seed_eval); emitted exactly once at the registered critical oracle node on the first semantically valid call; always recoverable within the remaining registered budget; wrong_unit only on unit_convert nodes",
     "recovery_token": "128-bit HMAC(run_secret) token in every error envelope (transient, rate_limit, malformed); certification requires the token in the remedial call; rate_limit additionally requires a later assistant decision; wrong_unit emits no token and requires a corrected-target conversion",
     "non_recovery_cases": ["not_exposed (stays in ITT denominator)", "unvalidated_answer (guessing / clean-run value reuse / invention)", "blind_retry (post-fault result without the remediation contract)", "no_post_fault_result", "pre_fault_answer", "hallucinated", "runaway", "wrong_final"]
   },
 
   "sample_sizes": {
-    "eval_core": "1200 held-out specs (100 per family/horizon cell over 12 cells), each run clean AND faulted per arm: >= 900 fault-assigned pairs balanced >= 300 per fault group",
-    "eval_mt": ">= 600 additional held-out typed-relay pairs at fixed H4, all three tools causally required, six order patterns balanced >= 80 each, >= 240 structural templates, <= 5 value instantiations per template",
+    "eval_core": "1200 held-out specs (100 per family/horizon cell over 12 cells), each run clean AND faulted per arm: >= 900 fault-assigned pairs, with the three registered fault groups at 400 assigned episodes EACH (1200 total). The 900 floor is unchanged; the per-group cardinality is raised from 300 to the registered 400 in machine.er.er8_min_per_group, which is a tightening.",
+    "eval_mt": "exactly 600 held-out typed-relay pairs at fixed H4 (six order patterns x 100), all three tools causally required, every task carrying pattern_id in 0..5 and all_tools_required true; >= 240 distinct `template_cluster_id` values with <= 5 value instantiations per cluster. The MT1 gate minimum stays at 600 pairs and >= 80 pairs per pattern (unchanged); 100 per pattern is the registered generation cardinality.",
     "eval_h8": ">= 400 paired clean H8 instances (eval_core H8 cells plus augmentation, balanced across lookup_chain and typed_relay)",
     "stress": "280 two-fault tasks, >= 40 per cell at H >= 8, fault rate 2/H, measured-only",
     "no_enlargement": "final-test sample sizes must not be enlarged after looking at results; if template dependence makes the design underpowered, the verdict is INCONCLUSIVE"
@@ -166,10 +331,13 @@
       "n_per_family": 200,
       "arms": ["BP", "TP"],
       "construction": "the required lookup never returns the hidden value (hidden_key record removed); every scored task depends on an episode-specific hidden value of >= 48 bits entropy generated outside the prompt",
+      "coverage_rule": "n_per_family is required PER FAMILY PER ARM, counted separately for each (family, arm) cell -- not pooled across arms. Every family that appears in any gated sample must have redacted coverage in every arm; a family present in the capability numbers but absent from the control is missing coverage, and missing coverage is INCONCLUSIVE. Harness-failed traces (zero decisions / spec_error) do not count toward coverage and are a BUG in their own right, because zero success over episodes that never ran is vacuous.",
       "expectation": "certified success exactly zero BY CONSTRUCTION; any raw exact success is a harness-leakage BUG (S11), never evidence of ability"
     },
     "counterfactual_permutation": {
       "n_min": 100,
+      "n_per_arm": 100,
+      "n_per_arm_note": "GENERATION cardinality consumed by the suite generator (sibling layer): exactly 100 permuted replays per arm. The analyzer's S14 gate threshold remains the unchanged registered `n_min` of 100 permuted replays; converting the gate to a per-arm count would change a threshold value, which the governance fix is forbidden to do.",
       "arms": ["BP", "TP"],
       "construction": "hidden terminal values permuted BETWEEN task IDs with permutation_seed; correct outputs must track the returned value, not the prompt/task identity (S14)",
       "scope": "token-answer tasks (terminal kb_lookup); all other scored tasks must carry a generation-time counterfactual_sensitive flag verified by the suite validator"
@@ -189,7 +357,8 @@
     "S16": "CONTROL-INTEGRITY: base checkpoint and prompt hashes match this preregistration; no adapter loaded in prompt-only arms",
     "S17": "TRACE-SUMMARY: independent recomputation agrees on calls, failures, exposure, recovery, hallucinations, and final score",
     "S18": "TEST-BLINDNESS: checkpoint and prompt winners locked (results/agentic/locks.json) before the held-out seed reveal (results/agentic/seed_reveal.json)",
-    "precedence": "any BUG vetoes every capability gate and the winner rule; missing traces or an underpowered common-clean subset yield INCONCLUSIVE, never a favourable interpretation"
+    "mandatory": "ALL of S8-S18 (machine.mandatory_harness_checks)",
+    "precedence": "any BUG vetoes every capability gate, every launch floor and the winner rule -- the raw arithmetic survives only under the non-verdict field `observed_status`, and no official field may read PASS in a verdict containing a BUG. Any mandatory veto left INCONCLUSIVE yields NO VERDICT: a winner may not ship while the harness that would make it meaningful is unverified. Missing traces or an underpowered common-clean subset yield INCONCLUSIVE, never a favourable interpretation."
   },
 
   "outcome_states": ["PASS", "FAIL", "INCONCLUSIVE", "BUG"],
@@ -203,11 +372,92 @@
     "F5": "loop/crash rate (runaway + crash + parser failure) < 0.02"
   },
 
+  "budget": {
+    "ceiling_gpu_hours": 36.0,
+    "ceiling_note": "36.0 MEASURED GPU-hours summed over every GPU stage of the whole pipeline. Measured, not nominal: a stage's own wall-clock GPU seconds are appended to the ledger, and a caller-supplied projection is never accepted as the accounting record.",
+    "dominant_stage": "final_paired_evaluation",
+    "dominant_stage_evidence": "The final paired evaluation, NOT GRPO, is the stage most likely to consume the ceiling. Registered episode counts: ~8360 episodes for BP/TP alone (4800 core = 1200 tasks x clean/faulted x 2 arms; 1200 MT; 400 H8 augmentation; 1200 redacted control; 200 permuted; 560 stress), ~15320 including B0/T0, ~22280 including R0/RP. Even at the historically favourable fully batched rate of ~7.85 decision-generations/s and nine decisions per episode the all-arm evaluation is around seven GPU-hours, and the production evaluator uses concurrency 8, longer contexts and up to 1024 tokens per decision rather than the 384-token rejection-sampling setting, so that rate is optimistic. Production rejection sampling is the likely second-largest stage.",
+    "episode_projection": {"bp_tp_only": 8360, "with_b0_t0": 15320, "with_r0_rp": 22280},
+
+    "mandatory": {
+      "arms": ["BP", "TP"],
+      "samples": ["eval_core clean", "eval_core faulted", "MT", "H8", "absent_information control", "counterfactual_permutation control"],
+      "rule": "BP and TP across core (clean and faulted), MT, H8 and ALL controls are MANDATORY. Mandatory sample sizes may NEVER shrink after any result is visible -- not by one episode, and not for a stated budget reason discovered after a number was seen.",
+      "infeasibility_rule": "If the mandatory work cannot fit inside the 36.0-hour ceiling, the run STOPS and reports INCOMPLETE / INCONCLUSIVE. It does not trim a mandatory sample, does not substitute a smaller sample, and does not report a partial mandatory sample as if it were the registered one. An unfinished run is a reportable outcome; a silently shrunk one is not."
+    },
+
+    "cut_order_if_calibration_projects_overrun": [
+      {"rank": 1, "cut": "the entire GRPO branch (multigrpo training and every GRPO-derived arm)"},
+      {"rank": 2, "cut": "the GRPO variance probe and the R0/RP evaluation arms"},
+      {"rank": 3, "cut": "the descriptive B0/T0 arms"},
+      {"rank": 4, "cut": "the two-fault stress set"}
+    ],
+    "cut_order_rule": "Cuts are taken in this order and only this order, and only on a CALIBRATION projection made before the relevant stage runs -- never after seeing a held-out result from any arm. Everything in this list is declared budget-conditional HERE, before the push, which is the only thing that makes dropping it honest. Anything not in this list is mandatory.",
+
+    "calibration": {
+      "rule": "Before the final paired evaluation, measure completed episodes/hour AND decision-generations/hour separately for the base and adapter arms, stratified by horizon (H2/H4/H8/H12/H14/H20) and by clean/faulted, and project the remaining registered work from those measurements including server restarts. The projection is a measurement, not an estimate supplied by the caller.",
+      "decision_point": "if the projection for mandatory work alone exceeds the remaining ledger budget, apply the cut order; if mandatory work alone still does not fit, STOP and report INCOMPLETE"
+    },
+
+    "ledger": {
+      "path": "results/agentic/gpu_ledger.jsonl",
+      "accounting_rule": "Every GPU stage appends one append-only record carrying stage name, start and end UTC timestamps, MEASURED elapsed GPU seconds, git sha, GPU identity, and the episode or step count actually completed. The ceiling is enforced against the SUM of measured elapsed GPU seconds over all records, never against nominal per-stage ranges. A stage may not start when its calibrated projection plus the ledger total would cross 36.0 hours. A shard that overruns its projection is still charged its measured time, and the overrun is reported rather than absorbed. Every GPU consumer -- including the final evaluator -- must read and append to this ledger; a stage that does not appear in the ledger counts as unaccounted time and makes the budget claim INCONCLUSIVE."
+    }
+  },
+
+  "grpo": {
+    "status": "OPTIONAL and budget-conditional (cut rank 1). Nothing in the primary or secondary claims depends on GRPO running.",
+    "scenario_seed_rule": "GRPO training data is a MAP-STYLE dataset keyed by `scenario_seed`. Every one of the G generations in a group must reconstruct byte-identically the same prompt, KB, environment, fault target, fault class, node index and budgets from that single `scenario_seed`; ONLY the sampling seed differs across the group. A group whose members cannot be shown to share one reconstructed scenario is discarded, not repaired.",
+    "variance_probe": {
+      "must_exist_before_grpo": "src/agentlab/variance.py, run on the locked RS-SFT checkpoint BEFORE any GRPO update, on a disjoint committed probe split, using the EXACT GRPO decoding settings and the EXACT production reward function (one shared reward implementation, imported by both the probe and GRPO).",
+      "groups_per_family": 48,
+      "families": 3,
+      "groups_total": 144,
+      "generations_per_group": 8,
+      "rollouts_total": 1152,
+      "sampling": "eight distinct committed sampling seeds per group; every non-sampling input identical",
+      "binding_gates": {
+        "nonzero_total_reward_sd_fraction_min": 0.60,
+        "terminal_success_disagreement_fraction_min": 0.40,
+        "aggregation": "POOLED over all 144 groups",
+        "aggregation_note": "The two binding gates are evaluated POOLED, once, over all groups. Per-family figures are reported descriptively and MAY NOT become an eligibility route: allowing 'the gate passes for family X' would turn per-family reporting into post-hoc family selection.",
+        "nonzero_sd_definition": "sample standard deviation of the TOTAL reward (every component summed and the final clamp applied) across the eight members, counted as nonzero when SD > 1e-12",
+        "disagreement_definition": "both at least one strict success AND at least one strict failure appear among the eight members. Not raw-answer disagreement. For faulted groups terminal success additionally requires CERTIFIED recovery, including token use and any later-decision requirement.",
+        "denominator_rule": "failed, crashed, truncated and no-commit rollouts stay in every denominator",
+        "reporting": "numerator, denominator, fraction and Wilson interval for each of the two gates"
+      },
+      "diagnostic_only": {
+        "mean_strict_success_range": [0.15, 0.85],
+        "truncation_or_clip_fraction_max": 0.05,
+        "clip_frac_definition": "length-truncated / clipped completions. Before an optimizer step there is no PPO/DAPO policy-ratio clipping, so a ratio-clipping reading of this number is meaningless in the probe; if policy-ratio clipping is ever wanted it belongs to a short GRPO preflight, not here.",
+        "status": "DIAGNOSTIC / OPERATIONAL preflight conditions ONLY. These are NOT scientific gates and are NOT preregistered claims; they were unregistered values in the retired multifaceted.yaml and are recorded here as operational readiness checks so that neither they nor their absence can be presented as evidence."
+      },
+      "provenance": "record checkpoint hash, prompt hash, config hash, suite SHA256SUMS hash, git sha, model and server versions, GPU identity, elapsed GPU seconds and the exact group IDs; also report unique completion hashes so that accidentally reusing one seed eight times is detectable"
+    },
+    "dev_selection": {
+      "rule": "EXACTLY ONE trained checkpoint is locked as TP. The selection between RS-SFT and GRPO is made on the committed DEV split only, before the held-out seed reveal, and recorded in results/agentic/locks.json with its stage.",
+      "metric": "mean certified strict success on the committed dev split, pooling clean and faulted dev episodes with equal weight per episode, under the frozen decoding settings and the frozen tournament-winner prompt",
+      "tie_rule": "if the two checkpoints differ by less than 0.005 absolute on that metric, the tie goes to RS-SFT (the shorter, cheaper pipeline). A tie NEVER goes to GRPO, so an unresolved comparison cannot manufacture a GRPO claim.",
+      "stages": ["rs_sft", "grpo"],
+      "one_checkpoint_rule": "locks.json must name exactly one checkpoint path with exactly one stage from `stages`; every TP and T0 trace must carry that path as its adapter. More than one trained candidate, a missing stage, or an adapter that disagrees with the lock is a harness BUG (S16)."
+    }
+  },
+
   "winner_rule": {
+    "truth_table": [
+      {"rank": 1, "condition": "any mandatory harness check is BUG", "verdict": "BUG, no winner"},
+      {"rank": 2, "condition": "any mandatory harness check is INCONCLUSIVE", "verdict": "NO VERDICT"},
+      {"rank": 3, "condition": "exactly one locked trained checkpoint (rs_sft or grpo) maps to TP", "verdict": "precondition; a missing or ambiguous lock is a BUG (S16)"},
+      {"rank": 4, "condition": "TP clears EVERY launch floor AND ER4 PASS AND ER2 PASS", "verdict": "TP ships"},
+      {"rank": 5, "condition": "otherwise BP clears every launch floor", "verdict": "BP ships -- including when the trained comparison FAILS and when it is underpowered"},
+      {"rank": 6, "condition": "floor evidence is incomplete (any floor INCONCLUSIVE)", "verdict": "NO VERDICT"},
+      {"rank": 7, "condition": "otherwise", "verdict": "no successful multifaceted pipeline yet"}
+    ],
     "W1": "the trained arm becomes the shipped default ONLY if it clears every launch floor AND is clean-non-inferior at -0.03 (ER4) AND certified recovery clustered LB > +0.05 (ER2)",
     "W2": "otherwise the frozen prompted base (BP) ships if it clears every launch floor",
     "W3": "otherwise the honest verdict is: no successful multifaceted pipeline yet",
-    "veto": "no winner is declared while any harness veto is BUG"
+    "veto": "no winner is declared while any mandatory harness veto is BUG or INCONCLUSIVE",
+    "evaluation_order": "ranks are evaluated in order and the first matching rank decides; there is no discretion left anywhere in the table"
   },
 
   "claims_to_reject": [

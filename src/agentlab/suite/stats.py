@@ -75,14 +75,26 @@ def cluster_bootstrap_lb(
 ) -> dict:
     """One-sided (1-alpha) lower confidence bound for the mean paired difference.
 
-    Resamples whole clusters (task templates) with replacement -- numeric
-    variants of one template never count as independent evidence. The statistic
+    Resamples whole STRUCTURAL clusters (`template_cluster_id`) with replacement
+    -- value instantiations of one structural template never count as
+    independent evidence, and neither do paraphrases, which is why the cluster
+    key is the structural id and never the wording `template_id`. The statistic
     per replicate is the ratio of sums: sum(resampled cluster diff sums) /
     sum(resampled cluster sizes). Replicate index draws come from the committed
     SHAKE-256 stream, so the bound is bit-reproducible from (seed, label).
+
+    `block` is the replicate chunk size. It is NOT an implementation detail: each
+    chunk draws from its own SHAKE label, so the realised stream -- and therefore
+    the reported bound -- depends on it. Callers in the preregistered path pass it
+    from configs/agentic_preregister.json
+    (`statistics.clustered_bootstrap.chunk_block`), where it is frozen at the
+    2000 that produced every committed bound. The default here mirrors that
+    registered value so a direct caller cannot silently pick a different stream.
     """
     if len(diffs) != len(clusters):
         raise ValueError("diffs and clusters must align")
+    if block <= 0:
+        raise ValueError("bootstrap chunk block must be positive")
     if not diffs:
         return {"n": 0, "n_clusters": 0, "point": 0.0, "lb": float("-inf"),
                 "alpha": alpha, "replicates": replicates, "degenerate": True}
