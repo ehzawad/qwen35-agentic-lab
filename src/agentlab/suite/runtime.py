@@ -1,14 +1,38 @@
 """EpisodeRuntime: per-episode KB view, state, fault schedule and trace.
 
+THE ONE RUNTIME. Every consumer -- rejection sampling, the prompt tournament,
+the variance probe, SFT view construction, generation validation and the
+claim-bearing held-out evaluation -- dispatches through this class. The parallel
+`suite.evaluate.SpecRuntime` is gone; that fork is the D2 defect this module
+closes, and `tests/test_environment_parity.py` is the test that keeps it closed.
+
 Faults are never implemented by making the three global tools
 nondeterministic: agentlab.tools stays pure, and every episode binds its own
 KB view, stateful environment (fulfillment), fault schedule, logical decision
 clock, mutation log, oracle progress and trace events.
 
-Dispatch contract: `runtime(name, arguments) -> str` (a JSON envelope such as
-{"event_id": "e17", "ok": true, "unit": "g", "value": "1200"}), suitable for
+Dispatch contract: `runtime(name, arguments) -> str`, suitable for
 `chat.run_agent_loop(..., dispatcher=runtime)`. kb_lookup misses return only
 no_entry -- never a key list.
+
+THE ONE MODEL-VISIBLE OBSERVATION FORM (registered):
+
+    <canonical or faulted envelope, canonical JSON>
+    receipt: r-<32 hex>
+
+  * the envelope carries NO `event_id` and no `request_id`. Call and event ids
+    stay in the hidden ledger (`TraceEvent`); exposing them was an unregistered
+    training-path field.
+  * EVERY observation, including a clean one, carries a receipt line. Receipts
+    are registered, prompt candidate `p5_provenance` instructs the model about
+    them, and the tournament that selects a prompt now really shows them.
+  * a faulted envelope for transient / rate_limit / malformed additionally
+    carries the 128-bit `recovery_token` and a `remediation` block. The
+    `recovery_token` tool argument is declared on EVERY tool schema
+    (`tool_schemas_for_family`), parsed and stripped in exactly one place
+    (`EpisodeRuntime.dispatch`), and never reaches canonical tool semantics,
+    oracle matching or the semantic call digest -- it is remediation evidence,
+    not a tool-domain parameter.
 
 Oracle progress (binding):
 
@@ -33,12 +57,16 @@ import json
 
 from agentlab import tools as _tools
 
-from .faults import MALFORMED_LITERAL, FaultEngine
+from . import faults as _faults
+from .faults import (MALFORMED_LITERAL, TOKEN_ARG, TOKEN_PROPERTY, FaultEngine,
+                     parse_token_from_args, strip_token)
 from .kb import KBView
 from .schema import (TaskSpec, TraceEvent, call_args_digest, canon, digest,
                      digest_text, normalize_number)
 
 READ_ONLY_TOOLS = ("calculator", "unit_convert", "kb_lookup", "warehouse_query")
+
+RECEIPT_LINE_PREFIX = "receipt: "
 
 _ARG_TYPES = {
     "calculator": {"expression": str},
@@ -51,13 +79,39 @@ _ARG_TYPES = {
 
 
 def tool_schemas_for_family(family: str) -> list[dict]:
-    """The canonical three schemas, plus the two warehouse tools for fulfillment."""
+    """The ONE model-visible tool surface: the canonical three schemas, plus the
+    two warehouse tools for fulfillment, plus the optional `recovery_token`
+    argument on every one of them.
+
+    The token argument is declared on EVERY tool because the model does not know
+    in advance which tool will fault, and it is declared HERE -- in the one
+    function the training path, the generator and the evaluator all call --
+    because the previous arrangement (evaluation locally augmenting its own copy)
+    is precisely how the trained policy came to be trained against a tool surface
+    the certifier does not score.
+
+    Each schema is deep-copied before augmentation: `agentlab.tools.tool_schemas`
+    hands out shared dicts and mutating them would leak the argument into every
+    unrelated caller.
+    """
     schemas = _tools.tool_schemas()
     if family == "fulfillment":
         from .envs.fulfillment import warehouse_tool_schemas
 
         schemas = schemas + warehouse_tool_schemas()
-    return schemas
+    out = []
+    for schema in schemas:
+        schema = json.loads(json.dumps(schema))
+        params = schema["function"].setdefault("parameters", {})
+        params.setdefault("type", "object")
+        params.setdefault("properties", {})[TOKEN_ARG] = dict(TOKEN_PROPERTY)
+        out.append(schema)
+    return out
+
+
+def tool_schema_bytes(family: str) -> str:
+    """Canonical JSON of a family's whole tool surface: the parity comparand."""
+    return canon(tool_schemas_for_family(family))
 
 
 def tool_names_for_family(family: str) -> list[str]:
@@ -161,14 +215,29 @@ def canonical_payload(tool: str, args: dict, *, kb=None, env=None):
 
 
 class EpisodeRuntime:
-    """Owns one episode: spec, KB view, env state, faults, clock, trace."""
+    """Owns one episode: spec, KB view, env state, faults, receipts, clock, trace.
 
-    def __init__(self, spec: TaskSpec, kb_entries: dict, nodes: list) -> None:
+    `secret` is the RUN SECRET and is required, not optional. Recovery tokens and
+    receipts are HMACs keyed with it, so it is part of the model-visible bytes: a
+    consumer that supplied its own would produce a different episode from the one
+    the certifier scores. `suite.contract.load_or_create_secret` creates it once
+    per run and every consumer threads the same value through.
+    """
+
+    def __init__(self, spec: TaskSpec, kb_entries: dict, nodes: list, *,
+                 secret: bytes) -> None:
+        if not isinstance(secret, (bytes, bytearray)) or not secret:
+            raise ValueError(
+                "EpisodeRuntime requires the run secret (bytes): recovery tokens "
+                "and receipts are keyed with it, so it is part of the "
+                "model-visible observation bytes")
         self.spec = spec
+        self.secret = bytes(secret)
         self.nodes = list(nodes)
         self._node_index = {n.node_id: i for i, n in enumerate(self.nodes)}
         self.kb = KBView(kb_entries)
-        self.engine = FaultEngine(spec.faults)
+        self.engine = FaultEngine(spec.faults, task_id=spec.task_id,
+                                  secret=self.secret)
         self.env = None
         if spec.family == "fulfillment":
             from .envs.fulfillment import WarehouseState
@@ -269,8 +338,14 @@ class EpisodeRuntime:
         """-> (payload, meta) against the episode's own KB/env."""
         return canonical_payload(name, args, kb=self.kb, env=self.env)
 
-    def _request_id(self) -> str:
-        return "req-" + digest_text(f"{self.spec.task_id}:{self.call_id}")[:12]
+    def _receipt(self, call_id: int, exposed_digest: str) -> str:
+        from agentlab.provenance import mint_receipt
+
+        return mint_receipt(self.secret, self.spec.task_id, call_id, exposed_digest)
+
+    def model_visible(self, exposed_text: str, receipt: str) -> str:
+        """The exact bytes a tool message carries: envelope, newline, receipt."""
+        return f"{exposed_text}\n{RECEIPT_LINE_PREFIX}{receipt}"
 
     # -- the dispatcher --------------------------------------------------------------
 
@@ -282,7 +357,13 @@ class EpisodeRuntime:
             self.begin_decision()
         self.call_id += 1
         event_id = f"e{self.call_id}"
-        args = _coerce(name, arguments or {})
+        # ONE place parses and strips the remediation argument. Everything below
+        # -- coercion, semantic matching, canonical semantics, the call digest --
+        # sees only the stripped tool-domain arguments, so echoing a token can
+        # never change what a call MEANS, only whether remediation is certified.
+        raw_args = dict(arguments or {})
+        token_provided = parse_token_from_args(raw_args)
+        args = _coerce(name, strip_token(raw_args))
         args_digest = call_args_digest(name, args)
         state_before = self._state_digest()
 
@@ -306,32 +387,55 @@ class EpisodeRuntime:
         fault_type = None
         fault_triggered = False
         rate_limited = False
+        emitted_token = None
         ok = False
 
+        # The true, fault-free semantic payload for these exact arguments,
+        # recorded as a digest on every event whether or not the model saw it, so
+        # "the canonical observation was exposed" stays decidable for calls that
+        # reach no oracle node. It is computed by EXECUTING only when the call
+        # really executes (no directive, or a malformed fault, whose whole point
+        # is that the effect happens and the response is truncated) or when the
+        # tool is read-only. A transient / rate-limit / wrong-unit fault on a
+        # MUTATING call must not perform the mutation, so its canonical digest is
+        # deliberately absent rather than obtained by a side effect.
+        executes = directive is None or directive["kind"] == "malformed"
+        canonical_payload_here = canonical_meta = None
+        if executes:
+            canonical_payload_here, canonical_meta = self._execute(name, args)
+        elif name in READ_ONLY_TOOLS:
+            canonical_payload_here, _ro_meta = self._execute(name, args)
+        canonical_semantic_digest = (digest(canonical_payload_here)
+                                     if canonical_payload_here is not None else None)
+
         if directive is None:
-            payload, meta = self._execute(name, args)
+            payload, meta = canonical_payload_here, canonical_meta
             ok = bool(payload.get("ok"))
             if node is not None:
                 exposed_canonical = payload == node.expect
             if credit_ok and exposed_canonical:
                 self.completed[node.node_id] = self.decision_id
                 credited = True
-            exposed = canon({**payload, "event_id": event_id})
+            exposed = canon(payload)
         else:
             kind = directive["kind"]
             fault_triggered = bool(directive.get("fault_triggered"))
+            emitted_token = directive.get("token")
             if kind == "transient":
                 fault_type = "transient"
-                payload = {"ok": False, "error": "transient_backend",
-                           "retryable": True, "request_id": self._request_id()}
-                exposed = canon({**payload, "event_id": event_id})
+                exposed = _faults.transient_envelope(emitted_token)
             elif kind == "rate_limit":
                 fault_type = "rate_limit"
                 rate_limited = True
-                payload = {"ok": False, "error": "rate_limit",
-                           "retry_after_turns": directive["retry_after_turns"],
-                           "request_id": self._request_id()}
-                exposed = canon({**payload, "event_id": event_id})
+                exposed = _faults.rate_limit_envelope(
+                    emitted_token, directive["retry_after_turns"])
+            elif kind == "rate_limit_active":
+                # The SAME scheduled fault still in force within one decision --
+                # never a second firing, so `fault_triggered` stays False.
+                fault_type = "rate_limit"
+                rate_limited = True
+                exposed = _faults.rate_limit_active_envelope(
+                    emitted_token, directive["retry_after_turns"])
             elif kind == "wrong_unit":
                 fault_type = "wrong_unit"
                 wrong = directive["unit"]
@@ -339,12 +443,12 @@ class EpisodeRuntime:
                                           str(args.get("from_unit", "")), wrong)
                 payload = {"ok": True, "value": out, "unit": wrong}
                 ok = True
-                exposed = canon({**payload, "event_id": event_id})
+                exposed = canon(payload)
             elif kind == "malformed":
                 fault_type = "malformed"
                 if directive.get("ambiguous") and node.mutating:
                     # The mutation happens; only its response is truncated.
-                    payload, meta = self._execute(name, args)
+                    payload, meta = canonical_payload_here, canonical_meta
                     if not payload.get("ok"):
                         raise RuntimeError(
                             "ambiguous malformed fault fired on a failing "
@@ -353,14 +457,17 @@ class EpisodeRuntime:
                     credited = True
                 else:
                     # Read-only: canonical result computed internally, withheld.
-                    payload, meta = self._execute(name, args)
-                exposed = MALFORMED_LITERAL
+                    payload, meta = canonical_payload_here, canonical_meta
+                exposed = _faults.malformed_envelope(emitted_token)
             else:
                 raise ValueError(f"unknown directive {kind!r}")
 
         state_after = self._state_digest()
         state_mutated = bool(meta.get("mutated"))
         unsafe = state_mutated and not credited
+        exposed_digest = digest_text(exposed)
+        receipt = self._receipt(self.call_id, exposed_digest)
+        visible = self.model_visible(exposed, receipt)
 
         event = TraceEvent(
             decision_id=self.decision_id, call_id=self.call_id,
@@ -369,7 +476,12 @@ class EpisodeRuntime:
             credited=credited, repeat=repeat,
             canonical_args_digest=args_digest,
             canonical_result_digest=(digest(node.expect) if node is not None else None),
-            exposed_result_digest=digest_text(exposed),
+            canonical_semantic_digest=canonical_semantic_digest,
+            exposed_text=exposed, exposed_result_digest=exposed_digest,
+            receipt=receipt, model_visible_digest=digest_text(visible),
+            token_provided=token_provided, recovery_token=emitted_token,
+            requested_unit=(str(args.get("to_unit", "")).strip().lower()
+                            if name == "unit_convert" else None),
             exposed_canonical=exposed_canonical, ok=ok,
             fault_type=fault_type, fault_triggered=fault_triggered,
             rate_limited=rate_limited,
@@ -388,7 +500,7 @@ class EpisodeRuntime:
         )
         self.events.append(event)
         self._reveal_from(exposed)
-        return exposed
+        return visible
 
     # -- terminal ------------------------------------------------------------------
 
@@ -416,6 +528,10 @@ class EpisodeRuntime:
                  "args": e.canonical_args_digest,
                  "canonical": e.canonical_result_digest,
                  "exposed": e.exposed_result_digest,
+                 # The receipt is part of the bytes the model read, so wire drift
+                 # in the receipt line is a replay failure and not a warning.
+                 "visible": e.model_visible_digest,
+                 "token_provided": e.token_provided,
                  "credited": e.credited, "fault_triggered": e.fault_triggered}
                 for e in self.events]
 
@@ -425,13 +541,51 @@ class EpisodeRuntime:
                        "progress": self.progress(),
                        "state": self._state_digest()})
 
-    def verify(self, final_text: str | None = None):
+    def verify(self, final_text: str | None = None, *, transcript: list | None = None,
+               termination_reason: str | None = None):
         from .verify import verify_episode
 
         if final_text is not None:
             self.final_text = final_text
         return verify_episode(self.spec, self.nodes, self.events,
-                              self.final_text or "", env=self.env)
+                              self.final_text or "", env=self.env,
+                              secret=self.secret, transcript=transcript,
+                              termination_reason=termination_reason)
+
+
+# ---------------------------------------------------------------------------
+# reading one model-visible observation back
+# ---------------------------------------------------------------------------
+
+def parse_observation(text: str) -> dict:
+    """-> {"objects": [...], "receipt": str|None, "truncated_prefix": bool}.
+
+    The one reader of the registered wire format. A policy (scripted or trained)
+    sees envelope lines plus a `receipt:` line; this splits them without any
+    module re-deriving the layout.
+    """
+    objects, receipt, truncated = [], None, False
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line.startswith(RECEIPT_LINE_PREFIX):
+            receipt = line[len(RECEIPT_LINE_PREFIX):].strip()
+            continue
+        if not line.startswith("{"):
+            continue
+        try:
+            objects.append(json.loads(line))
+        except json.JSONDecodeError:
+            if line == MALFORMED_LITERAL:
+                truncated = True
+    return {"objects": objects, "receipt": receipt, "truncated_prefix": truncated}
+
+
+def recovery_token_in(text: str) -> str | None:
+    """The recovery token a faulted observation offered, or None."""
+    for obj in parse_observation(text)["objects"]:
+        if isinstance(obj, dict) and obj.get("ok") is False and obj.get(TOKEN_ARG):
+            return str(obj[TOKEN_ARG])
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -439,26 +593,39 @@ class EpisodeRuntime:
 # ---------------------------------------------------------------------------
 
 def run_oracle(spec: TaskSpec, kb_entries: dict, nodes: list,
-               max_attempts: int = 4):
+               max_attempts: int = 4, *, secret: bytes):
     """Execute the oracle path through a fresh runtime, recovering from every
-    scheduled fault by the accepted mechanical action; returns (runtime, verdict).
+    scheduled fault by the REGISTERED remediation action; returns (runtime, verdict).
+
+    Registered remediation, not a bare retry: an error envelope's
+    `recovery_token` is echoed back on the re-issued call (transient, malformed,
+    and rate_limit -- the latter necessarily on a later decision, because this
+    agent takes one decision per attempt), and a wrong-unit trap is repaired by
+    re-issuing the conversion for the originally requested unit. A blind retry
+    would still often succeed operationally and would NOT be certified, which is
+    the whole point of the token.
     """
-    rt = EpisodeRuntime(spec, kb_entries, nodes)
+    rt = EpisodeRuntime(spec, kb_entries, nodes, secret=secret)
     for node in nodes:
         done = False
+        pending_token = None
         for _ in range(max_attempts):
             rt.begin_decision()
-            exposed = rt.dispatch(node.tool, dict(node.args))
-            try:
-                obj = json.loads(exposed)
-            except json.JSONDecodeError:
-                continue  # malformed observation -> replay on the next decision
-            if not obj.get("ok"):
-                continue  # transient / rate_limit -> retry on the next decision
+            args = dict(node.args)
+            if pending_token is not None:
+                args[TOKEN_ARG] = pending_token
+            visible = rt.dispatch(node.tool, args)
+            parsed = parse_observation(visible)
+            pending_token = recovery_token_in(visible)
+            if pending_token is not None:
+                continue  # transient / rate_limit / malformed -> reissue with token
+            obj = next((o for o in parsed["objects"] if isinstance(o, dict)), None)
+            if obj is None or not obj.get("ok"):
+                continue
             if (node.tool == "unit_convert"
                     and str(obj.get("unit", "")).strip().lower()
                     != str(node.args["to_unit"]).strip().lower()):
-                continue  # wrong-unit trap -> redo the conversion
+                continue  # wrong-unit trap -> redo the conversion, same target
             done = True
             break
         if not done:
@@ -472,7 +639,8 @@ def run_oracle(spec: TaskSpec, kb_entries: dict, nodes: list,
 # replay parity: a consumer's trajectory must re-run to identical digests
 # ---------------------------------------------------------------------------
 
-def replay_trace(spec: TaskSpec, kb_entries: dict, nodes: list, calls: list):
+def replay_trace(spec: TaskSpec, kb_entries: dict, nodes: list, calls: list, *,
+                 secret: bytes):
     """Re-execute a recorded call sequence through a FRESH canonical runtime.
 
     `calls` is an ordered list of {"decision_id", "tool", "args"} (extra keys
@@ -491,7 +659,7 @@ def replay_trace(spec: TaskSpec, kb_entries: dict, nodes: list, calls: list):
     is reconciled when `replay_trace` over the calls it recorded reproduces the
     digests its own live runtime produced. `verify_replay` asserts exactly that.
     """
-    rt = EpisodeRuntime(spec, kb_entries, nodes)
+    rt = EpisodeRuntime(spec, kb_entries, nodes, secret=secret)
     for call in calls:
         want = int(call.get("decision_id") or call.get("decision") or 1)
         if want < rt.decision_id:
@@ -505,14 +673,14 @@ def replay_trace(spec: TaskSpec, kb_entries: dict, nodes: list, calls: list):
 
 
 def verify_replay(spec: TaskSpec, kb_entries: dict, nodes: list, calls: list,
-                  expected: dict) -> tuple[bool, str]:
+                  expected: dict, *, secret: bytes) -> tuple[bool, str]:
     """(ok, reason): does replaying `calls` reproduce `expected` exactly?
 
     `expected` is a report from `replay_trace` or a live runtime
     ({"observations", "progress", "episode"}). The first divergence is named
     precisely -- a mismatch is a faithfulness failure, never a warning.
     """
-    _rt, got = replay_trace(spec, kb_entries, nodes, calls)
+    _rt, got = replay_trace(spec, kb_entries, nodes, calls, secret=secret)
     # Every component is compared explicitly. Short-circuiting on the composite
     # `episode` digest would trust a number the consumer reported about itself:
     # a record whose progress map disagrees with its own digest must still fail.
@@ -522,7 +690,7 @@ def verify_replay(spec: TaskSpec, kb_entries: dict, nodes: list, calls: list,
                        f"{len(want_obs)}")
     for a, b in zip(got["observations"], want_obs):
         for field in ("tool", "oracle_node", "args", "canonical", "exposed",
-                      "credited", "decision_id"):
+                      "visible", "token_provided", "credited", "decision_id"):
             if a.get(field) != b.get(field):
                 return False, (f"replay_{field}_mismatch@call{a['call_id']}:"
                                f"{a.get(field)!r}!={b.get(field)!r}")

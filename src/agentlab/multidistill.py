@@ -58,7 +58,9 @@ import pathlib
 import re
 import time
 
-from agentlab.chat import boxed_answer, numeric_answer, parse_tool_calls, strip_thinking
+from agentlab.chat import (assistant_tool_message, boxed_answer, numeric_answer,
+                          parse_tool_calls, strip_thinking)
+from agentlab.suite import contract as contract_mod
 from agentlab.suite import runtime as rt_mod
 from agentlab.suite.configio import (ROOT, ledger_append, ledger_guard, load_config,
                                      now_utc)
@@ -70,7 +72,6 @@ RAW_DIR = MULTIFACE_DIR / "raw"
 ACCEPTED_PATH = MULTIFACE_DIR / "accepted.jsonl"
 SUMMARY_PATH = MULTIFACE_DIR / "rs_summary.json"
 
-_TOOL_CALL_BLOCK = re.compile(r"<tool_call>.*?(?:</tool_call>|$)", re.DOTALL)
 _BOXED_ANY = re.compile(r"\\boxed")
 
 
@@ -128,11 +129,19 @@ class RolloutEngine:
     """
 
     def __init__(self, cfg: dict, render_fn, generate_fn,
-                 frozen_prompt: str | None = None, provenance: dict | None = None):
+                 frozen_prompt: str | None = None, provenance: dict | None = None,
+                 secret: bytes | None = None):
         self.cfg = cfg
         self.render = render_fn
         self.generate = generate_fn
         self.frozen = frozen_prompt
+        # THE RUN SECRET. Recovery tokens and receipts are keyed with it, so it is
+        # part of the model-visible observation bytes. It defaults to the one run
+        # secret in out/ rather than to nothing, because a rollout engine without a
+        # secret could not mint the tokens the certifier requires -- which is
+        # exactly the state the tokenless training path was in.
+        self.secret = (bytes(secret) if secret is not None
+                       else contract_mod.load_or_create_secret())
         # The S19 fingerprint of the engine that produced every row this engine
         # emits: which card, which driver, which engine settings, which effective
         # thinking mode. None on the scripted CPU engines the tests inject.
@@ -167,7 +176,8 @@ class RolloutEngine:
 
     def new_rollout(self, bundle, sample_index: int, prompt_variant: str) -> dict:
         spec = bundle.spec
-        runtime = rt_mod.EpisodeRuntime(spec, bundle.kb, bundle.nodes)
+        runtime = rt_mod.EpisodeRuntime(spec, bundle.kb, bundle.nodes,
+                                        secret=self.secret)
         return {
             "bundle": bundle, "runtime": runtime,
             "sample_index": sample_index, "prompt_variant": prompt_variant,
@@ -234,13 +244,8 @@ class RolloutEngine:
             c["messages"].append({"role": "assistant", "content": clean})
             return
 
-        prose = _TOOL_CALL_BLOCK.sub("", text).strip()
-        msg = {"role": "assistant",
-               "tool_calls": [{"type": "function",
-                               "function": {"name": x["name"], "arguments": x["arguments"]}}
-                              for x in calls]}
-        if prose:
-            msg["content"] = prose
+        # ONE assistant-message shape, shared with the evaluator.
+        msg = assistant_tool_message(text, calls)
         assistant_idx = len(c["messages"])
         c["messages"].append(msg)
         spec = c["bundle"].spec
@@ -259,8 +264,8 @@ class RolloutEngine:
             else:
                 result = runtime.dispatch(name, args)
                 call_id = runtime.events[-1].call_id
-                c["calls"].append({"decision_id": decision, "tool": name,
-                                   "args": args, "exposed": result})
+                c["calls"].append({"call_id": call_id, "decision_id": decision,
+                                   "tool": name, "args": args, "exposed": result})
             tool_idx = len(c["messages"])
             c["messages"].append({"role": "tool", "name": name, "content": result})
             c["call_map"].append({"call_id": call_id,
@@ -270,8 +275,9 @@ class RolloutEngine:
     def _record(self, c: dict) -> dict:
         bundle, runtime = c["bundle"], c["runtime"]
         spec = bundle.spec
-        verdict = runtime.verify(c["final"])
-        fault = _fault_summary(runtime, spec, c["call_map"])
+        verdict = runtime.verify(c["final"], transcript=c["messages"],
+                                 termination_reason=_termination_reason(c))
+        fault = _fault_summary(runtime, spec, c["call_map"], verdict)
         return {
             "task_id": spec.task_id, "family": spec.family, "split": spec.split,
             "horizon": spec.horizon, "template_id": spec.template_id,
@@ -292,6 +298,9 @@ class RolloutEngine:
             "parity": {"observations": runtime.observation_digests(),
                        "progress": runtime.progress(),
                        "episode": runtime.episode_digest()},
+            # Which model-visible environment produced these bytes (D2). Resume
+            # logic can never reuse a tokenless shard after this fix.
+            contract_mod.STAMP_FIELD: contract_mod.environment_contract_sha256(),
             # Which card and which engine produced this row (S19). Carried on the
             # ROW, not only in a nearby ledger: a row that cannot say what
             # produced it cannot support a same-card claim.
@@ -299,12 +308,33 @@ class RolloutEngine:
         }
 
 
-def _fault_summary(runtime, spec, call_map: list) -> dict | None:
-    """Where the scheduled fault fired and where recovery happened, if at all.
+def _termination_reason(c: dict) -> str | None:
+    """The runner's own account of why this rollout stopped, for the verifier.
 
-    Read off the environment-side trace, never off model text: `fault_triggered`
-    is stamped by the injector and `exposed_canonical` says the runtime later
-    produced the node's true observation.
+    `call_cap`, a length-truncated final turn and an exhausted decision budget are
+    runaway criteria the verifier must see; it cannot infer them from the event
+    ledger, and inferring `call_cap` from `len(events) == max_calls` is exactly the
+    equality-cap mistake the ruling forbids.
+    """
+    if c.get("call_cap"):
+        return "call_cap"
+    if c.get("truncated"):
+        return "token_budget"
+    if c.get("exhausted"):
+        return "decision_budget"
+    return "answered"
+
+
+def _fault_summary(runtime, spec, call_map: list, verdict) -> dict | None:
+    """Where the scheduled fault fired and where CERTIFIED recovery happened.
+
+    Read off the canonical verifier's registered remediation report, never off
+    model text and never re-derived here. This function used to decide recovery
+    itself -- any later `exposed_canonical` event at the faulted node, plus a
+    reservation-status query for the ambiguous mutation -- which is a third
+    definition of recovery alongside the verifier's and the certifier's. The SFT
+    view builder reads `recovery_msg_index`, so a looser definition here would
+    have trained the model on decisions the certifier calls `blind_retry`.
     """
     if not spec.faults:
         return None
@@ -313,27 +343,23 @@ def _fault_summary(runtime, spec, call_map: list) -> dict | None:
     by_call = {m["call_id"]: m for m in call_map}
     out = {"fired": fired is not None, "result_msg_index": None,
            "recovery_msg_index": None, "fault_decision": None,
-           "recovery_decision": None, "post_fault_retries": 0}
+           "recovery_decision": None, "post_fault_retries": 0,
+           "recovery_reason": None}
     if fired is None:
         return out
+    report = next((r for r in verdict.fault_reports
+                   if r["target_node"] == fired.oracle_node), None) or {}
     out["fault_decision"] = fired.decision_id
+    out["recovery_reason"] = report.get("reason")
     out["result_msg_index"] = (by_call.get(fired.call_id) or {}).get("tool_msg_index")
-    later = [e for e in events if e.call_id > fired.call_id
-             and e.oracle_node == fired.oracle_node]
-    out["post_fault_retries"] = len(later)
-    recovered = next((e for e in later if e.exposed_canonical), None)
-    if recovered is None and fired.fault_type == "malformed":
-        # Ambiguous post-mutation case: a reservation-status query on the same
-        # line establishes the state instead of re-observing the node.
-        line = (fired.aux or {}).get("line")
-        recovered = next((e for e in events if e.call_id > fired.call_id
-                          and e.tool == "warehouse_query" and e.ok
-                          and (e.aux or {}).get("resource") == "reservation"
-                          and (e.aux or {}).get("line") == line), None)
-    if recovered is not None:
-        out["recovery_decision"] = recovered.decision_id
-        out["recovery_msg_index"] = (by_call.get(recovered.call_id)
-                                     or {}).get("assistant_msg_index")
+    out["post_fault_retries"] = len([e for e in events
+                                     if e.call_id > fired.call_id
+                                     and e.oracle_node == fired.oracle_node])
+    call_id = report.get("recovery_call_id")
+    if call_id is not None:
+        out["recovery_decision"] = report.get("recovery_decision")
+        out["recovery_msg_index"] = (by_call.get(call_id) or {}).get(
+            "assistant_msg_index")
     return out
 
 
@@ -341,7 +367,7 @@ def _fault_summary(runtime, spec, call_map: list) -> dict | None:
 # exact replay verification (the faithfulness gate)
 # --------------------------------------------------------------------------
 
-def replay_record(rec: dict, bundle) -> tuple[bool, str]:
+def replay_record(rec: dict, bundle, *, secret: bytes) -> tuple[bool, str]:
     """Re-execute a rollout's calls against a FRESH canonical runtime.
 
     Three things must come back identical, or the record does not describe the
@@ -358,12 +384,13 @@ def replay_record(rec: dict, bundle) -> tuple[bool, str]:
     if bundle.spec.task_id != rec["task_id"]:
         return False, f"replay_wrong_bundle:{bundle.spec.task_id}"
     calls = rec["calls"]
+    contract_mod.require_current(rec, f"rollout record for {rec['task_id']}")
     ok, why = rt_mod.verify_replay(bundle.spec, bundle.kb, bundle.nodes, calls,
-                                   rec["parity"])
+                                   rec["parity"], secret=secret)
     if not ok:
         return False, why
     runtime, _report = rt_mod.replay_trace(bundle.spec, bundle.kb, bundle.nodes,
-                                           calls)
+                                           calls, secret=secret)
     if len(runtime.events) != len(calls):
         return False, f"replay_call_count:{len(runtime.events)}!={len(calls)}"
     for i, (event, call) in enumerate(zip(runtime.events, calls)):
@@ -371,7 +398,8 @@ def replay_record(rec: dict, bundle) -> tuple[bool, str]:
         # so this IS a byte comparison against what the model was shown.
         if digest_text(call.get("exposed", "")) != event.exposed_result_digest:
             return False, f"replay_observation_bytes@{i}"
-    verdict = runtime.verify(rec["final"]).to_row()
+    verdict = runtime.verify(rec["final"], transcript=rec["messages"],
+                              termination_reason=_termination_reason(rec)).to_row()
     if verdict != rec["verdict"]:
         diff = sorted(k for k in verdict if verdict[k] != rec["verdict"].get(k))
         return False, f"replay_verdict_mismatch:{diff}"
@@ -410,7 +438,16 @@ def _accept_budget(rec: dict, cfg: dict) -> str:
 
 
 def _accept_recovery(rec: dict, cfg: dict) -> str:
-    """Recovery must be mechanical, prompt, and must not launder the trap value."""
+    """Recovery must be CERTIFIED, prompt, and must not launder the trap value.
+
+    "Certified" is the verifier's registered remediation predicate and nothing
+    else: token echoed on the same call identity, on a later decision for
+    rate_limit, corrected target unit for wrong_unit, token-bearing idempotent
+    replay for the ambiguous mutation. This filter used to accept
+    `verdict["recovered"]` under the OLD, weaker definition (any later canonical
+    observation), so the SFT corpus could contain trajectories the claim-bearing
+    certifier labels `blind_retry`.
+    """
     fault = rec.get("fault") or {}
     if not rec["fault_types"]:
         return ""
@@ -418,6 +455,8 @@ def _accept_recovery(rec: dict, cfg: dict) -> str:
         return "fault_not_fired"
     if not rec["verdict"]["recovered"]:
         return "recovery_not_verified"
+    if fault.get("recovery_reason") != "ok":
+        return f"recovery_{fault.get('recovery_reason')}"
     rcfg = cfg["acceptance"]["recovery"]
     fd, rd = fault.get("fault_decision"), fault.get("recovery_decision")
     if fd is None or rd is None or rd - fd > rcfg["max_decisions_after_fault"]:
@@ -425,28 +464,15 @@ def _accept_recovery(rec: dict, cfg: dict) -> str:
     if fault.get("post_fault_retries", 0) > rcfg["max_identical_retries"]:
         return "too_many_retries"
     if "wrong_unit" in rec["fault_types"]:
-        # The remediation contract for a wrong-unit trap is "corrected target
-        # required": a later conversion must explicitly request the unit the
-        # oracle asked for. `exposed_canonical` on a post-fault event at the
-        # target node is exactly that, decided by the canonical matcher rather
-        # than by pattern-matching numbers out of the transcript.
-        if not _corrected_conversion(rec):
-            return "no_corrected_conversion"
+        # The remediation contract for a wrong-unit trap ("corrected target
+        # required") is enforced by the ONE verifier, whose `recovered` flag this
+        # function already required above. The only thing left to check here is
+        # the acceptance-specific hazard: a trap value that happens to BE the
+        # committed answer, which would let an unrecovered episode look correct.
         trapped = _trapped_value(rec)
         if trapped is not None and answers_match(trapped, rec["answer"]):
             return "trapped_value_used"
     return ""
-
-
-def _corrected_conversion(rec: dict) -> bool:
-    fired = next((e for e in rec["events"] if e["fault_triggered"]
-                  and e["fault_type"] == "wrong_unit"), None)
-    if fired is None:
-        return False
-    return any(e["call_id"] > fired["call_id"]
-               and e["oracle_node"] == fired["oracle_node"]
-               and e["exposed_canonical"]
-               for e in rec["events"])
 
 
 def _trapped_value(rec: dict):
@@ -462,14 +488,18 @@ def _trapped_value(rec: dict):
     if idx is None:
         return None
     try:
-        obj = json.loads(rec["messages"][idx]["content"])
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        content = rec["messages"][idx]["content"]
+    except (KeyError, IndexError, TypeError):
         return None
-    return obj.get("value") if isinstance(obj, dict) else None
+    for obj in rt_mod.parse_observation(content)["objects"]:
+        if isinstance(obj, dict) and "value" in obj:
+            return obj["value"]
+    return None
 
 
 def accept_record(rec: dict, cfg: dict | None = None, bundles: dict | None = None,
-                  skip_replay: bool = False) -> tuple[bool, str]:
+                  skip_replay: bool = False, *, secret: bytes | None = None
+                  ) -> tuple[bool, str]:
     """(accepted, rejection_reason).
 
     Order: cheap universal filters, then the STRICT VERIFIER (the single
@@ -508,7 +538,7 @@ def accept_record(rec: dict, cfg: dict | None = None, bundles: dict | None = Non
     verdict = rec["verdict"]
     if not verdict["consistent"]:
         return False, "verifier_runtime_disagreement"
-    if not verdict["strict_success"]:
+    if not verdict["certified_success"]:
         return False, "verifier_rejected"
 
     why = _accept_budget(rec, cfg) or _accept_recovery(rec, cfg)
@@ -519,7 +549,9 @@ def accept_record(rec: dict, cfg: dict | None = None, bundles: dict | None = Non
         bundle = (bundles or {}).get(rec["task_id"])
         if bundle is None:
             return False, "replay_bundle_missing"
-        ok, why = replay_record(rec, bundle)
+        if secret is None:
+            secret = contract_mod.load_or_create_secret()
+        ok, why = replay_record(rec, bundle, secret=secret)
         if not ok:
             return False, why
     return True, ""
@@ -636,8 +668,12 @@ def _vllm_engine(cfg: dict, args, frozen: str | None,
     fp = fingerprint(getattr(args, "run_id", None), cfg, enable_thinking=thinking)
     fp["adapter"] = adapter
     fp["served_model"] = args.model
+    # THE run secret, shared with the prompt tournament, view construction and
+    # evaluation: the recovery tokens and receipts the model sees are keyed with
+    # it, so two consumers with different secrets are two environments.
     return RolloutEngine(cfg, render, generate, frozen_prompt=frozen,
-                         provenance=fp)
+                         provenance=fp,
+                         secret=contract_mod.load_or_create_secret())
 
 
 def run_units(engine, units: list, *, run_one, is_done, budget_minutes: float,
@@ -756,9 +792,18 @@ def cmd_run(args) -> None:
 
 
 def finalize(records: list, bundles: dict, cfg: dict) -> tuple[list, dict]:
-    """Pure CPU acceptance pass -> (kept records, summary)."""
+    """Pure CPU acceptance pass -> (kept records, summary).
+
+    Raw shards produced under a different model-visible environment are DROPPED,
+    not resumed: `accept_record` refuses them through
+    `contract.require_current`, and they are counted separately so the report
+    says out loud that a regeneration is owed rather than reporting a quota miss.
+    """
     reasons: dict[str, int] = {}
     accepted: dict[str, dict] = {}
+    records, stale = contract_mod.invalidate(records, "raw rejection-sampling row")
+    if stale:
+        reasons["stale_environment_contract"] = len(stale)
     for rec in records:
         ok, why = accept_record(rec, cfg, bundles)
         if not ok:
@@ -793,7 +838,10 @@ def finalize(records: list, bundles: dict, cfg: dict) -> tuple[list, dict]:
     faulted_min = cfg["totals"]["min_accepted_faulted"]
     quotas["_faulted"] = {"accepted": n_faulted, "min_accepted": faulted_min,
                           "ok": n_faulted >= faulted_min}
-    summary = {"rollouts": len(records), "accepted": len(kept),
+    summary = {"rollouts": len(records) + len(stale),
+               "stale_environment_contract": len(stale),
+               contract_mod.STAMP_FIELD: contract_mod.environment_contract_sha256(),
+               "accepted": len(kept),
                "acceptance_rate": round(len(kept) / max(len(records), 1), 4),
                "per_cell": dict(sorted(per_cell.items())),
                "measured_only_cells": sorted(measured_only),

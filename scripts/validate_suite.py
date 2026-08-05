@@ -54,10 +54,16 @@ EVAL_SPLITS = ("eval", "eval_stress", "eval_mt", "eval_h8", "eval_absent",
 UNREACHABLE_SPLITS = ("eval_absent",)
 
 
+def _run_secret():
+    from agentlab.suite.contract import load_or_create_secret
+
+    return load_or_create_secret()
+
+
 def _fresh_runtime(bundle):
     from agentlab.suite.runtime import EpisodeRuntime
 
-    return EpisodeRuntime(bundle.spec, bundle.kb, bundle.nodes)
+    return EpisodeRuntime(bundle.spec, bundle.kb, bundle.nodes, secret=_run_secret())
 
 
 def check_regeneration(cfg, data_dir) -> list[str]:
@@ -385,12 +391,13 @@ def check_oracle_execution(splits_data) -> list[str]:
         # spec aborted every remaining check and you learned about one defect
         # instead of all of them. An exception is a reported problem.
         try:
-            rt, verdict = run_oracle(spec, bundle.kb, bundle.nodes)
+            rt, verdict = run_oracle(spec, bundle.kb, bundle.nodes,
+                                     secret=_run_secret())
         except Exception as exc:  # noqa: BLE001 -- any failure is a spec defect
             problems.append(f"{spec.task_id}[{label}]: oracle replay raised "
                             f"{type(exc).__name__}: {exc}")
             return
-        if not verdict.strict_success:
+        if not verdict.certified_success:
             problems.append(f"{spec.task_id}[{label}]: oracle trajectory failed "
                             f"strict verification: {verdict.reasons[:2]}")
             # deliberately NOT returning: checks 5-7 read the event log and the
@@ -509,7 +516,7 @@ def check_missing_node_rejected(splits_data) -> list[str]:
             rt.dispatch(node.tool, dict(node.args))
         rt.begin_decision()
         verdict = rt.verify(f"\\boxed{{{spec.answer}}}")
-        if verdict.strict_success:
+        if verdict.certified_success:
             problems.append(f"{spec.task_id}: verifier passed a trace missing "
                             f"node {skip}")
     return problems
@@ -534,7 +541,7 @@ def check_same_decision_rejected(splits_data) -> list[str]:
             rt.dispatch(node.tool, dict(node.args))
         rt.begin_decision()
         verdict = rt.verify(f"\\boxed{{{spec.answer}}}")
-        if verdict.strict_success:
+        if verdict.certified_success:
             problems.append(f"{spec.task_id}: verifier passed a same-decision "
                             "dependency trace")
     return problems

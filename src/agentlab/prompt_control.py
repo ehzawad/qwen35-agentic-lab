@@ -233,13 +233,13 @@ def axis_capacity(cfg: dict | None = None) -> dict:
 # --------------------------------------------------------------------------
 
 def score_rollout(rec: dict) -> bool:
-    """Tournament success = the strict verifier's verdict on the episode.
+    """Tournament success = the ONE certified-success predicate.
 
     The tournament scores exactly what the study scores. A looser "answer looks
     right" rule here would tune the control against a different target from the
     one the training claim is measured on.
     """
-    return bool(rec["verdict"]["strict_success"])
+    return bool(rec["verdict"]["certified_success"])
 
 
 def axis_rates(rows: list) -> dict:
@@ -309,12 +309,21 @@ def tournament_rows(engine, bundles: list, axis: str, candidate: dict,
     for convo in convos:
         convo["messages"][0]["content"] = prompt
     records = engine.run(convos, verbose=False)
+    from agentlab.suite.contract import STAMP_FIELD, environment_contract_sha256
+
+    stamp = environment_contract_sha256()
     return [{"candidate": candidate["id"], "axis": axis, "task_id": r["task_id"],
              "family": r["family"], "horizon": r["horizon"],
              "fault_types": r["fault_types"], "success": score_rollout(r),
              "n_calls": r["verdict"]["calls"],
              "milestone_fraction": r["milestone_fraction"],
-             "truncated": r["truncated"], "exhausted": r["exhausted"]}
+             "recovery_reason": (r.get("fault") or {}).get("recovery_reason"),
+             "truncated": r["truncated"], "exhausted": r["exhausted"],
+             # Which model-visible environment selected this prompt (D2). A
+             # tournament row from the tokenless environment scored p4_error_repair
+             # and p8_combined on instructions that were inert; those rows are not
+             # resumable into this one.
+             STAMP_FIELD: stamp}
             for r in records]
 
 
@@ -322,11 +331,21 @@ def _round2_candidates(cfg: dict) -> list[str]:
     """The preregistered top two, read from the round-1 files that exist."""
     from agentlab.multidistill import _read_jsonl
 
+    from agentlab.suite.contract import invalidate
+
     rows = []
     for cand in verify_frozen():
         p = _rows_path(1, cand["id"])
         if p.exists():
             rows += _read_jsonl(p)
+    rows, stale = invalidate(rows, "prompt tournament row")
+    if stale:
+        raise SystemExit(
+            f"REFUSED: {len(stale)} round-1 tournament rows carry no current "
+            f"environment_contract_sha256. They were produced under a different "
+            f"model-visible environment (the tokenless fault contract), where the "
+            f"recovery-token instructions in p4_error_repair and p8_combined were "
+            f"inert. Delete out/multiface/prompt_tournament/ and re-run round 1.")
     if not rows:
         return []
     try:

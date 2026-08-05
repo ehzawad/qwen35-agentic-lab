@@ -1,4 +1,4 @@
-"""The four preregistered fault injectors and the remediation contract.
+"""The four preregistered fault injectors and the ONE remediation contract.
 
 A fault is scheduled deterministically per task, emitted exactly once, and is
 always recoverable within the remaining registered call budget. Faults are
@@ -7,36 +7,48 @@ agentlab.tools stay deterministic.
 
 Fault classes (frozen in configs/agentic_preregister.json):
 
-  transient    error envelope; the next semantically correct attempt succeeds.
-  rate_limit   error envelope; retrying within the same assistant decision
-               stays limited, retrying on a later decision succeeds.
+  transient    error envelope carrying a recovery_token; re-issuing the
+               identical call WITH the token succeeds.
+  rate_limit   error envelope carrying a recovery_token; re-issuing within the
+               same assistant decision stays limited, re-issuing with the token
+               on a LATER decision succeeds.
   malformed    the canonical payload is replaced once by a truncated fragment
-               plus a *marked* error envelope (scope ruling: marked, never a
-               silently wrong value).
-  wrong_unit   unit_convert only: one valid-looking result in a deterministic
-               different unit of the same family. Detection is the skill.
+               plus a *marked* error envelope carrying the token (scope ruling:
+               marked, never a silently wrong value).
+  wrong_unit   unit_convert only: one valid-looking result in the COMMITTED
+               different unit of the same family. No token is emitted (the trap
+               is not an error envelope). Detection is the skill.
 
-Remediation contract (what certified recovery requires, validated post hoc by
-agentlab.provenance -- the injector only records ground truth):
+Remediation contract (what certified recovery requires; validated post hoc by
+agentlab.suite.verify -- the injector only records ground truth):
 
-  transient / rate_limit / malformed
-      re-issue the call INCLUDING the emitted 128-bit recovery_token argument
-      (rate_limit additionally: on a later assistant decision). Blind retries
-      without the token may still succeed operationally, but they are never
-      certified -- that is non-recovery case "blind_retry".
+  transient / malformed
+      re-issue the same call INCLUDING the emitted 128-bit recovery_token
+      argument.
+  rate_limit
+      the same, additionally on a LATER assistant decision.
   wrong_unit
-      no token is emitted (the trap is not an error envelope); certification
-      requires a corrected conversion explicitly targeting the originally
-      requested unit, and the trapped value must never enter the answer chain.
+      a corrected conversion explicitly targeting the originally requested
+      unit; the trapped value must never enter the answer chain.
+
+Blind retries without the token may still succeed operationally, but they are
+never certified -- that is the registered non-recovery case "blind_retry".
 
 Recovery tokens are minted with the run secret (HMAC-SHA256), so the model
 cannot fabricate them; they are still deterministic per run, so shard resumes
-reproduce the same episode byte-for-byte.
+and replays reproduce the same episode byte-for-byte.
+
+ONE ENGINE. `FaultEngine` below is the only fault implementation in the project.
+The parallel `FaultInjector` that `suite.evaluate.SpecRuntime` used is gone: it
+was a second contract (token-bearing) racing a first (tokenless), which is the
+D2 defect this module now closes. Everything the evaluator needed -- the token,
+the remediation text, the same-decision rate-limit behaviour, the truncated
+malformed prefix -- is here, and `suite.runtime.EpisodeRuntime` is the single
+consumer.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import json
 
 from agentlab.suite import rng
@@ -51,6 +63,22 @@ FAULT_GROUPS = {
 }
 
 TOKEN_ARG = "recovery_token"
+
+# The ONE declaration of the remediation argument on the model-visible tool
+# surface. It used to live in `suite.evaluate` as `_TOKEN_PROPERTY`, where only
+# the evaluation path augmented its schemas with it -- so the trained policy was
+# never shown the argument the certifier requires it to use.
+# `suite.runtime.tool_schemas_for_family` now adds this to EVERY tool of EVERY
+# family, because the model cannot know in advance which tool will fault.
+TOKEN_PROPERTY = {
+    "type": "string",
+    "description": "Only after a tool error supplied a recovery_token: echo it "
+                   "when reissuing that call.",
+}
+
+# The truncated fragment a malformed fault exposes. It contains neither the
+# numeric result nor the next key.
+MALFORMED_LITERAL = '{"ok":true,"value":'
 
 
 def group_of(fault_class: str) -> str:
@@ -98,10 +126,10 @@ def wrong_unit_candidates(requested: str) -> list[str]:
     """Every other unit in `requested`'s family, sorted.
 
     The single source of truth for "which units could a wrong-unit trap
-    plausibly return": both the generation-time picker (`pick_wrong_unit`,
-    CounterRNG) and the certification-layer picker (`wrong_unit_target`, label
-    stream) draw from this list, so the two layers can never disagree about
-    what counts as the same family.
+    plausibly return". Only the generation-time picker (`pick_wrong_unit`) draws
+    from it now: the runtime uses the COMMITTED `FaultSpec.params["wrong_unit"]`
+    and never re-derives a unit, which is the second half of the D2 wrong-unit
+    drift (`SpecRuntime` used to recompute one through `wrong_unit_target`).
     """
     from agentlab.tools import _UNITS
 
@@ -110,123 +138,75 @@ def wrong_unit_candidates(requested: str) -> list[str]:
     return sorted(u for u, (f, _) in _UNITS.items() if f == fam and u != req)
 
 
-def wrong_unit_target(requested: str, task_id: str, fault_seed: int) -> str:
-    """A deterministic different unit in the same family as `requested`."""
+def pick_wrong_unit(requested: str, rng_stream) -> str:
+    """A deterministic different unit in the same family, drawn from `rng_stream`
+    (a suite.rng.CounterRNG). Used at GENERATION time to freeze the trap unit,
+    which is then committed in `FaultSpec.params["wrong_unit"]` and is the only
+    value the runtime may expose."""
     req = str(requested).strip().lower()
     candidates = wrong_unit_candidates(req)
     if not candidates:
         return _WRONG_UNIT_FALLBACK.get(req, req)
-    pick = rng.stream_u64(fault_seed, f"wrong-unit:{task_id}", 1)[0]
-    return candidates[int(pick % len(candidates))]
+    return rng_stream.choice(candidates)
 
 
-@dataclasses.dataclass
-class FaultState:
-    emitted: bool = False
-    emitted_call_id: int | None = None
-    emitted_decision: int | None = None
-    recovery_token: str | None = None
+# ---------------------------------------------------------------------------
+# the registered model-visible envelopes
+# ---------------------------------------------------------------------------
 
+def recovery_token(secret: bytes, task_id: str, fault_type: str,
+                   target_node: str) -> str:
+    """The 128-bit (32 hex character) HMAC recovery token for one scheduled fault.
 
-class FaultInjector:
-    """Episode-scoped injector. One scheduled fault; exactly one emission.
-
-    The runtime calls `filter(...)` after computing the canonical result for a
-    dispatch. The injector decides what the model actually observes and
-    returns (exposed_text, event_fields). `event_fields` land in the
-    environment-side ledger that the model never sees.
+    Keyed by the run secret, so the model cannot fabricate it; a pure function of
+    (task_id, fault_type, target_node), so a replay of the same episode under the
+    same run secret reproduces the same bytes.
     """
+    return rng.hmac_token(secret, f"recovery:{task_id}:{fault_type}:{target_node}")
 
-    def __init__(self, task_id: str, schedule: dict | None, node_args_digest: str | None,
-                 secret: bytes):
-        self.task_id = task_id
-        self.schedule = schedule  # {"class", "node_index"} or None (clean episode)
-        self.node_args_digest = node_args_digest  # canonical args digest of target node
-        self.secret = secret
-        self.state = FaultState()
-        if schedule is not None:
-            self.state.recovery_token = rng.hmac_token(
-                secret, f"recovery:{task_id}:{schedule['class']}:{schedule['node_index']}")
 
-    # -- helpers -----------------------------------------------------------
-    def _envelope(self, error: str, extra: dict) -> str:
-        body = {"ok": False, "error": error, TOKEN_ARG: self.state.recovery_token,
-                "remediation": extra}
-        return rng.canonical_json(body)
+def _envelope(error: str, token: str, remediation: dict) -> str:
+    return rng.canonical_json({"ok": False, "error": error, TOKEN_ARG: token,
+                               "remediation": remediation})
 
-    def _at_target(self, args_digest: str) -> bool:
-        return (self.schedule is not None
-                and self.node_args_digest is not None
-                and args_digest == self.node_args_digest)
 
-    # -- main entry ---------------------------------------------------------
-    def filter(self, *, call_id: int, decision: int, tool: str, args_digest: str,
-               canonical_text: str, requested_unit: str | None = None,
-               wrong_unit_text: str | None = None) -> tuple[str, dict]:
-        """Decide the exposed observation for one semantically valid dispatch.
+def transient_envelope(token: str) -> str:
+    return _envelope("transient_backend", token, {
+        "action": "reissue_with_token", "retryable": True,
+        "note": f"transient backend failure; re-issue the identical call with "
+                f"argument {TOKEN_ARG} set to the token above"})
 
-        `canonical_text` is the true result envelope. For unit_convert calls the
-        runtime precomputes `wrong_unit_text` (the valid envelope for the
-        deterministic wrong unit) so this module stays tool-agnostic.
-        """
-        ev: dict = {"fault_class": None, "fault_emitted": False}
-        if self.schedule is None:
-            return canonical_text, ev
 
-        cls = self.schedule["class"]
-        st = self.state
+def rate_limit_envelope(token: str, retry_after_turns: int = 1) -> str:
+    return _envelope("rate_limit", token, {
+        "action": "reissue_with_token_after_next_decision",
+        "retry_after_turns": int(retry_after_turns),
+        "note": f"rate limited; on your NEXT reply re-issue the call with "
+                f"argument {TOKEN_ARG} set to the token above"})
 
-        if not st.emitted:
-            if self._at_target(args_digest):
-                st.emitted = True
-                st.emitted_call_id = call_id
-                st.emitted_decision = decision
-                ev.update({"fault_class": cls, "fault_emitted": True,
-                           "recovery_token": st.recovery_token})
-                if cls == "transient":
-                    return self._envelope("transient_backend", {
-                        "action": "reissue_with_token", "retryable": True,
-                        "note": f"transient backend failure; re-issue the identical call "
-                                f"with argument {TOKEN_ARG} set to the token above"}), ev
-                if cls == "rate_limit":
-                    return self._envelope("rate_limit", {
-                        "action": "reissue_with_token_after_next_decision",
-                        "retry_after_turns": 1,
-                        "note": f"rate limited; on your NEXT reply re-issue the call with "
-                                f"argument {TOKEN_ARG} set to the token above"}), ev
-                if cls == "malformed":
-                    # Truncated fragment (never contains the canonical value) plus a
-                    # MARKED error envelope carrying the token, per the scope ruling.
-                    frag = '{"ok":true,"value":'
-                    ev["malformed_fragment"] = frag
-                    return frag + "\n" + self._envelope("truncated_result", {
-                        "action": "reissue_with_token",
-                        "note": f"the previous payload was truncated; re-issue the identical "
-                                f"call with argument {TOKEN_ARG} set to the token above"}), ev
-                if cls == "wrong_unit":
-                    ev["wrong_unit"] = True
-                    return wrong_unit_text if wrong_unit_text is not None else canonical_text, ev
-                raise ValueError(f"unknown fault class {cls!r}")
-            return canonical_text, ev
 
-        # Fault already emitted: post-fault behaviour.
-        if cls == "rate_limit" and self._at_target(args_digest) and decision == st.emitted_decision:
-            # Same-decision repeats stay limited; this is the SAME scheduled fault
-            # still in force, not a second emission.
-            ev.update({"fault_class": cls, "fault_emitted": False, "rate_limit_active": True})
-            return self._envelope("rate_limit_active", {
-                "action": "reissue_with_token_after_next_decision",
-                "retry_after_turns": 1}), ev
-        return canonical_text, ev
+def rate_limit_active_envelope(token: str, retry_after_turns: int = 1) -> str:
+    """Same-decision repeat: the SAME scheduled fault still in force."""
+    return _envelope("rate_limit_active", token, {
+        "action": "reissue_with_token_after_next_decision",
+        "retry_after_turns": int(retry_after_turns)})
+
+
+def malformed_envelope(token: str) -> str:
+    """The truncated prefix, a newline, then a MARKED error envelope."""
+    return MALFORMED_LITERAL + "\n" + _envelope("truncated_result", token, {
+        "action": "reissue_with_token",
+        "note": f"the previous payload was truncated; re-issue the identical "
+                f"call with argument {TOKEN_ARG} set to the token above"})
 
 
 def parse_token_from_args(args: dict) -> str | None:
-    tok = args.get(TOKEN_ARG)
+    tok = (args or {}).get(TOKEN_ARG)
     return str(tok) if tok is not None else None
 
 
 def strip_token(args: dict) -> dict:
-    return {k: v for k, v in args.items() if k != TOKEN_ARG}
+    return {k: v for k, v in (args or {}).items() if k != TOKEN_ARG}
 
 
 def remediation_requirement(fault_class: str) -> dict:
@@ -245,7 +225,7 @@ def remediation_requirement(fault_class: str) -> dict:
 
 def fault_payload_is_error(text: str) -> bool:
     """True when an exposed observation is one of the marked error envelopes."""
-    for line in text.splitlines():
+    for line in (text or "").splitlines():
         line = line.strip()
         if not line.startswith("{"):
             continue
@@ -258,111 +238,51 @@ def fault_payload_is_error(text: str) -> bool:
     return False
 
 
-# ===========================================================================
-# OPEN PRE-PUSH BLOCKER (2026-08-05): TWO FAULT CONTRACTS COEXIST HERE.
-#
-# `FaultInjector` above is the contract the CLAIM-BEARING evaluation harness
-# uses (`suite.evaluate.SpecRuntime`): every fault error carries a 128-bit
-# `recovery_token`, and `provenance.certify_recovery` credits recovery only when
-# the remediation contract is satisfied -- the token echoed back for
-# transient/malformed, the token echoed back on a LATER decision for rate_limit,
-# the corrected target unit for wrong_unit.
-#
-# `FaultEngine` below is the contract every OTHER consumer uses via
-# `suite.runtime.EpisodeRuntime`: rejection sampling (`multidistill`), the prompt
-# tournament (`prompt_control`), the variance probe (`variance`) and generation.
-# Its payloads carry NO token, `tool_schemas_for_family` does not offer a
-# `recovery_token` argument, `EpisodeRuntime.dispatch` neither parses nor strips
-# one, and `verify._fault_report` credits recovery for any later canonical
-# observation at the faulted node -- a bare retry.
-#
-# MEASURED CONSEQUENCES, all of them outcome-blind (no GPU stage has run):
-#   * the environment the policy is TRAINED in is not the environment it is
-#     EVALUATED in, for all four fault classes;
-#   * two definitions of strict success survive, and the weaker one is what the
-#     SFT acceptance filter enforces, so the corpus may contain trajectories the
-#     claim-bearing certifier would label `blind_retry`;
-#   * prompt candidates p4_error_repair and p8_combined instruct the model about
-#     `recovery_token`, but the tournament that SELECTS the winning prompt runs in
-#     the tokenless environment, where that instruction is inert.
-#
-# The paired TP-BP contrast is NOT invalidated -- both arms face the identical
-# evaluation environment -- but "one fault engine with recovery tokens" is false
-# as the tree stands, and a reader would wrongly conclude the trained arm was
-# trained on the contract it is scored against.
-#
-# THE FIX IS NOT A THRESHOLD CHANGE. It is to port the token-bearing envelope,
-# the `recovery_token` tool argument and the remediation predicate into the
-# canonical runtime and verifier so ONE engine serves both paths, then
-# re-measure `scenario.tool_output_max_tokens` (208, measured against the
-# tokenless payloads below). That changes the training treatment, so it belongs
-# to the protocol owner as a recorded decision, not to an integrator at a push
-# gate. Until then this file is deliberately NOT presented as reconciled.
-#
-# Suite v1 runtime injectors (env-architect spec; used by suite.runtime), whose
-# payloads are the exact committed forms from the council env-architect section:
-#
-#   transient    {"ok": false, "error": "transient_backend", "retryable": true,
-#                 "request_id": ...}; fires once, before any mutation; the next
-#                 semantically correct attempt succeeds.
-#   malformed    the exposed observation is exactly the truncated fragment
-#                 {"ok":true,"value":  -- it contains neither the numeric
-#                 result nor the next key. For the scheduled 25% of malformed
-#                 fulfillment cases the target is a mutation (reserve): the
-#                 mutation DOES occur, the response is truncated, and recovery
-#                 is an idempotent replay of the same quote token or a
-#                 reservation-status query. A second reservation must never be
-#                 created.
-#   wrong_unit   unit_convert only: one valid JSON result for a
-#                 deterministically chosen different unit of the same family,
-#                 with the unit EXPLICIT in the payload. Silent plausible
-#                 wrong numbers are out of scope by council ruling.
-#   rate_limit   {"ok": false, "error": "rate_limit", "retry_after_turns": 1,
-#                 "request_id": ...}. Logical time advances once per assistant
-#                 decision: repeats within the same decision stay limited (the
-#                 SAME scheduled fault still in force, never a second firing);
-#                 a retry on the next decision succeeds.
-#
-# Wrong calls never consume a scheduled fault: the injector is consulted only
-# for credit-eligible calls (semantically valid arguments at the next
-# incomplete oracle node whose dependency edge is satisfied).
-# ===========================================================================
-
-MALFORMED_LITERAL = '{"ok":true,"value":'
-
-
-def pick_wrong_unit(requested: str, rng_stream) -> str:
-    """A deterministic different unit in the same family, drawn from `rng_stream`
-    (a suite.rng.CounterRNG). Used at generation time to freeze the trap unit."""
-    req = str(requested).strip().lower()
-    candidates = wrong_unit_candidates(req)
-    if not candidates:
-        return _WRONG_UNIT_FALLBACK.get(req, req)
-    return rng_stream.choice(candidates)
-
+# ---------------------------------------------------------------------------
+# the one fault engine
+# ---------------------------------------------------------------------------
 
 class FaultEngine:
     """Episode-scoped state for every scheduled fault of one episode.
 
-    The runtime consults `directive(node_id, decision_id)` only when a call is
-    credit-eligible at that node. Each scheduled fault fires exactly once;
-    rate-limit same-decision repeats re-expose the error without a second
-    firing (`fault_triggered` stays False on those events).
+    `suite.runtime.EpisodeRuntime` consults `directive(node_id, decision_id)`
+    only when a call is credit-eligible at that node ("wrong calls do not
+    consume the scheduled failure"). Each scheduled fault fires exactly once;
+    rate-limit same-decision repeats re-expose the error without a second firing
+    (`fault_triggered` stays False on those events).
+
+    The engine is constructed with the episode's `task_id` and the RUN SECRET,
+    because the registered envelopes carry a keyed recovery token. A runtime
+    built with a different secret produces different model-visible bytes, which
+    is exactly why the secret is a run-scoped parameter threaded through every
+    consumer rather than a per-module default.
     """
 
-    def __init__(self, faults: list) -> None:
+    def __init__(self, faults: list, *, task_id: str, secret: bytes) -> None:
         # faults: list[schema.FaultSpec]
+        if not isinstance(secret, (bytes, bytearray)) or not secret:
+            raise ValueError("FaultEngine requires the run secret (bytes)")
+        self.task_id = task_id
+        self.secret = bytes(secret)
         self._state = {}
         for f in faults:
             if f.target_node in self._state:
                 raise ValueError(f"two faults target node {f.target_node!r}")
+            token = None
+            if f.fault_type != "wrong_unit":
+                token = recovery_token(self.secret, task_id, f.fault_type,
+                                       f.target_node)
             self._state[f.target_node] = {
-                "spec": f, "fired": False, "blocked_until": None,
+                "spec": f, "fired": False, "blocked_until": None, "token": token,
             }
 
     def spec_for(self, node_id: str):
         st = self._state.get(node_id)
         return st["spec"] if st else None
+
+    def token_for(self, node_id: str) -> str | None:
+        st = self._state.get(node_id)
+        return st["token"] if st else None
 
     def triggered(self) -> list:
         """Fault specs that have fired, in no particular order."""
@@ -374,25 +294,28 @@ class FaultEngine:
         if st is None:
             return None
         spec = st["spec"]
+        token = st["token"]
         if not st["fired"]:
             st["fired"] = True
             if spec.fault_type == "transient":
-                return {"kind": "transient", "fault_triggered": True}
+                return {"kind": "transient", "fault_triggered": True, "token": token}
             if spec.fault_type == "rate_limit":
                 retry = int(spec.params.get("retry_after_turns", 1))
                 st["blocked_until"] = decision_id + retry
-                return {"kind": "rate_limit", "fault_triggered": True,
+                return {"kind": "rate_limit", "fault_triggered": True, "token": token,
                         "retry_after_turns": retry}
             if spec.fault_type == "wrong_unit":
-                return {"kind": "wrong_unit", "fault_triggered": True,
+                # The COMMITTED trap unit, never a re-derived one.
+                return {"kind": "wrong_unit", "fault_triggered": True, "token": None,
                         "unit": spec.params["wrong_unit"]}
             if spec.fault_type == "malformed":
-                return {"kind": "malformed", "fault_triggered": True,
+                return {"kind": "malformed", "fault_triggered": True, "token": token,
                         "ambiguous": bool(spec.params.get("ambiguous_mutation"))}
             raise ValueError(f"unknown fault type {spec.fault_type!r}")
         # Already fired: only the rate-limit logical clock has residual force.
         if (spec.fault_type == "rate_limit" and st["blocked_until"] is not None
                 and decision_id < st["blocked_until"]):
-            return {"kind": "rate_limit", "fault_triggered": False,
+            return {"kind": "rate_limit_active", "fault_triggered": False,
+                    "token": token,
                     "retry_after_turns": int(spec.params.get("retry_after_turns", 1))}
         return None

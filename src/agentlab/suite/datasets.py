@@ -31,9 +31,13 @@ import json
 import pathlib
 import re
 
-from agentlab.suite import rng
+from agentlab.suite import contract, rng
 from agentlab.suite.configio import load_config
 from agentlab.suite.runtime import tool_schemas_for_family
+
+
+def _stamp() -> str:
+    return contract.environment_contract_sha256()
 
 _NUM_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 # Opaque identifiers the suite generators mint, all uppercase and high-entropy:
@@ -219,8 +223,11 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
     schema_cache: dict[str, list] = {}
     rows, meta = [], []
     counts = {"terminal": 0, "pivot": 0, "recovery": 0}
-    rejected = {"over_token_budget": 0, "no_terminal": 0, "trajectory_over_budget": 0}
+    rejected = {"over_token_budget": 0, "no_terminal": 0, "trajectory_over_budget": 0,
+                "stale_environment_contract": 0}
 
+    records, stale = contract.invalidate(records, "accepted trajectory")
+    rejected["stale_environment_contract"] = len(stale)
     for rec in records:
         family = rec["family"]
         tools = schema_cache.setdefault(family, tool_schemas_for_family(family))
@@ -256,7 +263,12 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
             meta.append({"task_id": rec["task_id"], "family": family,
                          "horizon": rec["horizon"],
                          "fault_types": list(rec.get("fault_types") or []),
-                         "view": view, "tokens": n_tok})
+                         "view": view, "tokens": n_tok,
+                         # Which model-visible environment these prompt bytes
+                         # came from (D2): an SFT view built from a tokenless
+                         # transcript trains on a different environment from the
+                         # one the study evaluates in.
+                         contract.STAMP_FIELD: _stamp()})
 
     total = len(rows)
     terminal_weight = counts["terminal"] / total if total else 0.0
@@ -268,6 +280,7 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
         "terminal_weight_min": cfg["views"]["terminal_weight_min"],
         "terminal_weight_ok": terminal_weight >= cfg["views"]["terminal_weight_min"],
         "expected_rows": cfg["views"]["expected_rows"],
+        contract.STAMP_FIELD: _stamp(),
     }
     return rows, meta, report
 

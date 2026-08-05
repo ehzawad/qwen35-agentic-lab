@@ -632,11 +632,55 @@ def _load_jsonl(path: pathlib.Path) -> list[dict]:
     return out
 
 
-def load_agentic_episodes(traces_dir: str | pathlib.Path, secret: bytes) -> dict:
+def recompute_canonical_verdict(rec: dict, specs_by_id: dict | None,
+                                secret: bytes) -> dict | None:
+    """Replay a trace's recorded calls through the CANONICAL runtime and verify.
+
+    This is the independent half of S17: the emitted `verdict` in the trace is what
+    the evaluator's runtime said, and this is what a fresh runtime built from the
+    committed certification spec says about the same call sequence. Field-for-field
+    equality is the assertion. Without the certspec there is no independent
+    recomputation available, and S17 says INCONCLUSIVE rather than comparing a
+    verdict against itself.
+    """
+    from agentlab.suite import contract as contract_mod
+    from agentlab.suite import runtime as rt_mod
+    from agentlab.suite.schema import OracleNode, TaskSpec
+
+    spec = (specs_by_id or {}).get(rec.get("task_id"))
+    if not spec or not spec.get("spec_row") or not spec.get("oracle_nodes"):
+        return None
+    if not contract_mod.is_current(spec) or not contract_mod.is_current(rec):
+        return None
+    task = contract_mod.spec_for_condition(TaskSpec.from_row(spec["spec_row"]),
+                                          rec.get("condition", "clean"))
+    nodes = [OracleNode.from_row(n) for n in spec["oracle_nodes"]]
+    calls = rec.get("calls") or []
+    try:
+        runtime, _report = rt_mod.replay_trace(task, spec.get("kb", {}), nodes, calls,
+                                              secret=secret)
+    except (ValueError, KeyError, RuntimeError):
+        return None
+    final = provenance_final_text(rec)
+    return runtime.verify(
+        final, transcript=rec.get("messages"),
+        termination_reason=(rec.get("runner") or {}).get("termination_reason")).to_row()
+
+
+def provenance_final_text(rec: dict) -> str:
+    from agentlab import provenance
+
+    return provenance._final_assistant_text(rec)
+
+
+def load_agentic_episodes(traces_dir: str | pathlib.Path, secret: bytes,
+                          specs_by_id: dict | None = None) -> dict:
     """Recompute every episode's scores from raw messages/events (S17 input).
 
     Returns {(arm, condition, control): {task_id: episode}} with the LAST
-    record kept per task (dedupe against stale appends).
+    record kept per task (dedupe against stale appends). When the certification
+    specs are supplied, each episode also carries `recomputed_verdict`: the
+    canonical verdict a FRESH `EpisodeRuntime` produces from the recorded calls.
     """
     from agentlab import provenance
 
@@ -646,6 +690,7 @@ def load_agentic_episodes(traces_dir: str | pathlib.Path, secret: bytes) -> dict
             if rec.get("kind") != "episode":
                 continue
             key = (rec.get("arm"), rec.get("condition"), rec.get("control", "none"))
+            recomputed = recompute_canonical_verdict(rec, specs_by_id, secret)
             rep = provenance.certify_episode(rec, secret)
             ep = {"task_id": rec.get("task_id"), "family": rec.get("family"),
                   "horizon": rec.get("horizon"), "split": rec.get("split"),
@@ -658,7 +703,8 @@ def load_agentic_episodes(traces_dir: str | pathlib.Path, secret: bytes) -> dict
                   "template_cluster_id": rec.get("template_cluster_id"),
                   "pattern_id": rec.get("pattern_id"),
                   "all_tools_required": bool(rec.get("all_tools_required")),
-                  "rep": rep, "trace": rec}
+                  "rep": rep, "trace": rec,
+                  "recomputed_verdict": recomputed}
             if key[1] in ("faulted", "stress"):
                 ep["rec"] = provenance.certify_recovery(rec, secret, rep)
             if ep["all_tools_required"]:
@@ -808,7 +854,7 @@ def veto_s12_injection(eps: dict, specs_by_id: dict | None) -> dict:
         for ep in tasks.values():
             n_checked += 1
             events = ep["trace"].get("events", [])
-            emitted = [e for e in events if e.get("fault_emitted")]
+            emitted = [e for e in events if e.get("fault_triggered")]
             if len(emitted) > 1:
                 problems.append(f"{arm}/{ep['task_id']}: fault fired {len(emitted)}x")
                 continue
@@ -820,7 +866,7 @@ def veto_s12_injection(eps: dict, specs_by_id: dict | None) -> dict:
                     idx = fault.get("node_index")
                     if replay["ok"] and idx is not None and idx < len(replay["nodes"]):
                         want = replay["nodes"][idx]["args_digest"]
-                        if emitted[0].get("args_digest") != want:
+                        if emitted[0].get("canonical_args_digest") != want:
                             problems.append(f"{arm}/{ep['task_id']}: fault fired at the "
                                             f"wrong node")
                     budgets = ep["trace"].get("budgets", {})
@@ -975,8 +1021,25 @@ def veto_s16_control_integrity(eps: dict, prereg: dict, locks: dict | None) -> d
                  if ckpt.get("path") else "no locks supplied to check against"))
 
 
+# Verdict fields that a REPLAY legitimately cannot reproduce, because they
+# describe the live episode rather than the environment: none. The replay
+# reproduces the whole row, which is the point -- an exception list here would be
+# the place a real divergence went to hide.
+S17_VERDICT_EXEMPT: tuple = ()
+
+
 def veto_s17_trace_summary(eps: dict) -> dict:
+    """Emitted scores and canonical verdicts must equal the recomputed ones.
+
+    Two independent recomputations run: the ledger-side certification
+    (`provenance.certify_episode` over the raw trace) and, when the certification
+    specs are available, a full replay of the recorded calls through a fresh
+    canonical `EpisodeRuntime`. The second is compared to the emitted verdict
+    FIELD FOR FIELD; a summary-level comparison would pass while oracle progress,
+    the fault report or the final state diverged.
+    """
     problems = []
+    n_replayed = 0
     for (arm, condition, control), tasks in eps.items():
         for ep in tasks.values():
             trace, rep = ep["trace"], ep["rep"]
@@ -989,17 +1052,43 @@ def veto_s17_trace_summary(eps: dict) -> dict:
                 if name in score and bool(score[name]) != bool(want):
                     problems.append(f"{arm}/{condition}/{ep['task_id']}: {name} "
                                     f"recorded {score[name]} recomputed {want}")
+            if not rep["verdict_present"]:
+                problems.append(f"{arm}/{condition}/{ep['task_id']}: no canonical "
+                                f"verdict in the trace")
+            elif not rep["verdict_agrees"]:
+                problems.append(f"{arm}/{condition}/{ep['task_id']}: the recorded "
+                                f"canonical verdict disagrees with the ledger "
+                                f"recomputation")
             if "recovery" in score and "rec" in ep:
                 if bool(score["recovery"].get("certified_recovery")) != bool(
                         ep["rec"]["certified_recovery"]):
                     problems.append(f"{arm}/{condition}/{ep['task_id']}: recovery disagrees")
+            emitted, replayed = trace.get("verdict"), ep.get("recomputed_verdict")
+            if emitted and replayed:
+                n_replayed += 1
+                diff = sorted(k for k in emitted
+                              if k not in S17_VERDICT_EXEMPT
+                              and emitted[k] != replayed.get(k))
+                if diff:
+                    problems.append(f"{arm}/{condition}/{ep['task_id']}: replayed "
+                                    f"verdict differs on {diff[:4]}")
             n_calls = (trace.get("runner") or {}).get("n_calls")
             if n_calls is not None and n_calls != len(trace.get("events", [])):
                 problems.append(f"{arm}/{condition}/{ep['task_id']}: n_calls "
                                 f"{n_calls} != {len(trace.get('events', []))} events")
     if problems:
-        return _g("BUG", "; ".join(problems[:4]), disagreements=len(problems))
-    return _g("OK", "independent recomputation agrees with every recorded score")
+        return _g("BUG", "; ".join(problems[:4]), disagreements=len(problems),
+                  replayed=n_replayed)
+    total = sum(len(t) for t in eps.values())
+    if total and not n_replayed:
+        return _g("INCONCLUSIVE",
+                  "no certification specs supplied, so no canonical verdict could "
+                  "be recomputed by replay; the recorded verdict was compared only "
+                  "against the ledger recomputation",
+                  replayed=0, episodes=total)
+    return _g("OK", f"independent recomputation agrees with every recorded score; "
+              f"{n_replayed} verdicts reproduced field-for-field by canonical replay",
+              replayed=n_replayed)
 
 
 def veto_s18_test_blindness(results_dir: str | pathlib.Path) -> dict:
@@ -2037,13 +2126,17 @@ def agentic_verdict(traces_dir: str, preregister: str, secret_path: str,
     """The machine verdict: vetoes, gates, floors, winner. Pure given inputs."""
     prereg = load_preregister(preregister)
     secret = bytes.fromhex(pathlib.Path(secret_path).read_text().strip())
-    eps = load_agentic_episodes(traces_dir, secret)
 
+    # The certification specs are loaded BEFORE recertification: S17 replays every
+    # trace through a fresh canonical runtime built from them, which needs the
+    # oracle plan and the matchers, not just the flat spec fields.
     specs = None
     specs_by_id = None
     if specs_path and pathlib.Path(specs_path).exists():
         specs = _load_jsonl(pathlib.Path(specs_path))
         specs_by_id = {s["task_id"]: s for s in specs}
+    eps = load_agentic_episodes(traces_dir, secret, specs_by_id)
+    if specs_by_id:
         _backfill_from_specs(eps, specs_by_id)
     splits = None
     if split_manifests:

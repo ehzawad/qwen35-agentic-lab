@@ -36,7 +36,7 @@ per group"):
     `EpisodeRuntime` rather than from a procedural reset().
   * the reward is the preregistered lexicographic reward from
     configs/multifaceted.yaml, clamped as a TOTAL; terminal success is the
-    strict verifier's `strict_success` and nothing else.
+    strict verifier's `certified_success` and nothing else.
 
 Sharding: ONE engine serves every pending cell (12 groups x 8 generations = 96
 rollouts each), each cell writing results/agentic/variance/<split>-<cell>.jsonl,
@@ -83,7 +83,7 @@ def lexicographic_reward(rec: dict, cfg: dict | None = None) -> float:
     Every term is read off the strict verifier's verdict and the environment-side
     trace -- never off model text:
 
-      terminal_success             verdict.strict_success
+      terminal_success             verdict.certified_success
       verified_milestone_fraction  unique dependency-valid oracle nodes / H
       required_recovery_success    verdict.recovery_success (fault arms only)
       excess_calls                 max(0, calls - H)
@@ -105,7 +105,7 @@ def lexicographic_reward(rec: dict, cfg: dict | None = None) -> float:
     v = rec["verdict"]
     horizon = max(int(rec["horizon"]), 1)
     excess = max(0, int(v["calls"]) - horizon)
-    total = (w["terminal_success"] * (1.0 if v["strict_success"] else 0.0)
+    total = (w["terminal_success"] * (1.0 if v["certified_success"] else 0.0)
              + w["verified_milestone_fraction"] * float(rec["milestone_fraction"])
              + w["required_recovery_success"] * (1.0 if v["recovery_success"] else 0.0)
              + w["excess_calls"] * excess
@@ -141,7 +141,7 @@ def group_stats(rows: list, cfg: dict | None = None) -> dict:
     """One group (all generations of ONE task) -> its variance evidence."""
     cfg = cfg or load_config()
     rewards = [lexicographic_reward(r, cfg) for r in rows]
-    successes = [bool(r["verdict"]["strict_success"]) for r in rows]
+    successes = [bool(r["verdict"]["certified_success"]) for r in rows]
     sd = _sd(rewards)
     return {
         "task_id": rows[0]["task_id"], "family": rows[0]["family"],

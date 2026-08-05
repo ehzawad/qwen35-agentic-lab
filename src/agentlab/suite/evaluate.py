@@ -26,18 +26,26 @@ MANDATORY and is verified -- whole, current, and against this run's physical
 binding -- before the trace file is opened and before the first request. A run
 that cannot attest its producer writes nothing at all.
 
+ONE RUNTIME. This module used to carry `SpecRuntime`, a second episode runtime
+with its own tool schemas, its own error envelopes, its own receipt suffix, its
+own transcript shape, its own recomputed wrong unit and its own recovery
+predicate. It is gone. Every episode here dispatches through
+`agentlab.suite.runtime.EpisodeRuntime` -- the same class rejection sampling, the
+prompt tournament, the variance probe and generation validation use -- and the
+canonical verdict it produces is written straight into the trace.
+
 Spec contract consumed here. Specs are NOT written by hand or by a second
 generator: they are `agentlab.suite.generate.certification_spec(bundle)` over
-the committed suite v1 bundles, frozen by hash before any held-out result.
+the committed suite v1 bundles, frozen by hash before any held-out result. The
+fields this runner needs are the CANONICAL runtime inputs:
 
-  {"task_id", "family", "split", "horizon", "template_id", "template_hash",
-   "prompt", "kb": {key: record}, "env": {...}|None (fulfillment state),
-   "oracle": [{"node","tool","args"}], "answer",
-   "answer_kind": "token"|"integer", "hidden_key", "fault": {"class",
-   "node_index"}?, "faults": [...]?, "pattern_id"?, "all_tools_required"?}
+  {"task_id", ..., "prompt", "kb": {key: record},
+   "spec_row": serialized TaskSpec, "oracle_nodes": [OracleNode.to_row(), ...],
+   "environment_contract_sha256": which model-visible environment this describes}
 
-Oracle args may reference earlier results: {"$from": "n2", "field": "next"}.
-The suite generator emits fully resolved args instead, which replay identically.
+The flat `oracle` list is retained for the S9 reachability replay and the
+controls; it carries neither the canonical payloads nor the semantic matchers, so
+it is never the source a runtime is built from.
 """
 
 from __future__ import annotations
@@ -50,170 +58,60 @@ import threading
 import time
 
 from agentlab import provenance
-from agentlab.suite import configio
-from agentlab.suite import faults as faults_mod
+from agentlab.suite import configio, contract
 from agentlab.suite import rng
 
 ARMS = ("B0", "BP", "T0", "TP", "R0", "RP")
 CONDITIONS = ("clean", "faulted", "stress")
 CONTROLS = ("none", "redacted", "permuted")
 
-# Frozen episode budgets (council spec): decisions H+3 clean / H+5 single-fault
-# / H+8 stress; hard tool-call cap 2H+4 everywhere. The arithmetic lives in
-# suite.schema so the generator's committed budgets and the evaluator's runtime
-# budgets cannot drift apart.
-_CONDITION_FAULTS = {"clean": 0, "faulted": 1, "stress": 2}
-
 
 def budgets_for(horizon: int, condition: str) -> dict:
-    from agentlab.suite.schema import call_budget, decision_budget
-
-    return {"max_decisions": decision_budget(horizon, _CONDITION_FAULTS[condition]),
-            "max_calls": call_budget(horizon)}
-
-
-_TOKEN_PROPERTY = {
-    "type": "string",
-    "description": "Only after a tool error that supplied a recovery_token: "
-                   "echo that token here when re-issuing the call."}
-
-
-def suite_tool_schemas(family: str = "typed_relay") -> list[dict]:
-    """The family's canonical tool schemas plus the recovery_token argument.
-
-    The tool surface comes from suite.runtime.tool_schemas_for_family -- the one
-    definition the training path and the generator also use -- so an evaluated
-    model can never be shown a different tool set from the one the suite was
-    built against. The certification layer adds exactly one optional argument,
-    `recovery_token`, which the frozen remediation contract requires.
-    """
-    from agentlab.suite.runtime import tool_schemas_for_family
-
-    out = []
-    for schema in tool_schemas_for_family(family):
-        schema = json.loads(json.dumps(schema))  # never mutate the shared dicts
-        params = schema["function"].setdefault("parameters", {})
-        params.setdefault("type", "object")
-        params.setdefault("properties", {})["recovery_token"] = dict(_TOKEN_PROPERTY)
-        out.append(schema)
-    return out
+    """The registered budgets. ONE definition, in `suite.contract`."""
+    return contract.budgets_for(horizon, condition)
 
 
 # ---------------------------------------------------------------------------
-# episode runtime
+# building the canonical runtime from a committed certification spec
 # ---------------------------------------------------------------------------
 
-class SpecRuntime:
-    """Episode-scoped dispatch: isolated KB view, fault schedule, receipts.
+def episode_runtime(spec: dict, secret: bytes, condition: str):
+    """-> `suite.runtime.EpisodeRuntime` for one certification spec.
 
-    An unreplayable oracle is a spec defect (S9) and aborts the episode with
-    termination_reason "spec_error" -- EXCEPT under the absent-information
-    control, whose entire construction is to make the required lookup fail. That
-    exception is load-bearing: with it the redacted arm runs the real policy
-    against a KB missing the hidden record, so a leaking harness shows up as a
-    raw success (S11 BUG). Without it every redacted episode returned a
-    zero-decision spec_error stub, the policy never ran, and S11 reported "zero
-    raw and certified success" over episodes that had never been attempted --
-    a vacuous PASS on the one control that certifies the answers are not
-    recoverable from the prompt.
+    The spec must carry the canonical runtime inputs (`spec_row`,
+    `oracle_nodes`). Reconstructing matchers or expected payloads from the flat
+    `oracle` list is forbidden: that reconstruction is what forked the
+    environment layer, so a spec that lacks them is refused rather than
+    approximated.
+
+    The absent-information control needs no special case any more. Redaction makes
+    the required lookup return `no_entry`, the canonical runtime exposes exactly
+    that, the node is never credited, and the policy really runs -- which is what
+    makes S11 a real leak detector. `SpecRuntime` used to replay the oracle first
+    and abort the episode as a `spec_error` unless the control was `redacted`; the
+    exception existed only because the abort did.
     """
+    from agentlab.suite.runtime import EpisodeRuntime
+    from agentlab.suite.schema import OracleNode, TaskSpec
 
-    def __init__(self, spec: dict, secret: bytes, condition: str, fault_seed: int,
-                 control: str = "none"):
-        self.spec = spec
-        self.secret = secret
-        self.condition = condition
-        self.control = control
-        self.fault_seed = fault_seed
-        self.task_id = spec["task_id"]
-        self.env = None
-        if spec.get("env"):
-            from agentlab.suite.envs.fulfillment import WarehouseState
+    if not spec.get("spec_row") or not spec.get("oracle_nodes"):
+        raise ValueError(
+            f"spec {spec.get('task_id')!r} carries no canonical runtime inputs "
+            f"(spec_row / oracle_nodes). Regenerate the certification specs: an "
+            f"evaluator that rebuilt matchers and expected payloads from the flat "
+            f"oracle would be a second environment implementation.")
+    contract.require_current(spec, f"certification spec {spec.get('task_id')!r}")
+    task = contract.spec_for_condition(TaskSpec.from_row(spec["spec_row"]), condition)
+    nodes = [OracleNode.from_row(n) for n in spec["oracle_nodes"]]
+    return EpisodeRuntime(task, spec.get("kb", {}), nodes, secret=secret)
 
-            # One mutable warehouse per episode, isolated from every other
-            # episode and from the oracle replay's own throwaway copy.
-            self.env = WarehouseState(spec["env"])
-        replay = provenance.execute_oracle(spec)
-        self.oracle_ok = bool(replay["ok"])
-        if not replay["ok"] and control != "redacted":
-            raise ValueError(f"spec {self.task_id}: oracle replay failed: "
-                             f"{replay.get('error')}")
-        # Under the redacted control the trailing nodes are unreachable by
-        # construction; the reachable prefix still carries the fault-node digests.
-        self.oracle_nodes = replay["nodes"]
-        self.canonical_answer = replay["answer"]
-        self.injectors: list[faults_mod.FaultInjector] = []
-        if condition in ("faulted", "stress"):
-            assigned = spec.get("faults") if condition == "stress" else None
-            if assigned is None:
-                one = spec.get("fault") or faults_mod.schedule_fault(
-                    self.task_id, spec.get("oracle", []), fault_seed)
-                assigned = [one] if one else []
-            for sched in assigned:
-                idx = sched.get("node_index")
-                if idx is None or idx >= len(self.oracle_nodes):
-                    continue
-                self.injectors.append(faults_mod.FaultInjector(
-                    self.task_id, {"class": sched["class"], "node_index": idx},
-                    self.oracle_nodes[idx]["args_digest"], secret))
-        self.events: list[dict] = []
-        self._call_id = 0
 
-    @property
-    def assigned_faults(self) -> list[dict]:
-        return [dict(i.schedule, node=self.oracle_nodes[i.schedule["node_index"]]["node"])
-                for i in self.injectors]
-
-    def dispatch(self, tool: str, raw_args: dict, decision: int) -> str:
-        """Execute one model call; returns the model-visible tool message text."""
-        self._call_id += 1
-        call_id = self._call_id
-        token_provided = faults_mod.parse_token_from_args(raw_args or {})
-        args = faults_mod.strip_token(raw_args or {})
-        envelope = provenance.canonical_dispatch(self.spec.get("kb", {}), tool, args,
-                                                 env=self.env)
-        canonical_text = rng.canonical_json(envelope)
-        args_digest = provenance.call_digest(tool, args)
-        requested_unit = (str(args.get("to_unit", "")).strip().lower()
-                          if tool == "unit_convert" else None)
-
-        wrong_text = None
-        if tool == "unit_convert" and any(
-                i.schedule and i.schedule["class"] == "wrong_unit" for i in self.injectors):
-            wrong = faults_mod.wrong_unit_target(requested_unit or "", self.task_id,
-                                                 self.fault_seed)
-            wrong_env = provenance.canonical_dispatch(
-                self.spec.get("kb", {}), tool, dict(args, to_unit=wrong),
-                env=self.env)
-            wrong_text = rng.canonical_json(wrong_env)
-
-        exposed_text, ev_fields = canonical_text, {"fault_class": None,
-                                                   "fault_emitted": False}
-        for inj in self.injectors:
-            text, ev = inj.filter(call_id=call_id, decision=decision, tool=tool,
-                                  args_digest=args_digest,
-                                  canonical_text=canonical_text,
-                                  requested_unit=requested_unit,
-                                  wrong_unit_text=wrong_text)
-            if ev.get("fault_emitted") or ev.get("rate_limit_active"):
-                exposed_text, ev_fields = text, ev
-                break
-
-        exposed_digest = provenance.observation_digest(exposed_text)
-        receipt = provenance.mint_receipt(self.secret, self.task_id, call_id,
-                                          exposed_digest)
-        event = {
-            "call_id": call_id, "decision": decision, "tool": tool,
-            "args": args, "token_provided": token_provided,
-            "args_digest": args_digest,
-            "requested_unit": requested_unit,
-            "canonical_digest": provenance.observation_digest(canonical_text),
-            "exposed_text": exposed_text, "exposed_digest": exposed_digest,
-            "receipt": receipt,
-        }
-        event.update(ev_fields)
-        self.events.append(event)
-        return f"{exposed_text}\nreceipt: {receipt}"
+def assigned_faults(runtime) -> list[dict]:
+    """The faults this episode really scheduled, in the trace's frozen shape."""
+    positions = {n.node_id: i for i, n in enumerate(runtime.nodes)}
+    return [{"class": f.fault_type, "node_index": positions.get(f.target_node),
+             "node": f.target_node, "params": dict(f.params)}
+            for f in runtime.spec.faults]
 
 
 # ---------------------------------------------------------------------------
@@ -269,30 +167,53 @@ def make_http_chat(server: str, model: str, decode: dict, timeout_s: float = 300
 # episode driver
 # ---------------------------------------------------------------------------
 
+def assistant_message(content: str, calls: list) -> dict:
+    """The ONE assistant-message shape: prose plus the structured tool calls.
+
+    `RolloutEngine._step` and this evaluator now build the assistant turn the same
+    way, through `agentlab.chat.assistant_tool_message`. The evaluator used to
+    append `{"role": "assistant", "content": out["content"]}` and DROP the
+    tool-call object entirely, and its tool results carried no `name`. The model
+    conditions on both: a transcript with an empty assistant turn followed by a
+    nameless tool result renders to different tokens from one carrying a tool-call
+    object and a named result, so training and evaluation were showing the policy
+    two different conversations. The parity test asserts the rendered token ids,
+    which is the only assertion that catches this.
+    """
+    from agentlab.chat import assistant_tool_message
+
+    return assistant_tool_message(content, calls)
+
+
 def run_episode(spec: dict, *, arm: str, condition: str, control: str,
                 secret: bytes, fault_seed: int, system_prompt: str,
                 prompt_meta: dict, chat_fn, decode: dict, run_meta: dict,
                 wall_limit_s: float = 240.0) -> dict:
+    from agentlab.suite.runtime import tool_schemas_for_family
+
     horizon = int(spec.get("horizon") or 0)
     budgets = budgets_for(horizon, condition)
     t0 = time.monotonic()
     try:
-        runtime = SpecRuntime(spec, secret, condition, fault_seed, control=control)
-    except (ValueError, NotImplementedError) as exc:
+        runtime = episode_runtime(spec, secret, condition)
+    except (ValueError, NotImplementedError, SystemExit) as exc:
         return _trace_row(spec, arm=arm, condition=condition, control=control,
-                          budgets=budgets, messages=[], events=[],
+                          budgets=budgets, messages=[], events=[], calls=[],
                           runner={"n_decisions": 0, "n_calls": 0,
                                   "termination_reason": "spec_error",
                                   "error": str(exc), "wall_s": 0.0},
                           prompt_meta=prompt_meta, decode=decode,
-                          run_meta=run_meta, secret=secret, faults=[])
+                          run_meta=run_meta, secret=secret, faults=[],
+                          verdict=None)
 
     messages = [{"role": "system", "content": system_prompt},
                 {"role": "user", "content": spec.get("prompt", "")}]
-    schemas = suite_tool_schemas(spec.get("family") or "typed_relay")
+    schemas = tool_schemas_for_family(spec.get("family") or "typed_relay")
+    recorded: list[dict] = []
     termination = "decision_budget"
     n_calls = 0
     decision = 0
+    final_text = ""
     for decision in range(1, budgets["max_decisions"] + 1):
         if time.monotonic() - t0 > wall_limit_s:
             termination = "wall_clock"
@@ -303,20 +224,31 @@ def run_episode(spec: dict, *, arm: str, condition: str, control: str,
             termination = "parser_budget"
             messages.append({"role": "assistant", "content": f"[harness error: {exc}]"})
             break
-        messages.append({"role": "assistant", "content": out.get("content", "")})
         calls = out.get("tool_calls") or []
+        content = out.get("content", "") or ""
+        # The logical clock advances once per assistant decision, in the runtime,
+        # exactly as it does in the training path -- the rate-limit contract and
+        # the "dependency edges need a LATER decision" rule both key off it.
+        runtime.begin_decision()
         if not calls:
             termination = "answered"
+            final_text = content
+            messages.append({"role": "assistant", "content": content})
             break
+        messages.append(assistant_message(content, calls))
         capped = False
         for call in calls:
             if n_calls >= budgets["max_calls"]:
                 capped = True
                 break
-            text = runtime.dispatch(call.get("name", ""), call.get("arguments") or {},
-                                    decision)
+            name = call.get("name", "")
+            args = dict(call.get("arguments") or {})
+            text = runtime.dispatch(name, args)
             n_calls += 1
-            messages.append({"role": "tool", "content": text})
+            recorded.append({"call_id": runtime.events[-1].call_id,
+                             "decision_id": runtime.decision_id,
+                             "tool": name, "args": args, "exposed": text})
+            messages.append({"role": "tool", "name": name, "content": text})
         if capped:
             termination = "call_cap"
             break
@@ -324,16 +256,27 @@ def run_episode(spec: dict, *, arm: str, condition: str, control: str,
     runner = {"n_decisions": decision, "n_calls": n_calls,
               "termination_reason": termination,
               "wall_s": round(time.monotonic() - t0, 3)}
+    verdict = runtime.verify(final_text, transcript=messages,
+                            termination_reason=termination)
     return _trace_row(spec, arm=arm, condition=condition, control=control,
-                      budgets=budgets, messages=messages, events=runtime.events,
-                      runner=runner, prompt_meta=prompt_meta, decode=decode,
-                      run_meta=run_meta, secret=secret,
-                      faults=runtime.assigned_faults)
+                      budgets=budgets, messages=messages,
+                      events=[e.to_row() for e in runtime.events],
+                      calls=recorded, runner=runner, prompt_meta=prompt_meta,
+                      decode=decode, run_meta=run_meta, secret=secret,
+                      faults=assigned_faults(runtime), verdict=verdict.to_row(),
+                      parity={"observations": runtime.observation_digests(),
+                              "progress": runtime.progress(),
+                              "episode": runtime.episode_digest()})
 
 
 def _trace_row(spec: dict, *, arm: str, condition: str, control: str, budgets: dict,
-               messages: list, events: list, runner: dict, prompt_meta: dict,
-               decode: dict, run_meta: dict, secret: bytes, faults: list) -> dict:
+               messages: list, events: list, calls: list, runner: dict,
+               prompt_meta: dict, decode: dict, run_meta: dict, secret: bytes,
+               faults: list, verdict: dict | None,
+               parity: dict | None = None) -> dict:
+    from agentlab.suite.runtime import tool_schema_bytes
+
+    family = spec.get("family")
     trace = {
         "kind": "episode", "schema_version": 1,
         "task_id": spec["task_id"], "family": spec.get("family"),
@@ -354,7 +297,24 @@ def _trace_row(spec: dict, *, arm: str, condition: str, control: str, budgets: d
         "faults": faults or None,
         "answer": spec.get("answer"), "answer_kind": spec.get("answer_kind", "token"),
         "budgets": budgets, "messages": messages, "events": events,
+        # The recorded call sequence, so the analyzer can replay this episode
+        # through the canonical runtime (S17) and the orchestration dataflow can
+        # read real argument values rather than digests.
+        "calls": calls,
         "runner": runner,
+        # The canonical verifier's verdict, written straight into the trace. There
+        # is one certified-success predicate and this is its output; the
+        # certification layer below cross-checks the ledger-side conditions
+        # against it rather than defining a second, weaker one.
+        "verdict": verdict,
+        "parity": parity,
+        # Which model-visible environment produced these bytes (D2). A trace
+        # without the current stamp is never resumed into or pooled with one that
+        # has it.
+        contract.STAMP_FIELD: contract.environment_contract_sha256(),
+        "tool_schema_sha256": (
+            None if not family
+            else provenance.observation_digest(tool_schema_bytes(family))),
         "prompt": prompt_meta, "decode": decode,
         # FROZEN SEAM (S19): run_meta is copied VERBATIM into every trace's
         # `provenance`, so the hardware/engine fingerprint is owned here in the
@@ -368,15 +328,17 @@ def _trace_row(spec: dict, *, arm: str, condition: str, control: str, budgets: d
                            secret_sha256=provenance.observation_digest(secret.hex()),
                            spec_sha256=rng.digest(spec)),
     }
-    rep = provenance.certify_episode(trace, secret)
+    rep = provenance.certify_episode(trace, secret, verdict)
     score = {"raw_success": rep["raw_success"],
              "certified_success": rep["certified_success"],
+             "verdict_agrees": rep["verdict_agrees"],
              "runaway": rep["runaway"]["runaway"],
              "hallucinated": rep["hallucination"]["hallucinated"]}
     if condition in ("faulted", "stress"):
-        score["recovery"] = provenance.certify_recovery(trace, secret, rep)
+        score["recovery"] = provenance.certify_recovery(trace, secret, rep, verdict)
     if trace["all_tools_required"]:
-        score["orchestration"] = provenance.certify_orchestration(trace, secret, rep)
+        score["orchestration"] = provenance.certify_orchestration(
+            trace, secret, rep, verdict=verdict)
     trace["score"] = score
     return trace
 
@@ -518,15 +480,13 @@ def git_sha() -> str | None:
 
 
 def load_or_create_secret(path: pathlib.Path) -> bytes:
-    """Run secret for receipts/tokens. Lives OUTSIDE the committed tree (out/)."""
-    if path.exists():
-        return bytes.fromhex(path.read_text().strip())
-    import os
+    """The run secret, now owned by `suite.contract` and shared by every consumer.
 
-    secret = os.urandom(32)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(secret.hex() + "\n", encoding="utf-8")
-    return secret
+    It used to live here, which meant only the evaluator had one -- and therefore
+    only the evaluator could mint recovery tokens at all. The prompt tournament,
+    rejection sampling and view construction now read the same file.
+    """
+    return contract.load_or_create_secret(path)
 
 
 def run_shard(args, chat_fn=None, cfg: dict | None = None) -> dict:

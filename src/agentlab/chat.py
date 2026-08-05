@@ -95,6 +95,34 @@ def parse_tool_calls(text: str) -> list[dict]:
     return calls
 
 
+_TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>.*?(?:</tool_call>|$)", re.DOTALL)
+
+
+def assistant_tool_message(text: str, calls: list[dict]) -> dict:
+    """The ONE assistant-turn shape for a decision that called tools.
+
+    `{"role": "assistant", "tool_calls": [{"type": "function", "function":
+    {"name", "arguments"}}], "content": prose}` -- prose only when there is any,
+    because an empty `content` renders differently from an absent one.
+
+    Both the training rollout engine and the claim-bearing evaluator build the
+    assistant turn here. The evaluator used to append the raw content and DROP the
+    tool-call object, so the transcript the model conditioned on during evaluation
+    contained an empty assistant message where the trained-on transcript contained
+    a structured call. That is invisible to observation digests and visible in the
+    rendered token ids, which is why the parity test compares those.
+    """
+    prose = _TOOL_CALL_BLOCK_RE.sub("", text or "").strip()
+    msg = {"role": "assistant",
+           "tool_calls": [{"type": "function",
+                           "function": {"name": c["name"],
+                                        "arguments": c.get("arguments", {})}}
+                          for c in calls]}
+    if prose:
+        msg["content"] = prose
+    return msg
+
+
 def boxed_answer(text: str) -> str | None:
     """Return the last \\boxed{...} payload, normalised for numeric comparison."""
     hits = _BOXED_RE.findall(text)

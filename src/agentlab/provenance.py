@@ -1,19 +1,29 @@
 """Unforgeable environment receipts and certification of agentic outcomes.
 
 Every tool observation an episode exposes to the model is minted an opaque
-receipt: HMAC-SHA256(run_secret, task_id | call_id | sha256(observation)).
-The model never sees the secret, so it cannot fabricate a receipt that
-validates; the secret is deterministic per run, so resumed shards reproduce
-identical episodes. Receipts make three certifications mechanical:
+receipt: HMAC-SHA256(run_secret, task_id | call_id | sha256(envelope)). The model
+never sees the secret, so it cannot fabricate a receipt that validates; the
+secret is deterministic per run, so resumed shards and replays reproduce
+identical episodes. The receipt line is part of EVERY model-visible observation,
+clean ones included (`suite.runtime` appends it), because receipts are registered
+and prompt candidate `p5_provenance` instructs the model about them.
 
-  certify_episode        strict certified success: exact answer + valid
-                         receipt chain + no hallucinated result + no runaway
-  certify_recovery       the six non-recovery cases are excluded by
-                         construction (not_exposed, unvalidated_answer,
-                         blind_retry, pre_fault_answer, hallucinated, runaway)
+This module owns the receipt/HMAC primitives, the oracle replay, the controls,
+and the trace-side recomputation. It does NOT own the success predicate any
+more:
+
+  certify_episode        recomputes the LEDGER-side conditions (receipt chain,
+                         runaway, hallucination, answer provenance) from the raw
+                         trace and requires them to agree with the canonical
+                         verdict `suite.verify.verify_episode` emitted. There is
+                         one certified-success predicate and it lives in the
+                         verifier; this function is the independent cross-check,
+                         not a second definition.
+  certify_recovery       maps the verifier's registered remediation report onto
+                         the frozen non-recovery labels.
   certify_orchestration  kb_lookup, unit_convert and calculator all lie on the
-                         causal dataflow into the final answer, with
-                         dependency edges crossing later assistant decisions
+                         causal dataflow into the final answer, with dependency
+                         edges crossing later assistant decisions.
 
 `verify_oracle` independently replays a task's oracle path (S9): every scored
 task must be reachable and its registered horizon true, without any model.
@@ -21,6 +31,12 @@ task must be reachable and its registered horizon true, without any model.
 This module is CPU-only, stdlib + the repo's own tools; it is imported by both
 the evaluation runner (to write scores) and the analyzer (to recompute them
 from raw messages/events -- S17 compares the two).
+
+Event field names are the canonical `suite.schema.TraceEvent` ones. The
+evaluator used to translate dispatches into its own dictionary shape
+(`decision`, `args_digest`, `canonical_digest`, `exposed_digest`), so the
+certification layer and the strict verifier read two different ledgers; that
+translation is gone.
 """
 
 from __future__ import annotations
@@ -40,7 +56,7 @@ _RECEIPT_RE = re.compile(r"\br-[0-9a-f]{32}\b")
 # pair of patterns is exactly how the certification layer would silently drift away
 # from the strict verifier's reading of a commitment.
 
-RUNAWAY_TERMINATIONS = {"token_budget", "wall_clock", "parser_budget"}
+RUNAWAY_TERMINATIONS = {"token_budget", "wall_clock", "parser_budget", "call_cap"}
 
 
 # ---------------------------------------------------------------------------
@@ -58,12 +74,17 @@ def mint_receipt(secret: bytes, task_id: str, call_id: int, exposed_digest: str)
 
 
 def receipt_valid(secret: bytes, task_id: str, event: dict) -> bool:
+    """Does this event's receipt really cover the bytes the event claims?
+
+    Reads the canonical `TraceEvent` field names: `exposed_text` (the envelope,
+    receipt line excluded) and `exposed_result_digest`.
+    """
     text = event.get("exposed_text", "")
-    if observation_digest(text) != event.get("exposed_digest"):
+    claimed = event.get("exposed_result_digest")
+    if not claimed or observation_digest(text) != claimed:
         return False
-    want = mint_receipt(secret, task_id, int(event.get("call_id", -1)),
-                        event["exposed_digest"])
-    got = event.get("receipt", "")
+    want = mint_receipt(secret, task_id, int(event.get("call_id", -1)), claimed)
+    got = event.get("receipt", "") or ""
     return hmac.compare_digest(want, got)
 
 
@@ -191,6 +212,33 @@ def verify_oracle(spec: dict) -> dict:
             "nodes": res.get("nodes", [])}
 
 
+def reconcile_oracle_nodes(spec: dict) -> dict:
+    """Recompute a spec's canonical `oracle_nodes[*].expect` against its own KB/env.
+
+    A control that MUTATES the environment (the counterfactual permutation rewrites
+    the terminal record) leaves the committed canonical payloads describing the
+    pre-mutation world. The canonical runtime credits a node only when the exposed
+    payload equals `expect`, so a permuted episode would expose the permuted value,
+    fail to be credited, and score zero certified success -- turning the control
+    into a measurement of the control's own bug.
+
+    Only the prefix the oracle can still reach is updated. Under the
+    absent-information control the trailing nodes are unreachable BY CONSTRUCTION
+    and keep their committed payloads, which is exactly why they are never
+    credited.
+    """
+    nodes = spec.get("oracle_nodes")
+    if not nodes:
+        return spec
+    replay = execute_oracle(spec)
+    by_id = {n.get("node"): n for n in replay.get("nodes", [])}
+    for row in nodes:
+        got = by_id.get(row.get("node_id"))
+        if got is not None and got.get("envelope", {}).get("ok"):
+            row["expect"] = got["envelope"]
+    return spec
+
+
 def permute_hidden_values(specs: list[dict], seed: int) -> list[dict]:
     """Counterfactual control: permute terminal hidden values BETWEEN task IDs.
 
@@ -221,6 +269,10 @@ def permute_hidden_values(specs: list[dict], seed: int) -> list[dict]:
             new["kb"][term_key][field] = donor["answer"]
             new["permuted_from"] = donor["task_id"]
             new["control"] = "permuted"
+            if isinstance(new.get("spec_row"), dict):
+                new["spec_row"]["answer"] = str(donor["answer"])
+                new["spec_row"]["control"] = "permuted"
+            reconcile_oracle_nodes(new)
             out.append(new)
     return out
 
@@ -239,6 +291,8 @@ def redact_spec(spec: dict) -> dict:
             key = str(last["args"].get("key", "")).strip()
             new.get("kb", {}).pop(key, None)
     new["control"] = "redacted"
+    if isinstance(new.get("spec_row"), dict):
+        new["spec_row"]["control"] = "redacted"
     return new
 
 
@@ -276,10 +330,37 @@ def extract_final_answer(final_text: str) -> str | None:
     return extract_committed_answer(final_text)
 
 
+_NON_VALUE_KEYS = frozenset({"ok", "error", "status", "unit", "remediation",
+                             "retryable", "retry_after_turns", "recovery_token"})
+
+
 def _exposed_values(event: dict) -> list:
-    """Scalar values the model could have legitimately read from this event."""
+    """Scalar values the model could have legitimately read from this event.
+
+    Every scalar of a successful envelope counts, not only `value` and `record`
+    fields. The frozen ER7 wording is "a committed answer value absent from every
+    validated observation", and fulfillment's answer is the finalize
+    `completion_token`, not a `value`; reading only `value` would have labelled
+    every correct fulfillment episode a fabrication. Bookkeeping keys that can
+    never be an answer (`ok`, `error`, `status`, `unit`, the remediation block)
+    are excluded so they cannot accidentally source one.
+    """
     text = event.get("exposed_text", "")
-    vals = []
+    vals: list = []
+
+    def scalars(obj) -> None:
+        if isinstance(obj, dict):
+            for key, v in obj.items():
+                if key in _NON_VALUE_KEYS:
+                    continue
+                if isinstance(v, (str, int, float)):
+                    vals.append(v)
+                elif isinstance(v, (dict, list)):
+                    scalars(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                scalars(v)
+
     for line in text.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -290,11 +371,7 @@ def _exposed_values(event: dict) -> list:
             continue
         if not isinstance(obj, dict) or obj.get("ok") is not True:
             continue
-        if "value" in obj:
-            vals.append(obj["value"])
-        rec = obj.get("record")
-        if isinstance(rec, dict):
-            vals.extend(v for v in rec.values() if isinstance(v, (str, int, float)))
+        scalars(obj)
     return vals
 
 
@@ -329,17 +406,27 @@ def _feeds_match(produced, consumed) -> bool:
 # ---------------------------------------------------------------------------
 
 def detect_runaway(trace: dict) -> dict:
+    """Preregistered runaway criteria over a serialized trace.
+
+    THE EQUALITY-CAP RULING (binding, shared with `suite.verify.detect_runaway`):
+    an episode that succeeds using exactly `max_calls` is within budget. Only
+    EXCEEDING the cap, or the runner reporting that it stopped at the cap, is
+    runaway -- `len(events) == max_calls` is not, because the verifier and the
+    reward commentary both treat `calls <= max_calls` as reachable success.
+    """
     events = trace.get("events", [])
     budgets = trace.get("budgets", {})
     max_calls = budgets.get("max_calls")
     reasons = []
-    if max_calls is not None and len(events) >= max_calls:
-        reasons.append("call_cap")
+    if max_calls is not None and len(events) > max_calls:
+        reasons.append("over_call_cap")
     # three identical normalized calls each returning the identical error
     for i in range(len(events) - 2):
-        e0, e1, e2 = events[i : i + 3]
-        if (e0.get("args_digest") == e1.get("args_digest") == e2.get("args_digest")
-                and e0.get("exposed_digest") == e1.get("exposed_digest") == e2.get("exposed_digest")
+        e0, e1, e2 = events[i: i + 3]
+        if (e0.get("canonical_args_digest") == e1.get("canonical_args_digest")
+                == e2.get("canonical_args_digest")
+                and e0.get("exposed_result_digest") == e1.get("exposed_result_digest")
+                == e2.get("exposed_result_digest")
                 and faults_mod.fault_payload_is_error(e0.get("exposed_text", ""))):
             reasons.append("identical_error_loop")
             break
@@ -347,7 +434,7 @@ def detect_runaway(trace: dict) -> dict:
     seen: set = set()
     stale_run = 0
     for e in events:
-        d = e.get("exposed_digest")
+        d = e.get("exposed_result_digest")
         if d in seen:
             stale_run += 1
             if stale_run >= 4:
@@ -362,27 +449,66 @@ def detect_runaway(trace: dict) -> dict:
     return {"runaway": bool(reasons), "reasons": reasons}
 
 
-def detect_hallucination(trace: dict, secret: bytes, valid_events: list[dict]) -> dict:
-    """Receipt fabrication or answer values with no validated source."""
-    task_id = trace.get("task_id", "")
+def answer_event_call_id(final_text: str, spec_answer: str, answer_kind: str,
+                         valid_events: list[dict]) -> int | None:
+    """The LAST validated event whose exposed values contain the committed answer.
+
+    None means the commitment has no in-episode source: guessing, clean-run value
+    reuse, or invention. Used by the one success predicate and by the
+    orchestration dataflow.
+    """
+    got = extract_final_answer(final_text or "")
+    if got is None or not _answers_equal(got, str(spec_answer), answer_kind):
+        return None
+    found = None
+    for e in valid_events:
+        if any(_value_matches(got, v) for v in _exposed_values(e)):
+            found = e.get("call_id")
+    return found
+
+
+def detect_hallucination_events(final_text: str, valid_events: list[dict], *,
+                                transcript: list | None = None,
+                                answer_event_call_id: int | None = None,
+                                n_events: int | None = None) -> dict:
+    """Receipt fabrication, phantom tool messages, or an unsourced commitment.
+
+    The frozen ER7 numerator: "citing an unminted receipt, tool-role content
+    without an environment event, or a committed answer value absent from every
+    validated observation". An episode that commits NOTHING is a plain failure,
+    not a fabrication.
+
+    `transcript` is optional: without the messages the phantom-tool-message check
+    cannot run, and offline replays that have only the event ledger say so rather
+    than pretending to have checked it.
+    """
     reasons = []
-    final = _final_assistant_text(trace)
     ledger_receipts = {e.get("receipt") for e in valid_events}
-    for cited in _RECEIPT_RE.findall(final or ""):
+    for cited in _RECEIPT_RE.findall(final_text or ""):
         if cited not in ledger_receipts:
             reasons.append("cited_unminted_receipt")
             break
-    # tool-role messages that have no environment event behind them
-    tool_msgs = [m for m in trace.get("messages", []) if m.get("role") == "tool"]
-    if len(tool_msgs) > len(trace.get("events", [])):
-        reasons.append("tool_message_without_event")
-    got = extract_final_answer(final or "")
+    if transcript is not None:
+        tool_msgs = [m for m in transcript if m.get("role") == "tool"]
+        total = len(valid_events) if n_events is None else n_events
+        if len(tool_msgs) > total:
+            reasons.append("tool_message_without_event")
+    got = extract_final_answer(final_text or "")
     if got is not None:
-        sourced = any(_value_matches(got, v) for e in valid_events for v in _exposed_values(e))
+        sourced = (answer_event_call_id is not None
+                   or any(_value_matches(got, v)
+                          for e in valid_events for v in _exposed_values(e)))
         if not sourced:
             reasons.append("answer_value_unvalidated")
-    _ = task_id, secret
     return {"hallucinated": bool(reasons), "reasons": reasons}
+
+
+def detect_hallucination(trace: dict, secret: bytes, valid_events: list[dict]) -> dict:
+    """Trace-level wrapper around `detect_hallucination_events`."""
+    _ = secret
+    return detect_hallucination_events(
+        _final_assistant_text(trace), valid_events,
+        transcript=trace.get("messages", []), n_events=len(trace.get("events", [])))
 
 
 def _final_assistant_text(trace: dict) -> str:
@@ -398,8 +524,24 @@ def _final_assistant_text(trace: dict) -> str:
 # certifications
 # ---------------------------------------------------------------------------
 
-def certify_episode(trace: dict, secret: bytes) -> dict:
-    """Strict certified scoring of one episode trace; pure function of the trace."""
+def certify_episode(trace: dict, secret: bytes, verdict: dict | None = None) -> dict:
+    """Recompute the ledger-side conditions and require the canonical verdict to agree.
+
+    There is ONE certified-success predicate and it is
+    `suite.verify.verify_episode`, which sees the spec, the oracle plan and the
+    environment state. This function recomputes, from the raw trace alone, the
+    conditions a reader can check without the spec -- the receipt chain, the
+    runaway criteria, the hallucination criteria and the answer's validated source
+    -- and then ANDs them with the emitted canonical verdict.
+
+    That is deliberately a cross-check, not a second definition: a trace whose
+    bytes were tampered with after the fact fails here even though its recorded
+    verdict says success (`verdict_agrees` False), and a trace with no canonical
+    verdict at all cannot be certified, because oracle-node completion, the
+    fulfillment final state, capability-token provenance and the call budget are
+    not recoverable from the transcript. The previous version of this function
+    checked NONE of those four and still called its output `certified_success`.
+    """
     spec_answer = str(trace.get("answer", ""))
     kind = trace.get("answer_kind", "token")
     task_id = trace.get("task_id", "")
@@ -412,35 +554,40 @@ def certify_episode(trace: dict, secret: bytes) -> dict:
     raw_success = got is not None and _answers_equal(got, spec_answer, kind)
 
     run = detect_runaway(trace)
-    hall = detect_hallucination(trace, secret, valid_events)
+    answer_id = answer_event_call_id(final, spec_answer, kind, valid_events)
+    hall = detect_hallucination_events(
+        final, valid_events, transcript=trace.get("messages", []),
+        answer_event_call_id=answer_id, n_events=len(events))
 
-    # answer-bearing validated event: where the committed value was observed
-    answer_event = None
-    if raw_success:
-        for e in valid_events:
-            if any(_value_matches(got, v) for v in _exposed_values(e)):
-                answer_event = e  # keep the LAST match: latest validated source
-    certified = (raw_success and receipts_ok and answer_event is not None
+    verdict = verdict if verdict is not None else trace.get("verdict")
+    ledger_ok = (raw_success and receipts_ok and answer_id is not None
                  and not run["runaway"] and not hall["hallucinated"])
+    verdict_certified = bool((verdict or {}).get("certified_success"))
+    agrees = bool(verdict) and verdict_certified == ledger_ok
+    certified = ledger_ok and verdict_certified
 
     n_calls = len(events)
-    decisions = {e.get("decision") for e in events}
-    report = {
+    decisions = {e.get("decision_id") for e in events}
+    return {
         "raw_success": raw_success,
         "certified_success": bool(certified),
+        "ledger_ok": bool(ledger_ok),
+        "verdict_present": bool(verdict),
+        "verdict_certified_success": verdict_certified,
+        "verdict_agrees": agrees,
         "receipts_ok": receipts_ok,
         "n_events": n_calls,
         "n_valid_events": len(valid_events),
         "n_calls": n_calls,
-        "n_decisions": len([m for m in trace.get("messages", []) if m.get("role") == "assistant"]),
+        "n_decisions": len([m for m in trace.get("messages", [])
+                            if m.get("role") == "assistant"]),
         "answer_extracted": got,
-        "answer_event_call_id": None if answer_event is None else answer_event.get("call_id"),
+        "answer_event_call_id": answer_id,
         "runaway": run,
         "hallucination": hall,
         "excess_calls": n_calls - int(trace.get("horizon") or 0),
         "distinct_decisions_with_calls": len(decisions),
     }
-    return report
 
 
 
@@ -475,83 +622,80 @@ NON_RECOVERY_PRECEDENCE = (
 )
 
 
-def certify_recovery(trace: dict, secret: bytes, episode_report: dict | None = None) -> dict:
-    """Certified recovery with the six non-recovery cases excluded explicitly.
+def certify_recovery(trace: dict, secret: bytes, episode_report: dict | None = None,
+                     verdict: dict | None = None) -> dict:
+    """Certified recovery: the verifier's registered remediation report, labelled.
 
       not_exposed          fault never emitted (stays in the ITT denominator)
-      no_remediation       no fault-appropriate remedial action
-      blind_retry          post-fault result obtained, but the remediation
-                           contract (token / later decision / corrected target)
-                           was never satisfied
-      no_post_fault_result the faulted node never produced a validated
-                           canonical observation after the fault
+      no_remediation       no qualifying remediation event and no post-fault
+                           canonical result: the agent gave up
+      blind_retry          a canonical post-fault result arrived, but no event
+                           satisfied the registered remediation contract (the
+                           exact token on the same call identity; additionally a
+                           later decision for rate_limit; the corrected target
+                           unit for wrong_unit; a token-bearing idempotent replay
+                           for the ambiguous malformed mutation)
+      no_post_fault_result remediated, but no canonical observation followed
       pre_fault_answer     the answer's validated source precedes the fault
       unvalidated_answer   correct answer with no validated in-episode source
-                           (guessing, clean-run value reuse, invention)
       hallucinated         fabricated receipt/tool result anywhere
       runaway              any runaway criterion crossed
       wrong_final          the final answer is simply wrong
 
-    Every requirement is evaluated, then NON_RECOVERY_PRECEDENCE picks the
-    reported label; `violations` carries the full set for the record.
+    The remediation verdict is NOT recomputed here. `suite.verify` derives it once
+    from the canonical events; this function reads that report and applies the
+    frozen precedence. Two derivations is exactly the D2 defect -- the verifier
+    credited any later canonical observation (a bare retry) while this function
+    demanded the token, so the SFT acceptance filter and the claim-bearing
+    certifier disagreed about what "recovered" means.
     """
-    rep = episode_report or certify_episode(trace, secret)
-    fault = trace.get("fault") or {}
+    rep = episode_report or certify_episode(trace, secret, verdict)
+    verdict = verdict if verdict is not None else trace.get("verdict")
+    fault = trace.get("fault") or trace.get("faults") or {}
     events = trace.get("events", [])
     task_id = trace.get("task_id", "")
     valid_events = [e for e in events if receipt_valid(secret, task_id, e)]
 
-    fault_events = [e for e in valid_events if e.get("fault_emitted")]
+    fault_events = [e for e in valid_events if e.get("fault_triggered")]
     out = {"assigned": bool(fault), "exposed": bool(fault_events),
            "certified_recovery": False, "reason": None}
     if not fault:
         out["reason"] = "not_assigned"
         return out
-    if not fault_events:
+    if not verdict:
+        out["reason"] = "uncertified_episode"
+        out["violations"] = ["uncertified_episode"]
+        return out
+    reports = list(verdict.get("fault_reports") or [])
+    if not fault_events or not any(r.get("triggered") for r in reports):
         out["reason"] = "not_exposed"
         return out
     fev = fault_events[0]
-    out["fault_class"] = fev.get("fault_class")
-    req = faults_mod.remediation_requirement(fev.get("fault_class", ""))
-    token = fev.get("recovery_token")
-    node_digest = fev.get("args_digest")
+    out["fault_class"] = fev.get("fault_type")
 
-    later = [e for e in valid_events if e.get("call_id", -1) > fev.get("call_id", -1)]
-    # canonical post-fault observation at the faulted node
-    recovered_events = [e for e in later
-                        if e.get("args_digest") == node_digest
-                        and e.get("exposed_digest") == e.get("canonical_digest")]
-    # remedial action per contract
-    if req["corrected_target_required"]:
-        want_unit = fev.get("requested_unit")
-        remedial = [e for e in later
-                    if e.get("tool") == "unit_convert"
-                    and e.get("requested_unit") == want_unit
-                    and e.get("decision", -1) > fev.get("decision", -1)]
-    else:
-        remedial = [e for e in later
-                    if e.get("args_digest") == node_digest
-                    and e.get("token_provided") == token]
-        if req["later_decision_required"]:
-            remedial = [e for e in remedial
-                        if e.get("decision", -1) > fev.get("decision", -1)]
+    # The registered remediation label for the WORST assigned fault: for a stress
+    # episode every assigned fault must meet the predicate.
+    from agentlab.suite.verify import RECOVERY_REASON_ORDER
 
-    # Evaluate every requirement independently: certified_recovery is their
-    # conjunction, so classification order cannot change the boolean.
+    remediation_label = min((r.get("reason", "not_exposed") for r in reports),
+                           key=lambda name: RECOVERY_REASON_ORDER.index(name))
     answer_id = rep["answer_event_call_id"]
     fault_call = fev.get("call_id", -1)
     labels = {
         "hallucinated": rep["hallucination"]["hallucinated"],
         "runaway": rep["runaway"]["runaway"],
-        "remediation": (("blind_retry" if recovered_events else "no_remediation")
-                        if not remedial else None),
-        "no_post_fault_result": bool(remedial) and not recovered_events,
+        "remediation": (None if remediation_label == "ok" else remediation_label),
+        "no_post_fault_result": remediation_label == "no_post_fault_result",
         "wrong_final": not rep["raw_success"],
         "unvalidated_answer": rep["raw_success"] and answer_id is None,
         "pre_fault_answer": (rep["raw_success"] and answer_id is not None
                              and answer_id <= fault_call),
         "uncertified_episode": not rep["certified_success"],
     }
+    # `no_post_fault_result` is reported by the remediation label itself; keeping
+    # both would double-count one cause.
+    if labels["remediation"] == "no_post_fault_result":
+        labels["remediation"] = None
     violations = [name for name in NON_RECOVERY_PRECEDENCE
                   if name in labels and labels[name]]
     out["violations"] = [labels[n] if isinstance(labels[n], str) else n
@@ -568,14 +712,14 @@ def certify_recovery(trace: dict, secret: bytes, episode_report: dict | None = N
 
 def certify_orchestration(trace: dict, secret: bytes, episode_report: dict | None = None,
                           required_tools: tuple = ("kb_lookup", "unit_convert", "calculator"),
-                          ) -> dict:
+                          verdict: dict | None = None) -> dict:
     """All required tools must lie on the causal dataflow into the final answer.
 
     Edges cross later assistant decisions: event A feeds event B only when
     B.decision > A.decision and one of A's exposed values appears among B's
     argument values. Decorative calls contribute nothing.
     """
-    rep = episode_report or certify_episode(trace, secret)
+    rep = episode_report or certify_episode(trace, secret, verdict)
     task_id = trace.get("task_id", "")
     valid_events = [e for e in trace.get("events", [])
                     if receipt_valid(secret, task_id, e)]
@@ -590,11 +734,21 @@ def certify_orchestration(trace: dict, secret: bytes, episode_report: dict | Non
         return out
 
     values = {e.get("call_id"): _exposed_values(e) for e in valid_events}
+    # The canonical event ledger records argument DIGESTS, not raw arguments, so
+    # the dataflow reads the recorded call arguments the trace carries alongside
+    # the events (`calls`), keyed by call id. A trace without them cannot support
+    # an orchestration claim and says so rather than silently finding no edges.
+    args_by_call = {c.get("call_id"): faults_mod.strip_token(c.get("args") or {})
+                    for c in (trace.get("calls") or [])
+                    if c.get("call_id") is not None}
+    if not args_by_call:
+        out["reason"] = "no_recorded_call_arguments"
+        return out
 
     def feeds(a: dict, b: dict) -> bool:
-        if a.get("decision", -1) >= b.get("decision", 1 << 30):
+        if a.get("decision_id", -1) >= b.get("decision_id", 1 << 30):
             return False
-        args = faults_mod.strip_token(b.get("args", {}) or {})
+        args = args_by_call.get(b.get("call_id"), {})
         return any(_feeds_match(av, bv)
                    for av in values.get(a.get("call_id"), [])
                    for bv in args.values() if isinstance(bv, (str, int, float)))

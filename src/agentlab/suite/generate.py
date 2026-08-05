@@ -560,9 +560,11 @@ def observation_frontier(bundle: TaskBundle) -> dict:
 
     -> {"exposed": [payload strings], "broke_at": index|None, "reached": n}
     """
+    from .contract import load_or_create_secret
     from .runtime import EpisodeRuntime
 
-    rt = EpisodeRuntime(bundle.spec, bundle.kb, bundle.nodes)
+    rt = EpisodeRuntime(bundle.spec, bundle.kb, bundle.nodes,
+                        secret=load_or_create_secret())
     exposed: list[str] = []
     broke_at = None
     for i, node in enumerate(bundle.nodes):
@@ -924,6 +926,15 @@ def certification_spec(bundle: TaskBundle) -> dict:
     replays every adapted spec through `provenance.execute_oracle` and requires
     the node-by-node envelopes to equal the canonical `OracleNode.expect`
     payloads and the derived answer to equal the committed answer.
+
+    THE CANONICAL RUNTIME INPUTS ARE EXPORTED, not reconstructed. `spec_row` is
+    the serialized `TaskSpec` and `oracle_nodes` is every `OracleNode.to_row()`,
+    including `expect` and `match`. The evaluator builds a real
+    `suite.runtime.EpisodeRuntime` from them: the flat `oracle` list below carries
+    neither the canonical payloads nor the semantic matchers, so an evaluator that
+    only had it would have to invent both -- which is how the tree came to hold two
+    environments. `environment_contract_sha256` stamps which model-visible
+    environment these bytes describe, so a resume can never mix contracts.
     """
     spec, nodes = bundle.spec, bundle.nodes
     mod = family_module(spec.family)
@@ -955,6 +966,9 @@ def certification_spec(bundle: TaskBundle) -> dict:
         "env": spec.env,
         "oracle": [{"node": n.node_id, "tool": n.tool, "args": dict(n.args)}
                    for n in nodes],
+        # The canonical runtime inputs (see the docstring).
+        "spec_row": spec.to_row(),
+        "oracle_nodes": [n.to_row() for n in nodes],
         "answer": spec.answer, "answer_kind": spec.answer_kind,
         "answer_field": "code",
         # Redaction target: the last KB record on the oracle path. Removing it
@@ -990,7 +1004,9 @@ def certification_spec(bundle: TaskBundle) -> dict:
         if spec.control == "permuted":
             row["original_answer"] = meta.get("original_answer")
             row["permuted_from"] = meta.get("donor_task_id")
-    return row
+    from .contract import stamp
+
+    return stamp(row)
 
 
 def _generate_into(cfg: dict, out_dir: str) -> dict:

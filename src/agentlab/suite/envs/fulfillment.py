@@ -569,10 +569,16 @@ class FulfillmentEnv:
     def __init__(self) -> None:
         self.runtime = None
 
-    def reset(self, *, spec: dict, kb: dict, nodes: list, **_ignored):
+    def reset(self, *, spec: dict, kb: dict, nodes: list, secret: bytes | None = None,
+              **_ignored):
+        from ..contract import load_or_create_secret
         from ..runtime import EpisodeRuntime
         from ..schema import OracleNode, TaskSpec
 
+        # The run secret keys the recovery tokens and receipts the model sees, so
+        # a TRL-side reset takes it too; it defaults to the one run secret rather
+        # than to a per-environment value.
         self.runtime = EpisodeRuntime(
-            TaskSpec.from_row(spec), kb, [OracleNode.from_row(n) for n in nodes])
+            TaskSpec.from_row(spec), kb, [OracleNode.from_row(n) for n in nodes],
+            secret=secret if secret is not None else load_or_create_secret())
         return self.runtime

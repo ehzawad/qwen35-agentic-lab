@@ -398,7 +398,19 @@ class TaskSpec:
 
 @dataclasses.dataclass
 class TraceEvent:
-    """Environment-side record of one dispatch. The model never sees this."""
+    """Environment-side record of one dispatch. The model never sees this.
+
+    ONE EVENT FORMAT. This is the superset both the training path and the
+    claim-bearing evaluator now serialize: `suite.evaluate` used to translate
+    dispatches into an unrelated dictionary (`decision`, `args_digest`,
+    `canonical_digest`, `exposed_digest`) while the training path wrote these
+    fields, so the certification layer and the strict verifier were reading two
+    different ledgers. Every consumer reads the names below.
+
+    Model-visible bytes are `exposed_text` + "\\n" + "receipt: " + `receipt`; the
+    envelope in `exposed_text` carries no event or request id, and `event_id`
+    lives here in the hidden ledger only.
+    """
 
     decision_id: int
     call_id: int
@@ -423,6 +435,15 @@ class TraceEvent:
     aux: dict                      # e.g. {"resource": ..., "line": ...} for warehouse calls
     state_before: str
     state_after: str
+    # -- the unified fault/receipt contract (appended with defaults so any
+    #    existing positional construction still works) ------------------------
+    exposed_text: str = ""         # the exact envelope bytes, receipt excluded
+    receipt: str = ""              # HMAC(run_secret, task|call|sha256(envelope))
+    model_visible_digest: str = "" # digest of envelope + receipt line
+    canonical_semantic_digest: str | None = None  # true payload for THESE args
+    token_provided: str | None = None   # recovery_token the model echoed, if any
+    recovery_token: str | None = None   # token THIS event emitted, if any
+    requested_unit: str | None = None   # unit_convert target the model asked for
 
     def to_row(self) -> dict:
         return dataclasses.asdict(self)
