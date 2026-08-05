@@ -4,7 +4,8 @@
 The validator FAILS (exit 1) on any of:
 
    1. non-byte-identical regeneration;
-   2. any key, terminal token, task ID, or template crossing splits;
+   2. any key, terminal token, task ID, template, or whole-task CONTENT HASH
+      crossing splits (and no duplicate task content inside a split group);
    3. incorrect declared horizon;
    4. an oracle trajectory that does not execute successfully;
    5. a fault that fires more than once;
@@ -148,11 +149,22 @@ def check_oracle_execution(splits_data) -> list[str]:
     problems: list[str] = []
 
     def run_arm(bundle, spec, label: str) -> None:
-        rt, verdict = run_oracle(spec, bundle.kb, bundle.nodes)
+        # A malformed spec used to raise out of the whole validator, so ONE bad
+        # spec aborted every remaining check and you learned about one defect
+        # instead of all of them. An exception is a reported problem.
+        try:
+            rt, verdict = run_oracle(spec, bundle.kb, bundle.nodes)
+        except Exception as exc:  # noqa: BLE001 -- any failure is a spec defect
+            problems.append(f"{spec.task_id}[{label}]: oracle replay raised "
+                            f"{type(exc).__name__}: {exc}")
+            return
         if not verdict.strict_success:
             problems.append(f"{spec.task_id}[{label}]: oracle trajectory failed "
                             f"strict verification: {verdict.reasons[:2]}")
-            return
+            # deliberately NOT returning: checks 5-7 read the event log and the
+            # fire counts, which exist either way. Returning here made check 4
+            # SHADOW checks 5/6/7 -- a fault that fires twice reported only as
+            # "trajectory failed", so the diagnosis pointed at the wrong defect.
         # 5: every scheduled fault fired exactly once
         for key, count in verdict.fault_fire_counts.items():
             if count != 1:
@@ -194,6 +206,56 @@ def check_oracle_execution(splits_data) -> list[str]:
                     run_arm(b, b.spec.without_faults(), "clean")
             else:
                 run_arm(b, b.spec, "clean")
+    return problems
+
+
+def check_content_hashes(splits_data) -> list[str]:
+    """Check 2b: no episode CONTENT crosses split groups, and none repeats.
+
+    The id/key/template/token checks cover every label attached to a task; this
+    covers the task itself. The hash is over exactly what determines the answer --
+    the rendered prompt, the KB records, the oracle's tools and resolved args, and
+    the committed answer -- so two tasks hashing alike ARE the same task whatever
+    their ids say. A crossing would be memorisable held-out content; a repeat
+    inside one group inflates that group's denominator with a duplicate.
+    """
+    import hashlib
+    import json as _json
+
+    def content_hash(b) -> str:
+        payload = {
+            "prompt": b.spec.prompt,
+            "kb": {k: b.kb[k] for k in sorted(b.kb)},
+            "env": b.spec.env,
+            "oracle": [[n.tool, {k: n.args[k] for k in sorted(n.args)}]
+                       for n in b.nodes],
+            "answer": b.spec.answer,
+        }
+        return hashlib.sha256(
+            _json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                        ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    groups: dict[str, dict[str, str]] = {"train": {}, "dev": {}, "eval": {}}
+    problems = []
+    for split, bundles in splits_data.items():
+        group = ("train" if split in TRAIN_SPLITS
+                 else "dev" if split == "dev" else "eval")
+        for b in bundles:
+            h = content_hash(b)
+            prior = groups[group].get(h)
+            if prior is not None:
+                problems.append(f"{group}: duplicate task content "
+                                f"{b.spec.task_id} == {prior}")
+            else:
+                groups[group][h] = b.spec.task_id
+    names = sorted(groups)
+    for i, a in enumerate(names):
+        for c in names[i + 1:]:
+            inter = set(groups[a]) & set(groups[c])
+            if inter:
+                ex = sorted(groups[a][h] for h in inter)[:2]
+                problems.append(f"task content crosses {a}/{c}: {len(inter)} "
+                                f"(e.g. {ex})")
     return problems
 
 
@@ -270,6 +332,7 @@ def check_kb_miss_no_leak(splits_data) -> list[str]:
 CHECKS = (
     ("1 regeneration", "regen"),
     ("2+11 split isolation / eval leakage", "isolation"),
+    ("2b task-content hashes (no crossing, no duplicates)", "content"),
     ("3 declared horizons", "horizons"),
     ("4-7 oracle execution, single fire, malformed leak, idempotent replay",
      "oracle"),
@@ -304,6 +367,7 @@ def main() -> int:
     runners = {
         "regen": lambda: check_regeneration(cfg, data_dir),
         "isolation": lambda: check_isolation(splits_data),
+        "content": lambda: check_content_hashes(splits_data),
         "horizons": lambda: check_horizons(splits_data),
         "oracle": lambda: check_oracle_execution(splits_data),
         "missing_node": lambda: check_missing_node_rejected(splits_data),
