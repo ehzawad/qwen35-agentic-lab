@@ -15,19 +15,43 @@ performance, the shipped pipeline is the prompted base model.
 ## The one supported entry point
 
 ```bash
-make agentic     # the end-to-end pipeline (lands with the build phase)
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 EXPECT_GPU=A6000 make agentic
+make agentic-plan        # the same chain as a dry run: prints every command,
+                         # touches no GPU
 ```
 
-`make agentic` will run: generate locked scenarios → establish the best-prompt
-base control → sample verified trajectories → RS-SFT → conditional GRPO (only
-when pre-SFT rollout groups retain outcome variance) → paired multifaceted
-evaluation → select one winning configuration → serve smoke. Every stage gate
-is preregistered and committed before held-out results exist; a harness BUG
-vetoes any model-level verdict.
+`make agentic` runs twelve resumable stages:
+
+| stage | what it does | GPU |
+|---|---|---|
+| `suite` | generate the committed task suite, validate all eleven binding conditions, export the evaluation spec manifests | no |
+| `prompt` | the eight-candidate elicitation tournament, frozen by hash | yes |
+| `baselock` | lock the prompt winner; measure the base arms on **dev** | yes |
+| `distill` | rejection-sample verified trajectories from the base model | yes |
+| `views` | build the completion-only SFT views (loss on assistant turns only) | no |
+| `sft` | LoRA RS-SFT on the verified views | yes |
+| `probe` | does any within-group reward variance exist for GRPO to optimise? | yes |
+| `grpo` | **conditional** — runs only if the probe's preregistered gate passed | yes |
+| `lock` | lock one trained checkpoint, then unblind the held-out seed | no |
+| `eval` | paired held-out evaluation, all arms, identical specs and decoding | yes |
+| `verdict` | S8–S18 vetoes, then the preregistered gates, floors and winner | no |
+| `ship` | serve the configuration the verdict selected and smoke it | yes |
+
+Every stage decides from artifacts on disk whether it is already done, so a
+killed run resumes by re-invoking; GPU stages are loops of short sub-invocations
+against a measured GPU-hour ledger, never one long blocking call. The held-out
+split is not touched until the prompt winner and the checkpoint are locked and
+the seed is revealed — `scripts/agentic_locks.py` refuses the wrong order rather
+than trusting it. Every gate threshold was committed before held-out results
+existed, and a harness BUG vetoes every model-level gate, floor and claim.
+
+Select stages with `make agentic ARGS="--from sft"`, `ARGS="--only verdict"`, or
+`ARGS="--to probe"`; `make agentic-stages` lists them.
 
 Helper targets (`make help`) exist for tests and debugging — `make verify`
-(CPU test suite), `make smoke`, `make serve`, `make gpu` — but there is exactly
-one supported end-to-end workflow, and alternate pipelines are out of scope.
+(CPU test suite), `make suite`, `make validate-suite`, `make locks`,
+`make smoke`, `make serve`, `make gpu` — but there is exactly one supported
+end-to-end workflow, and alternate pipelines are out of scope.
 
 ## Task families and the tool cap
 

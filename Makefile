@@ -22,13 +22,19 @@ GRPO    := out/$(SLUG)-rsgrpo-lora
 MERGED  := out/$(SLUG)-merged
 
 .PHONY: help setup gpu smoke data inspect rs-sft grpo grpo-from-base \
-        suite validate-suite variance-report \
+        agentic agentic-plan agentic-stages locks \
+        suite validate-suite export-specs variance-report \
         distill \
         verify verify-v trace-eval trace-grpo trace-view \
         eval-base eval-rssft eval-grpo merge serve clean
 
 help:
 	@echo "Qwen3.5-4B agentic pipeline lab  (model=$(MODEL), GPU=A6000)"
+	@echo
+	@echo "  agentic       THE supported end-to-end pipeline (see README)"
+	@echo "  agentic-plan  the same chain as a dry run: prints every command,"
+	@echo "                touches no GPU"
+	@echo "  agentic-stages  list the stage names (for --from/--only/--to)"
 	@echo
 	@echo "  setup       build the venv (vllm 0.25.1 -> torch 2.11, trl 1.9.2)"
 	@echo "  gpu         show what is on the card right now"
@@ -115,15 +121,51 @@ clean:
 verify:
 	$(PY) -m pytest tests/ -q
 
+# ---- THE supported end-to-end pipeline ---------------------------------------
+# One entry point, eleven resumable stages, every gate preregistered:
+#   suite -> prompt -> baselock -> distill -> views -> sft -> probe
+#         -> grpo? -> lock -> eval -> verdict
+#
+# Pin the card for a real run; the plan target needs no GPU at all:
+#   CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 EXPECT_GPU=A6000 make agentic
+#
+# Pass stage selection through ARGS, e.g. `make agentic ARGS="--from sft"` or
+# `make agentic ARGS="--only verdict"`. Re-running after a kill resumes: each
+# stage decides from artifacts on disk whether it is already done, and every GPU
+# stage is a loop of short sub-invocations rather than one long blocking call.
+ARGS ?=
+
+agentic:
+	bash scripts/run_multifaceted_chain.sh $(ARGS)
+
+# Never touches a GPU: prints the exact command each pending stage would run.
+agentic-plan:
+	bash scripts/run_multifaceted_chain.sh --dry-run $(ARGS)
+
+agentic-stages:
+	@bash scripts/run_multifaceted_chain.sh --list
+
+# S16/S18 receipts: the prompt winner and the trained checkpoint are locked
+# BEFORE the held-out seed is revealed, and the reveal refuses to run first.
+locks:
+	@$(PY) scripts/agentic_locks.py status
+
 # ---- multifaceted suite v1 (CPU only, deterministic) -------------------------
 # The suite data is regenerated rather than committed: 11,320 specs are 44 MB and
 # generation is byte-identical in ~3 s, so the seeds in configs/suite_v1.toml are
-# the commitment and validate-suite proves the bytes follow from them.
+# the commitment and validate-suite proves the bytes follow from them. Only
+# manifest.json and SHA256SUMS are committed.
 suite:
 	$(PY) scripts/generate_suite.py
 
 validate-suite:
 	$(PY) scripts/validate_suite.py
+
+# Adapts the committed bundles into the certification-layer spec contract the
+# evaluation arms consume, plus the merged train/dev/eval group manifests the
+# split-leakage veto needs.
+export-specs:
+	$(PY) scripts/export_eval_specs.py
 
 variance-report:
 	$(PY) -m agentlab.variance report

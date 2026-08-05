@@ -15,3 +15,4 @@ wandb/
 data/suite/v1/specs/
 data/suite/v1/kb/
 data/suite/v1/oracles/
+data/suite/v1/certspecs/
