@@ -22,6 +22,7 @@ GRPO    := out/$(SLUG)-rsgrpo-lora
 MERGED  := out/$(SLUG)-merged
 
 .PHONY: help setup gpu smoke data inspect rs-sft grpo grpo-from-base \
+        suite validate-suite variance-report \
         distill \
         verify verify-v trace-eval trace-grpo trace-view \
         eval-base eval-rssft eval-grpo merge serve clean
@@ -113,6 +114,19 @@ clean:
 # model has loaded onto the card.
 verify:
 	$(PY) -m pytest tests/ -q
+
+# ---- multifaceted suite v1 (CPU only, deterministic) -------------------------
+# The suite data is regenerated rather than committed: 11,320 specs are 44 MB and
+# generation is byte-identical in ~3 s, so the seeds in configs/suite_v1.toml are
+# the commitment and validate-suite proves the bytes follow from them.
+suite:
+	$(PY) scripts/generate_suite.py
+
+validate-suite:
+	$(PY) scripts/validate_suite.py
+
+variance-report:
+	$(PY) -m agentlab.variance report
 
 verify-v:
 	$(PY) -m pytest tests/ -v
