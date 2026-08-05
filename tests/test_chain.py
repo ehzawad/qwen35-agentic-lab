@@ -11,6 +11,7 @@ Every test here is CPU-only and starts no server.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import pathlib
@@ -105,6 +106,23 @@ def test_the_heldout_split_refuses_to_run_before_the_locks_exist():
     assert "GPU ok" not in combined
 
 
+def test_a_gpu_stage_refuses_an_unregistered_index_before_touching_a_card():
+    """This run owns ONE card. A different index is a different study.
+
+    The refusal happens before the nvidia-smi query, so it cannot read -- let alone
+    disturb -- a card this run does not own.
+    """
+    r = subprocess.run(["bash", str(CHAIN), "--check-gpu"], cwd=REPO,
+                       env=dict(os.environ, CUDA_VISIBLE_DEVICES="7",
+                               CUDA_DEVICE_ORDER="PCI_BUS_ID"),
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode != 0
+    combined = r.stdout + r.stderr
+    assert "registered on index 0" in combined
+    assert "SEPARATE registered run" in combined
+    assert "GPU ok" not in combined
+
+
 def test_a_gpu_stage_refuses_without_an_explicit_pin():
     r = subprocess.run(["bash", str(CHAIN), "--check-gpu"], cwd=REPO,
                        env={k: v for k, v in os.environ.items()
@@ -149,6 +167,93 @@ def test_the_heldout_seed_derives_from_the_preregistration_commit():
     want = int.from_bytes(hashlib.sha256(
         (commit + ":agentic-heldout-v1").encode()).digest()[:8], "big")
     assert mod.heldout_seed(commit) == want
+
+
+def _locks_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("agentic_locks", LOCKS)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_anchor_prefers_a_committed_finalization_marker(tmp_path):
+    """The defect: the anchor was the OLDEST commit that added the prereg file.
+
+    That commit is fixed forever, so every later edit -- including the whole A5000
+    hardware pivot -- left the commitment untouched while the docs claimed the
+    opposite. The fix is a finalization marker whose ADDING commit is the anchor,
+    with no history rewritten.
+    """
+    mod = _locks_module()
+    repo = tmp_path / "repo"
+    (repo / "configs").mkdir(parents=True)
+    (repo / "configs" / "agentic_preregister.json").write_text('{"v": 1}')
+    (repo / "configs" / "multifaceted.yaml").write_text("version: 1\n")
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=repo, check=True,
+                       capture_output=True, text=True, timeout=30)
+
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    git("add", "-A")
+    git("commit", "-q", "-m", "add the preregistration")
+    first = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                           capture_output=True, text=True).stdout.strip()
+    # a later edit: under the old rule this changes nothing about the anchor
+    (repo / "configs" / "agentic_preregister.json").write_text('{"v": 2}')
+    git("add", "-A")
+    git("commit", "-q", "-m", "hardware pivot")
+
+    mod.ROOT = repo
+    mod.PREREG = repo / "configs" / "agentic_preregister.json"
+    mod.FINAL_MARKER = repo / "configs" / "preregistration_final.json"
+    mod.FROZEN_SET = ("configs/agentic_preregister.json", "configs/multifaceted.yaml")
+    mod.RESULTS = repo / "results"
+    mod.REVEAL = repo / "results" / "seed_reveal.json"
+
+    assert mod.preregistration_commit() == first          # the old, sticky anchor
+
+    mod.cmd_finalize_prereg(argparse.Namespace(force=False))
+    assert mod.FINAL_MARKER.exists()
+    # an UNCOMMITTED marker anchors nothing, and says so
+    state = mod.verify_finalization()
+    assert state["anchor"] == "uncommitted-marker"
+    assert mod.preregistration_commit() == first
+
+    git("add", "-A")
+    git("commit", "-q", "-m", "finalize the preregistration")
+    marker_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                                   capture_output=True, text=True).stdout.strip()
+    assert mod.verify_finalization()["anchor"] == "finalization-marker"
+    assert mod.preregistration_commit() == marker_commit != first
+    # and the seed follows the new anchor
+    assert mod.heldout_seed(marker_commit) != mod.heldout_seed(first)
+
+    # a forward edit AFTER finalization is now visible instead of ignored
+    (repo / "configs" / "agentic_preregister.json").write_text('{"v": 3}')
+    with pytest.raises(SystemExit, match="drifted"):
+        mod.verify_finalization()
+
+
+def test_finalize_refuses_after_the_seed_is_revealed(tmp_path):
+    mod = _locks_module()
+    mod.REVEAL = tmp_path / "seed_reveal.json"
+    mod.REVEAL.write_text("{}")
+    mod.ROOT = tmp_path
+    with pytest.raises(SystemExit, match="REFUSED"):
+        mod.cmd_finalize_prereg(argparse.Namespace(force=False))
+
+
+def test_reveal_can_be_required_to_anchor_on_the_finalized_prereg():
+    """The chain's lock stage passes --require-finalization."""
+    chain_text = CHAIN.read_text(encoding="utf-8")
+    assert "reveal --require-finalization" in chain_text
+    src = LOCKS.read_text(encoding="utf-8")
+    assert "require_finalization" in src
 
 
 def test_lock_prompt_refuses_a_prompt_outside_the_preregistered_eight(tmp_path):

@@ -27,12 +27,15 @@ and refuses the trajectory unless the digests, the progress map, the exposed
 bytes and the whole verdict row come back identical. A trajectory that merely
 "ran" is not accepted.
 
-Sharding contract: one `run` invocation processes exactly one shard and must
-finish well inside the 8-minute single-invocation budget -- size shards
-accordingly (default 48 variants; at k<=8 samples that is <=384 rollouts, the
-measured base-rollout rate was ~150 rollouts/min plus model load). A shard is
-done when its output file exists; `--auto` picks the first missing shard, so a
-killed run resumes by simply invoking again. `finalize` is CPU-only.
+Sharding contract: ONE engine, MANY shards. Engine startup measured 289.7 s on
+the registered A5000, so `run` builds the engine once and feeds it every pending
+shard: 50 shards each paying their own startup was 4.02 GPU-hours of pure model
+loading. A shard is still an atomic, resumable client-side work unit -- done when
+its output file exists, at 48 variants (<=384 rollouts at k<=8, ~150
+rollouts/min measured) so a kill costs at most one shard -- but it no longer pays
+for an engine. The engine start is charged to the ledger as its own row and each
+shard is charged its own decode minutes, so the two never overlap. `finalize` is
+CPU-only.
 
 Elicitation-control ordering: production sampling REQUIRES the frozen winner
 written by `agentlab.prompt_control finalize` (half of every variant's attempts
@@ -57,7 +60,8 @@ import time
 
 from agentlab.chat import boxed_answer, numeric_answer, parse_tool_calls, strip_thinking
 from agentlab.suite import runtime as rt_mod
-from agentlab.suite.configio import ROOT, ledger_append, ledger_guard, load_config
+from agentlab.suite.configio import (ROOT, ledger_append, ledger_guard, load_config,
+                                     now_utc)
 from agentlab.suite.generate import load_bundles
 from agentlab.suite.schema import canon
 
@@ -124,11 +128,15 @@ class RolloutEngine:
     """
 
     def __init__(self, cfg: dict, render_fn, generate_fn,
-                 frozen_prompt: str | None = None):
+                 frozen_prompt: str | None = None, provenance: dict | None = None):
         self.cfg = cfg
         self.render = render_fn
         self.generate = generate_fn
         self.frozen = frozen_prompt
+        # The S19 fingerprint of the engine that produced every row this engine
+        # emits: which card, which driver, which engine settings, which effective
+        # thinking mode. None on the scripted CPU engines the tests inject.
+        self.provenance = provenance
         self._schemas: dict = {}
         self._names: dict = {}
 
@@ -284,6 +292,10 @@ class RolloutEngine:
             "parity": {"observations": runtime.observation_digests(),
                        "progress": runtime.progress(),
                        "episode": runtime.episode_digest()},
+            # Which card and which engine produced this row (S19). Carried on the
+            # ROW, not only in a nearby ledger: a row that cannot say what
+            # produced it cannot support a same-card claim.
+            "provenance": self.provenance,
         }
 
 
@@ -557,31 +569,109 @@ def _read_jsonl(path: pathlib.Path) -> list:
 # vLLM backend (GPU only; imported lazily)
 # --------------------------------------------------------------------------
 
-def _vllm_engine(cfg: dict, args, frozen: str | None) -> RolloutEngine:
+def _vllm_engine(cfg: dict, args, frozen: str | None,
+                 adapter: str | None = None) -> RolloutEngine:
+    """Build ONE engine under the registered contract, optionally with an adapter.
+
+    Every setting comes from `configio.engine_contract()` -- there is no
+    per-module --gpu-frac / --max-model-len knob any more, because two knobs are
+    two engines and S19 reads an engine_fingerprint that disagrees with the
+    registered contract as a BUG.
+
+    Startup measured 289.7 s on this card. An engine is therefore a STAGE-scoped
+    resource: build it once here and feed it every pending work unit (see
+    `run_units`), never once per shard. Fifty rejection-sampling shards paying
+    their own startup was 4.02 GPU-hours of pure model loading.
+
+    `adapter` serves a LoRA checkpoint alongside the base weights. The variance
+    probe needs it: probing the base model while asserting the RS-SFT policy's
+    group variance measures the wrong policy.
+    """
     from vllm import LLM, SamplingParams
 
     from agentlab import env as labenv
+    from agentlab.suite.configio import engine_contract, fingerprint
 
-    labenv.require_single_gpu()
+    contract = engine_contract(cfg)
+    labenv.require_registered_gpu(cfg)
     proc = labenv.load_processor(args.model)
     tok = labenv.get_tokenizer(proc)
-    llm = LLM(model=args.model, max_model_len=args.max_model_len,
-              gpu_memory_utilization=args.gpu_frac, dtype="bfloat16",
-              enforce_eager=args.enforce_eager)
+    kwargs = dict(model=args.model,
+                  dtype=contract["dtype"],
+                  max_model_len=contract["max_model_len"],
+                  gpu_memory_utilization=contract["gpu_memory_utilization"],
+                  max_num_seqs=contract["max_num_seqs"],
+                  max_num_batched_tokens=contract["max_num_batched_tokens"],
+                  enforce_eager=contract["enforce_eager"],
+                  tensor_parallel_size=contract["tensor_parallel_size"])
+    lora_request = None
+    if adapter:
+        kwargs.update(enable_lora=True,
+                      max_lora_rank=int(cfg["sft"]["lora_rank"]))
+    llm = LLM(**kwargs)
+    if adapter:
+        from vllm.lora.request import LoRARequest
+
+        lora_request = LoRARequest("trained", 1, adapter)
     dec = cfg["decoding"]
     sp = SamplingParams(temperature=dec["temperature"], top_p=dec["top_p"],
                         top_k=dec["top_k"], max_tokens=dec["max_tokens_per_decision"])
+    # The contract is the authority on thinking, and the effective value is
+    # RECORDED rather than assumed: this checkpoint thinks by default.
+    thinking = contract["enable_thinking"]
 
     def render(messages, schemas):
+        from agentlab.suite.configio import reject_multimodal
+
+        reject_multimodal(messages, cfg)
         return tok.apply_chat_template(messages, tools=schemas, tokenize=False,
                                        add_generation_prompt=True,
-                                       enable_thinking=dec["enable_thinking"])
+                                       enable_thinking=thinking)
 
     def generate(prompts):
-        outs = llm.generate(prompts, sp)
+        outs = (llm.generate(prompts, sp, lora_request=lora_request) if lora_request
+                else llm.generate(prompts, sp))
         return [(o.outputs[0].text, o.outputs[0].finish_reason) for o in outs]
 
-    return RolloutEngine(cfg, render, generate, frozen_prompt=frozen)
+    fp = fingerprint(getattr(args, "run_id", None), cfg, enable_thinking=thinking)
+    fp["adapter"] = adapter
+    fp["served_model"] = args.model
+    return RolloutEngine(cfg, render, generate, frozen_prompt=frozen,
+                         provenance=fp)
+
+
+def run_units(engine, units: list, *, run_one, is_done, budget_minutes: float,
+              label: str, cfg: dict | None = None, work_unit: str = "unit") -> dict:
+    """Feed every pending work unit to ONE long-lived engine.
+
+    This is the persistent-engine contract:
+
+      * the ENGINE lives for the whole stage; the 289.7 s startup is paid once
+      * a WORK UNIT is still a short, atomic, resumable checkpoint on disk, so a
+        kill costs at most one unit and `--auto` resumes at the first incomplete
+        one
+      * the stage stops launching new units once `budget_minutes` is spent, and
+        reports what is left, so re-invoking is always the resume mechanism
+
+    Returns {"units_done", "units_left", "minutes"} and ledgers nothing itself:
+    the caller owns the ledger row, so a unit and its stage cannot both charge
+    the same seconds.
+    """
+    t0 = time.time()
+    done = 0
+    for unit in units:
+        if is_done(unit):
+            continue
+        if (time.time() - t0) / 60.0 >= budget_minutes and done:
+            break
+        run_one(unit)
+        done += 1
+    left = [u for u in units if not is_done(u)]
+    minutes = (time.time() - t0) / 60.0
+    print(f"[{label}] {done} {work_unit}s this pass, {len(left)} left, "
+          f"{minutes:.1f} min on one engine")
+    return {"units_done": done, "units_left": len(left), "minutes": minutes,
+            "complete": not left}
 
 
 # --------------------------------------------------------------------------
@@ -601,36 +691,68 @@ def cmd_plan(args) -> None:
 
 
 def cmd_run(args) -> None:
+    """Roll out pending shards on ONE engine.
+
+    The engine start is charged to the ledger once, as its own row; each shard is
+    then charged its own decode minutes. Neither overlaps the other, so the
+    startup that used to be invisible (it happened before the per-shard timer
+    began) is now an explicit budget line.
+    """
     cfg = load_config()
     split = args.split or rs_split(cfg)
     shards = plan_shards(split, args.shard_size, cfg)
-    if args.auto:
-        pending = [s for s in shards if not _shard_path(s["index"]).exists()]
-        if not pending:
-            print("[rs] all shards done")
+    if args.shard is not None:
+        units = [shards[args.shard]]
+        if _shard_path(args.shard).exists() and not args.force:
+            print(f"[rs] shard {args.shard} already done (use --force to redo)")
             return
-        shard = pending[0]
+        forced = {args.shard} if args.force else set()
     else:
-        shard = shards[args.shard]
-        if _shard_path(shard["index"]).exists() and not args.force:
-            print(f"[rs] shard {shard['index']} already done (use --force to redo)")
-            return
+        units = shards
+        forced = set()
+    pending = [s for s in units
+               if s["index"] in forced or not _shard_path(s["index"]).exists()]
+    if not pending:
+        print("[rs] all shards done")
+        return
     ledger_guard("multidistill", args.budget_minutes, cfg)
 
     frozen = None if args.no_frozen_prompt else load_frozen_prompt(cfg)
     by_id = {b.spec.task_id: b for b in load_split(split, cfg)}
-    bundles = [by_id[t] for t in shard["task_ids"]]
-
-    t0 = time.time()
-    engine = _vllm_engine(cfg, args, frozen)
     variants = ("canonical",) if args.no_frozen_prompt else ("canonical", "frozen")
-    records = engine.run(engine.rollouts_for(bundles, variants=variants))
-    _write_jsonl(_shard_path(shard["index"]), records)
-    minutes = (time.time() - t0) / 60.0
-    cumulative = ledger_append("multidistill", minutes, cfg)
-    print(f"[rs] shard {shard['index']:04d}: {len(records)} rollouts in "
-          f"{minutes:.1f} min -> {_shard_path(shard['index'])} "
-          f"(ledger {cumulative:.2f}h)")
+
+    started = now_utc()
+    t_engine = time.time()
+    engine = _vllm_engine(cfg, args, frozen)
+    startup_min = (time.time() - t_engine) / 60.0
+    ledger_append("multidistill:engine_start", startup_min, cfg,
+                  kind="engine_start", started_at=started,
+                  work={"unit": "engine", "count": 1, "shards_pending": len(pending)})
+    print(f"[rs] engine up in {startup_min:.1f} min; it serves all "
+          f"{len(pending)} pending shards")
+
+    def is_done(shard):
+        return shard["index"] not in forced and _shard_path(shard["index"]).exists()
+
+    def run_one(shard):
+        bundles = [by_id[t] for t in shard["task_ids"]]
+        t0 = time.time()
+        records = engine.run(engine.rollouts_for(bundles, variants=variants))
+        _write_jsonl(_shard_path(shard["index"]), records)
+        forced.discard(shard["index"])
+        minutes = (time.time() - t0) / 60.0
+        cumulative = ledger_append("multidistill", minutes, cfg, kind="shard",
+                                   work={"unit": "rollouts", "count": len(records),
+                                         "shard": shard["index"],
+                                         "variants": len(bundles)})
+        print(f"[rs] shard {shard['index']:04d}: {len(records)} rollouts in "
+              f"{minutes:.1f} min -> {_shard_path(shard['index'])} "
+              f"(ledger {cumulative:.2f}h)")
+
+    status = run_units(engine, units, run_one=run_one, is_done=is_done,
+                       budget_minutes=args.budget_minutes, label="rs",
+                       cfg=cfg, work_unit="shard")
+    print(json.dumps(status))
 
 
 def finalize(records: list, bundles: dict, cfg: dict) -> tuple[list, dict]:
@@ -731,18 +853,27 @@ def main() -> None:
     sub.add_parser("plan", parents=[common])
 
     run = sub.add_parser("run", parents=[common])
-    run.add_argument("--shard", type=int, default=None)
-    run.add_argument("--auto", action="store_true", help="run the first pending shard")
+    run.add_argument("--shard", type=int, default=None,
+                     help="one shard only; omit to serve every pending shard "
+                          "from ONE engine (the default, and the reason engine "
+                          "startup is paid once per stage rather than per shard)")
+    run.add_argument("--auto", action="store_true",
+                     help="accepted for compatibility; serving all pending "
+                          "shards from one engine is now the default")
     run.add_argument("--force", action="store_true")
     run.add_argument("--model", default=None)
-    run.add_argument("--gpu-frac", type=float, default=0.85)
-    run.add_argument("--max-model-len", type=int, default=8192)
-    run.add_argument("--enforce-eager", action="store_true",
-                     help="skip CUDA-graph capture to shorten startup")
+    run.add_argument("--run-id", default=None,
+                     help="S19 run_id stamped on every row (default AGENTIC_RUN_ID)")
+    # NO --gpu-frac / --max-model-len / --enforce-eager: the engine contract lives
+    # in configs/multifaceted.yaml `engine:` and a per-invocation override is a
+    # second engine. S19 reads a fingerprint that disagrees with the contract as
+    # a BUG, so the knob would only ever produce an unusable trace.
     run.add_argument("--no-frozen-prompt", action="store_true",
                      help="SMOKE ONLY: canonical prompt for every attempt")
-    run.add_argument("--budget-minutes", type=float, default=8.0,
-                    help="projected minutes for the ledger ceiling guard")
+    run.add_argument("--budget-minutes", type=float, default=55.0,
+                    help="stage budget for this pass: stop LAUNCHING new shards "
+                         "after this many minutes. Each shard is still atomic and "
+                         "resumable; re-invoke to continue.")
 
     fin = sub.add_parser("finalize", parents=[common])
     fin.add_argument("--partial", action="store_true")
@@ -753,8 +884,6 @@ def main() -> None:
         from agentlab import env as labenv
 
         args.model = args.model or labenv.MODEL
-        if args.shard is None and not args.auto:
-            raise SystemExit("pass --shard N or --auto")
     {"plan": cmd_plan, "run": cmd_run, "finalize": cmd_finalize,
      "status": cmd_status}[args.cmd](args)
 

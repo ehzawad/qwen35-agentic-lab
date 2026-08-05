@@ -39,11 +39,11 @@ import argparse
 import concurrent.futures
 import json
 import pathlib
-import subprocess
 import threading
 import time
 
 from agentlab import provenance
+from agentlab.suite import configio
 from agentlab.suite import faults as faults_mod
 from agentlab.suite import rng
 
@@ -214,15 +214,30 @@ class SpecRuntime:
 # ---------------------------------------------------------------------------
 
 def make_http_chat(server: str, model: str, decode: dict, timeout_s: float = 300.0):
-    """OpenAI-compatible chat backend against a vLLM server."""
+    """OpenAI-compatible chat backend against a vLLM server.
+
+    `chat_template_kwargs` is not decoration. This checkpoint defaults thinking
+    ON, and the server renders the chat template, so an evaluation request that
+    does not say `enable_thinking: false` runs a DIFFERENT policy from the offline
+    rejection sampler (which renders with thinking disabled), spends the
+    completion budget on reasoning tokens, and reads as "the model never
+    committed an answer" -- a failure mode this repo has already been burned by.
+    The server is started with the same default; the request states it as well,
+    because a per-request field cannot be forgotten by a restarted server.
+    """
     import requests
+
+    from agentlab.suite import configio
 
     url = server.rstrip("/") + "/v1/chat/completions"
 
     def chat_fn(messages: list[dict], tools: list[dict]) -> dict:
+        configio.reject_multimodal(messages)
         payload = {"model": model, "messages": messages, "tools": tools,
                    "temperature": decode["temperature"], "top_p": decode["top_p"],
-                   "seed": decode["seed"], "max_tokens": decode["max_tokens"]}
+                   "seed": decode["seed"], "max_tokens": decode["max_tokens"],
+                   "chat_template_kwargs": {
+                       "enable_thinking": bool(decode["enable_thinking"])}}
         resp = requests.post(url, json=payload, timeout=timeout_s)
         resp.raise_for_status()
         msg = resp.json()["choices"][0]["message"]
@@ -327,7 +342,12 @@ def _trace_row(spec: dict, *, arm: str, condition: str, control: str, budgets: d
         "budgets": budgets, "messages": messages, "events": events,
         "runner": runner,
         "prompt": prompt_meta, "decode": decode,
+        # FROZEN SEAM (S19): run_meta is copied VERBATIM into every trace's
+        # `provenance`, so the hardware/engine fingerprint is owned here in the
+        # runtime layer and merely read by the analyzer. `timestamp_utc` is
+        # stamped per row rather than per shard.
         "provenance": dict(run_meta,
+                           timestamp_utc=configio.now_utc(),
                            secret_sha256=provenance.observation_digest(secret.hex()),
                            spec_sha256=rng.digest(spec)),
     }
@@ -373,8 +393,8 @@ def apply_control(specs: list[dict], control: str, permutation_seed: int) -> lis
     raise ValueError(f"unknown control {control!r}")
 
 
-def done_task_ids(out_path: pathlib.Path) -> set:
-    done = set()
+def existing_rows(out_path: pathlib.Path) -> list[dict]:
+    rows = []
     if out_path.exists():
         for line in out_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -385,18 +405,50 @@ def done_task_ids(out_path: pathlib.Path) -> set:
             except json.JSONDecodeError:
                 continue
             if rec.get("kind") == "episode":
-                done.add(rec.get("task_id"))
-    return done
+                rows.append(rec)
+    return rows
+
+
+def done_task_ids(out_path: pathlib.Path) -> set:
+    return {r.get("task_id") for r in existing_rows(out_path)}
+
+
+def require_same_fingerprint(out_path: pathlib.Path, fingerprint: dict) -> int:
+    """Refuse to APPEND to a trace file that another card or engine produced.
+
+    Resume used to deduplicate by task ID alone, which means a shard restarted
+    under a different card, driver, engine setting or effective thinking mode
+    would happily append to the same file -- and the resulting trace set would
+    carry two hardware fingerprints inside one claim. S19 calls that a BUG; the
+    cheapest place to stop it is before the first append, not at analysis time.
+
+    Returns the number of existing rows checked.
+    """
+    rows = existing_rows(out_path)
+    for i, row in enumerate(rows):
+        prior = row.get("provenance") or {}
+        if not any(prior.get(k) is not None for k in
+                   configio.FINGERPRINT_IDENTITY_FIELDS):
+            continue  # a pre-fingerprint row: nothing to compare against
+        conflict = configio.fingerprint_conflict(prior, fingerprint)
+        if conflict:
+            raise SystemExit(
+                f"REFUSED: {out_path} row {i} was produced under a different "
+                f"runtime fingerprint ({', '.join(conflict)}).\n"
+                f"  existing: "
+                f"{json.dumps(configio.fingerprint_identity(prior), sort_keys=True)}\n"
+                f"  current:  "
+                f"{json.dumps(configio.fingerprint_identity(fingerprint), sort_keys=True)}\n"
+                f"  Appending would put two hardware/engine fingerprints inside "
+                f"one claim, which is exactly what S19 exists to catch. A "
+                f"replication on another card is legitimate science but needs a "
+                f"NEW run_id and its own trace set -- never an append.")
+    return len(rows)
 
 
 def git_sha() -> str | None:
-    try:
-        return subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                              text=True, timeout=10,
-                              cwd=pathlib.Path(__file__).resolve().parents[3],
-                              ).stdout.strip() or None
-    except Exception:
-        return None
+    """One definition, in configio, so the ledger and the traces cannot disagree."""
+    return configio.git_sha()
 
 
 def load_or_create_secret(path: pathlib.Path) -> bytes:
@@ -416,13 +468,13 @@ def run_shard(args, chat_fn=None) -> dict:
     specs = apply_control(specs, args.control, args.permutation_seed)
     specs = [s for i, s in enumerate(specs) if i % args.num_shards == args.shard]
 
+    cfg = configio.load_config()
+    contract = configio.engine_contract(cfg)
+    dec_cfg = cfg.get("eval_decoding") or {}
+
     out_dir = pathlib.Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{args.arm}.{args.condition}.{args.control}.jsonl"
-    done = done_task_ids(out_path)
-    todo = [s for s in specs if s["task_id"] not in done]
-    if args.limit:
-        todo = todo[: args.limit]
 
     secret = load_or_create_secret(pathlib.Path(args.secret_file))
     prompt_raw = pathlib.Path(args.prompt).read_text(encoding="utf-8")
@@ -430,13 +482,49 @@ def run_shard(args, chat_fn=None) -> dict:
     # hash the raw committed file, so S16 can compare against the preregistration
     prompt_meta = {"path": str(args.prompt),
                    "sha256": provenance.observation_digest(prompt_raw)}
-    decode = {"temperature": 0.0, "top_p": 1.0, "seed": args.decode_seed,
-              "max_tokens": args.max_tokens}
-    run_meta = {"git_sha": git_sha(), "server_model": args.model,
-                "base_id": args.base_id, "adapter": args.adapter,
-                "run_id": args.run_id}
+    decode = {"temperature": float(dec_cfg.get("temperature", 0.0)),
+              "top_p": float(dec_cfg.get("top_p", 1.0)),
+              "seed": args.decode_seed,
+              "max_tokens": args.max_tokens,
+              # The contract is the authority; the request states it explicitly
+              # and the trace records what was actually sent.
+              "enable_thinking": bool(contract["enable_thinking"])}
+
+    # A trained arm must be served the ADAPTER, not the base weights. The server
+    # registers the LoRA under an alias (`trained` by default) and the request has
+    # to ask for that alias by name: sending the base model id while passing
+    # --adapter for provenance only would evaluate the base model in the T0/TP
+    # arms and report it as the trained policy.
+    served_model = args.model
+    if args.adapter:
+        served_model = args.served_adapter_name
+        if not served_model:
+            raise SystemExit(
+                "REFUSED: --adapter was given but no served adapter alias. A "
+                "trained arm that requests the base model id evaluates the BASE "
+                "policy and labels it trained.")
+
+    fingerprint = configio.fingerprint(args.run_id, cfg,
+                                       enable_thinking=contract["enable_thinking"])
+    # The evaluator READS the ledger and refuses to start work that would cross the
+    # ceiling. It does not APPEND: the driver charges the whole server-resident
+    # interval -- startup, every client shard and the idle gaps -- exactly once, and
+    # a per-shard row would double-charge the same seconds.
+    configio.ledger_guard(f"eval:{args.arm}.{args.condition}.{args.control}",
+                          float(args.time_budget_s) / 60.0, cfg)
+    checked = require_same_fingerprint(out_path, fingerprint)
+    done = done_task_ids(out_path)
+    todo = [s for s in specs if s["task_id"] not in done]
+    if args.limit:
+        todo = todo[: args.limit]
+
+    run_meta = dict(fingerprint,
+                    started_at_utc=fingerprint["timestamp_utc"],
+                    server_model=served_model, requested_model=args.model,
+                    base_id=args.base_id, adapter=args.adapter,
+                    resumed_rows=checked)
     if chat_fn is None:
-        chat_fn = make_http_chat(args.server, args.model, decode)
+        chat_fn = make_http_chat(args.server, served_model, decode)
 
     t0 = time.monotonic()
     lock = threading.Lock()
@@ -483,6 +571,9 @@ def run_shard(args, chat_fn=None) -> dict:
               "shard": args.shard, "num_shards": args.num_shards,
               "written": written, "remaining_in_shard": max(0, remaining),
               "complete": remaining <= 0, "out": str(out_path),
+              "served_model": served_model,
+              "enable_thinking_effective": decode["enable_thinking"],
+              "gpu_uuid": fingerprint["gpu_uuid"],
               "elapsed_s": round(time.monotonic() - t0, 1)}
     print(json.dumps(status))
     return status
@@ -495,6 +586,10 @@ def main() -> None:
     ap.add_argument("--model", required=True, help="served model name on the vLLM server")
     ap.add_argument("--base-id", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--adapter", default=None, help="adapter path (trained arms) or None")
+    ap.add_argument("--served-adapter-name", default="trained",
+                    help="LoRA alias the server registered for --adapter; the "
+                         "trained arms REQUEST this name, so they cannot silently "
+                         "evaluate the base weights")
     ap.add_argument("--arm", required=True, choices=ARMS)
     ap.add_argument("--condition", required=True, choices=CONDITIONS)
     ap.add_argument("--control", default="none", choices=CONTROLS)
@@ -506,12 +601,22 @@ def main() -> None:
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=1)
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--concurrency", type=int, default=8)
+    # Concurrency, the decode seed and the per-decision token cap all default to
+    # the registered values in configs/multifaceted.yaml `eval_decoding:`, so the
+    # CLI cannot quietly disagree with the preregistration. Concurrency is the
+    # engine contract's max_num_seqs: pushing more concurrent episodes than the
+    # server will schedule buys nothing and costs DeltaNet recurrent state
+    # (~49.1 MiB per active sequence).
+    _dec = configio.load_config().get("eval_decoding") or {}
+    ap.add_argument("--concurrency", type=int,
+                    default=int(_dec.get("concurrency", 8)))
     ap.add_argument("--time-budget-s", type=float, default=420.0,
                     help="stop launching new episodes after this; resumable")
     ap.add_argument("--episode-wall-s", type=float, default=240.0)
-    ap.add_argument("--max-tokens", type=int, default=1024)
-    ap.add_argument("--decode-seed", type=int, default=0xA61E0009)
+    ap.add_argument("--max-tokens", type=int,
+                    default=int(_dec.get("max_tokens_per_decision", 1024)))
+    ap.add_argument("--decode-seed", type=int,
+                    default=int(_dec.get("seed", 0xA61E0009)))
     ap.add_argument("--fault-seed", type=int, default=0xA61E0007)
     ap.add_argument("--permutation-seed", type=int, default=0xA61E0008)
     args = ap.parse_args()

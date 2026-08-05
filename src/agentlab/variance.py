@@ -38,10 +38,23 @@ per group"):
     configs/multifaceted.yaml, clamped as a TOTAL; terminal success is the
     strict verifier's `strict_success` and nothing else.
 
-Sharding: `run` probes ONE cell per invocation (12 groups x 8 generations = 96
-rollouts) and writes results/agentic/variance/<split>-<cell>.jsonl, so every GPU
-invocation stays far under the 8-minute ceiling and a killed run resumes by
-re-invoking. `report` is CPU-only and needs no GPU at all.
+Sharding: ONE engine serves every pending cell (12 groups x 8 generations = 96
+rollouts each), each cell writing results/agentic/variance/<split>-<cell>.jsonl,
+so a killed run resumes by re-invoking and no cell pays the measured 289.7 s
+engine startup of its own. `report` is CPU-only and needs no GPU at all.
+
+THE POLICY THIS PROBES. The GRPO decision is about the RS-SFT checkpoint's group
+variance, so the engine must SERVE THE RS-SFT ADAPTER. An earlier version checked
+that the adapter existed and then built the engine from the base model alone,
+which probes the wrong policy and would have reported base-model variance under
+the trained policy's name. The adapter is now required and loaded.
+
+STAGE DISPOSITION (v1). GRPO cannot instantiate on the registered A5000
+(configs/multifaceted.yaml grpo.stage_disposition), and the probe exists only to
+decide whether to spend GRPO hours. It is therefore short-circuited BEFORE it
+runs and recorded as NOT_EVALUATED_HARDWARE_SHORT_CIRCUIT -- never as "closed",
+which would claim the complete 144-group probe ran and a binding gate failed.
+`run` refuses while that label stands, rather than silently probing.
 """
 
 from __future__ import annotations
@@ -52,7 +65,8 @@ import math
 import pathlib
 import time
 
-from agentlab.suite.configio import ROOT, ledger_append, ledger_guard, load_config
+from agentlab.suite.configio import (ROOT, ledger_append, ledger_guard, load_config,
+                                     now_utc)
 from agentlab.suite.generate import cell_slice, group_by_cell
 
 OUT_DIR = ROOT / "results" / "agentic" / "variance"
@@ -304,13 +318,21 @@ def probe_records(engine, bundles: list, generations: int) -> list:
 
 
 def _slim(rec: dict) -> dict:
-    """Probe rows keep the scoring surface, not the transcripts."""
-    return {k: rec[k] for k in ("task_id", "family", "horizon", "split",
+    """Probe rows keep the scoring surface, not the transcripts.
+
+    They also keep the HARDWARE PROVENANCE. Dropping the transcripts is a size
+    decision; dropping which card and which engine produced the row would make
+    the probe unusable as evidence, and S19 requires the fingerprint on every
+    claim-bearing row rather than only in the report footer.
+    """
+    slim = {k: rec[k] for k in ("task_id", "family", "horizon", "split",
                                 "fault_types", "sample_index", "prompt_variant",
                                 "final", "decisions_used", "truncated",
                                 "exhausted", "unknown_tool", "arg_error",
                                 "call_cap", "milestone_fraction", "verdict",
                                 "replay_ok", "replay_reason")}
+    slim["provenance"] = rec.get("provenance")
+    return slim
 
 
 # ---------------------------------------------------------------------------
@@ -331,44 +353,130 @@ def cmd_plan(args) -> None:
           f"{total} rollouts total, split={vp['source_split']}")
 
 
+DISPOSITION_SHORT_CIRCUIT = "NOT_EVALUATED_HARDWARE_SHORT_CIRCUIT"
+
+
+def registered_disposition(cfg: dict | None = None) -> str | None:
+    cfg = cfg or load_config()
+    return (cfg.get("variance_probe") or {}).get("stage_disposition")
+
+
+def refuse_if_short_circuited(cfg: dict | None = None) -> None:
+    """Hard-refuse the probe while its registered disposition stands.
+
+    The probe's ONLY purpose is to decide whether GRPO hours are worth spending.
+    GRPO cannot instantiate on the registered card, so the probe is not evaluated
+    at all -- and running it anyway would produce a number that looks like the
+    registered probe result and would invite reporting the GRPO branch as
+    "variance gate closed", which is a DIFFERENT and unearned claim.
+    """
+    disposition = registered_disposition(cfg)
+    if disposition and disposition != "RUN":
+        raise SystemExit(
+            f"REFUSED: the variance probe's registered stage disposition is "
+            f"{disposition}.\n"
+            f"  GRPO is not run on this card (grpo.stage_disposition = "
+            f"GRPO_NOT_RUN_HARDWARE_INFEASIBLE), so the probe that exists to "
+            f"decide GRPO is NOT EVALUATED -- not 'closed'.\n"
+            f"  Recording a probe result now would make the GRPO branch look "
+            f"like it lost a variance gate it never faced. Running the probe is a "
+            f"NEW registered decision: set variance_probe.stage_disposition: RUN "
+            f"in configs/multifaceted.yaml as a dated amendment.")
+
+
+def probe_adapter(args, cfg: dict | None = None) -> str:
+    """The RS-SFT adapter the probe MUST serve, or a refusal.
+
+    `--adapter` may name it explicitly; otherwise the locked checkpoint is used,
+    and failing that the conventional RS-SFT output directory. Falling back to the
+    base model is not an option: that measures a policy the GRPO decision is not
+    about.
+    """
+    cfg = cfg or load_config()
+    if getattr(args, "adapter", None):
+        candidate = pathlib.Path(args.adapter)
+    else:
+        locks = ROOT / "results" / "agentic" / "locks.json"
+        candidate = None
+        if locks.exists():
+            rec = json.loads(locks.read_text(encoding="utf-8")).get("checkpoint") or {}
+            if rec.get("path"):
+                candidate = ROOT / rec["path"]
+        candidate = candidate or ROOT / "out" / "multiface" / "rssft-lora"
+    if not (candidate / "adapter_model.safetensors").exists():
+        raise SystemExit(
+            f"REFUSED: no RS-SFT adapter at {candidate}. The probe measures the "
+            f"RS-SFT policy's within-group variance; building the engine from the "
+            f"BASE model would probe the wrong policy and report it under the "
+            f"trained policy's name. Train the adapter first or pass --adapter.")
+    return str(candidate)
+
+
 def cmd_run(args) -> None:
     cfg = load_config()
+    refuse_if_short_circuited(cfg)
     vp = cfg["variance_probe"]
     split = vp["source_split"]
     cells = cells_in_probe(cfg)
-    if args.auto:
-        pending = [c for c in cells if not _cell_path(split, c).exists()]
-        if not pending:
-            print("[probe] all cells done")
-            return
-        cell = pending[0]
-    else:
+    if args.family is not None or args.horizon is not None:
         if args.family is None or args.horizon is None:
-            raise SystemExit("pass --family and --horizon, or --auto")
+            raise SystemExit("pass BOTH --family and --horizon, or neither")
         cell = (args.family, args.horizon)
         if cell not in cells:
             raise SystemExit(f"{cell} is not a probe cell; see `plan`")
         if _cell_path(split, cell).exists() and not args.force:
             print(f"[probe] {cell} already done (use --force to redo)")
             return
+        units, forced = [cell], ({cell} if args.force else set())
+    else:
+        units, forced = cells, set()
+    pending = [c for c in units if c in forced or not _cell_path(split, c).exists()]
+    if not pending:
+        print("[probe] all cells done")
+        return
     ledger_guard("variance_probe", args.budget_minutes, cfg)
 
-    from agentlab.multidistill import _vllm_engine, _write_jsonl
+    from agentlab.multidistill import _vllm_engine, _write_jsonl, run_units
 
-    bundles = probe_bundles(cfg, cell)
-    t0 = time.time()
-    engine = _vllm_engine(cfg, args, frozen=None)
-    records = probe_records(engine, bundles, vp["generations_per_group"])
-    _write_jsonl(_cell_path(split, cell), [_slim(r) for r in records])
-    minutes = (time.time() - t0) / 60.0
-    cumulative = ledger_append("variance_probe", minutes, cfg)
-    summary = summarize([_slim(r) for r in records], cfg)
-    agg = summary["overall"]
-    print(f"[probe] {cell[0]}-h{cell[1]}: {len(records)} rollouts in {minutes:.1f} min "
-          f"(ledger {cumulative:.2f}h)")
-    print(f"[probe] reward-SD {agg['nonzero_reward_sd_frac']:.2f}  "
-          f"terminal-disagreement {agg['terminal_disagreement_frac']:.2f}  "
-          f"mean-success {agg['mean_success']:.2f}  clip {agg['clip_frac']:.3f}")
+    adapter = probe_adapter(args, cfg)
+    started = now_utc()
+    t_engine = time.time()
+    # The RS-SFT adapter, not the base model: this probes the trained policy.
+    engine = _vllm_engine(cfg, args, frozen=None, adapter=adapter)
+    startup_min = (time.time() - t_engine) / 60.0
+    ledger_append("variance_probe:engine_start", startup_min, cfg,
+                  kind="engine_start", started_at=started,
+                  work={"unit": "engine", "count": 1, "adapter": adapter,
+                        "cells_pending": len(pending)})
+    print(f"[probe] engine up in {startup_min:.1f} min with adapter {adapter}; "
+          f"it serves all {len(pending)} pending cells")
+
+    def is_done(cell):
+        return cell not in forced and _cell_path(split, cell).exists()
+
+    def run_one(cell):
+        bundles = probe_bundles(cfg, cell)
+        t0 = time.time()
+        records = probe_records(engine, bundles, vp["generations_per_group"])
+        rows = [_slim(r) for r in records]
+        _write_jsonl(_cell_path(split, cell), rows)
+        forced.discard(cell)
+        minutes = (time.time() - t0) / 60.0
+        cumulative = ledger_append("variance_probe", minutes, cfg, kind="cell",
+                                   work={"unit": "rollouts", "count": len(records),
+                                         "cell": f"{cell[0]}-h{cell[1]}",
+                                         "adapter": adapter})
+        agg = summarize(rows, cfg)["overall"]
+        print(f"[probe] {cell[0]}-h{cell[1]}: {len(records)} rollouts in "
+              f"{minutes:.1f} min (ledger {cumulative:.2f}h)")
+        print(f"[probe] reward-SD {agg['nonzero_reward_sd_frac']:.2f}  "
+              f"terminal-disagreement {agg['terminal_disagreement_frac']:.2f}  "
+              f"mean-success {agg['mean_success']:.2f}  clip {agg['clip_frac']:.3f}")
+
+    status = run_units(engine, units, run_one=run_one, is_done=is_done,
+                       budget_minutes=args.budget_minutes, label="probe",
+                       cfg=cfg, work_unit="cell")
+    print(json.dumps(status))
 
 
 def load_probe_rows(cfg: dict | None = None) -> list:
@@ -381,17 +489,58 @@ def load_probe_rows(cfg: dict | None = None) -> list:
     return rows
 
 
+def write_disposition_report(cfg: dict | None = None) -> dict:
+    """Record NOT_EVALUATED rather than leaving the probe artifact missing.
+
+    A missing artifact is indistinguishable from "we forgot"; an artifact that
+    says NOT_EVALUATED_HARDWARE_SHORT_CIRCUIT says exactly what happened. `gates`
+    and `summary` are explicitly null: there is no probe measurement to report,
+    and inventing an empty-but-shaped gate block would let a downstream reader
+    treat "not evaluated" as "evaluated and failed".
+    """
+    cfg = cfg or load_config()
+    from agentlab.suite.configio import fingerprint
+
+    out = {"stage_disposition": registered_disposition(cfg),
+           "probe_run": False, "complete": False,
+           "cells_done": 0, "cells_expected": len(cells_in_probe(cfg)),
+           "rollouts": 0, "summary": None, "gates": None,
+           "reason": "GRPO is not run on the registered card "
+                     "(grpo.stage_disposition = GRPO_NOT_RUN_HARDWARE_INFEASIBLE), "
+                     "so the probe that exists to decide GRPO was never "
+                     "evaluated. This is NOT the same as a closed variance gate.",
+           "provenance": fingerprint(None, cfg)}
+    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_PATH.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps({k: out[k] for k in ("stage_disposition", "probe_run",
+                                          "cells_done", "cells_expected")}, indent=2))
+    print(f"[probe] disposition recorded -> {REPORT_PATH}")
+    return out
+
+
 def cmd_report(args) -> None:
     cfg = load_config()
     rows = load_probe_rows(cfg)
     if not rows:
+        if registered_disposition(cfg) not in (None, "RUN"):
+            write_disposition_report(cfg)
+            return
         raise SystemExit(f"no probe rows under {OUT_DIR}; run the probe cells first")
     summary = summarize(rows, cfg)
     gates = gate_report(summary, cfg)
     done = len(summary["per_cell"])
     expected = len(cells_in_probe(cfg))
-    out = {"complete": done == expected, "cells_done": done,
-           "cells_expected": expected, "summary": summary, "gates": gates}
+    from agentlab.suite.configio import fingerprint
+
+    # The hardware provenance of the probe rows themselves, not of this reporting
+    # process: a report that says which card measured it is the point of S19.
+    row_fps = [r.get("provenance") for r in rows if r.get("provenance")]
+    out = {"stage_disposition": "RUN", "probe_run": True,
+           "complete": done == expected, "cells_done": done,
+           "cells_expected": expected, "rollouts": len(rows),
+           "summary": summary, "gates": gates,
+           "provenance": row_fps[0] if row_fps else fingerprint(None, cfg),
+           "rows_missing_provenance": len(rows) - len(row_fps)}
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({k: out[k] for k in ("complete", "cells_done",
@@ -415,13 +564,17 @@ def main() -> None:
     run = sub.add_parser("run")
     run.add_argument("--family", default=None)
     run.add_argument("--horizon", type=int, default=None)
-    run.add_argument("--auto", action="store_true", help="run the first pending cell")
+    run.add_argument("--auto", action="store_true",
+                     help="accepted for compatibility; serving every pending "
+                          "cell from one engine is now the default")
     run.add_argument("--force", action="store_true")
     run.add_argument("--model", default=None)
-    run.add_argument("--gpu-frac", type=float, default=0.85)
-    run.add_argument("--max-model-len", type=int, default=8192)
-    run.add_argument("--enforce-eager", action="store_true")
-    run.add_argument("--budget-minutes", type=float, default=8.0)
+    run.add_argument("--run-id", default=None)
+    run.add_argument("--adapter", default=None,
+                     help="RS-SFT adapter to probe; defaults to the locked "
+                          "checkpoint. The probe never runs on the base model.")
+    # No engine knobs: configs/multifaceted.yaml `engine:` is the contract.
+    run.add_argument("--budget-minutes", type=float, default=55.0)
 
     sub.add_parser("report")
     args = ap.parse_args()

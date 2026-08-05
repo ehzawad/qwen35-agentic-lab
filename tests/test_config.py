@@ -54,22 +54,51 @@ class TestTrainerSignatures:
 class TestStageConfigs:
     """Every stage's config must construct with the exact args the code passes."""
 
-    def test_sft_config(self):
+    def test_sft_config(self, tmp_path):
+        """Construct the config the SFT STAGE actually passes, not a copy of it.
+
+        `agentlab.sft.sft_config_kwargs` is the single definition, so this catches
+        a TRL API change AND a drift between the registered contract and what the
+        trainer is handed. `use_cpu` is added only when no bf16 GPU is visible:
+        transformers refuses bf16 on CPU, and the shipped kwargs must not carry a
+        test-environment flag.
+        """
+        import torch
         from trl import SFTConfig
 
-        cfg = SFTConfig(
-            output_dir="/tmp/_t", num_train_epochs=1.0, per_device_train_batch_size=4,
-            gradient_accumulation_steps=4, learning_rate=1e-4, lr_scheduler_type="cosine",
-            warmup_ratio=0.03, max_length=2048, bf16=True, gradient_checkpointing=True,
-            logging_steps=10, eval_strategy="steps", eval_steps=100, save_strategy="epoch",
-            save_total_limit=1, report_to=[], packing=False,
-        )
-        assert cfg.max_length == 2048
+        from agentlab import sft
+        from agentlab.suite.configio import load_config
+
+        args = sft.build_parser(load_config()["sft"]).parse_args([])
+        args.out = str(tmp_path)
+        kwargs = sft.sft_config_kwargs(args)
+        if not torch.cuda.is_available():
+            kwargs["use_cpu"] = True
+        cfg = SFTConfig(**kwargs)
+        assert cfg.max_length == 4096
+        assert cfg.per_device_train_batch_size == 2
+        assert cfg.gradient_accumulation_steps == 8
+        # the default of 8 would need 16.24 GiB of logits on a 23.5 GiB card
+        assert cfg.per_device_eval_batch_size == 1
+        assert cfg.eval_accumulation_steps == 1
+        assert cfg.prediction_loss_only is True
+        assert cfg.gradient_checkpointing is True
+        assert cfg.packing is False
 
     def test_grpo_config(self):
+        """Pins the TRL GRPOConfig API only.
+
+        GRPO is NOT run in v1 (GRPO_NOT_RUN_HARDWARE_INFEASIBLE), so nothing here
+        asserts a registered setting -- it exists so a TRL upgrade that moves a
+        field is caught on CPU. `use_cpu` is the same environment concession as in
+        test_sft_config: transformers refuses bf16 without a bf16 GPU, and this
+        suite runs CPU-only.
+        """
+        import torch
         from trl import GRPOConfig
 
         cfg = GRPOConfig(
+            use_cpu=not torch.cuda.is_available(),
             output_dir="/tmp/_t", num_train_epochs=1.0, per_device_train_batch_size=8,
             gradient_accumulation_steps=4, num_generations=8, max_completion_length=1024,
             learning_rate=1e-6, lr_scheduler_type="constant_with_warmup", warmup_ratio=0.03,

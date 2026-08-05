@@ -46,7 +46,8 @@ import json
 import pathlib
 import time
 
-from agentlab.suite.configio import ROOT, ledger_append, ledger_guard, load_config
+from agentlab.suite.configio import (ROOT, ledger_append, ledger_guard, load_config,
+                                     now_utc)
 from agentlab.suite.generate import cell_slice, group_by_cell
 from agentlab.suite.schema import digest_text, file_sha256
 
@@ -317,8 +318,32 @@ def tournament_rows(engine, bundles: list, axis: str, candidate: dict,
             for r in records]
 
 
+def _round2_candidates(cfg: dict) -> list[str]:
+    """The preregistered top two, read from the round-1 files that exist."""
+    from agentlab.multidistill import _read_jsonl
+
+    rows = []
+    for cand in verify_frozen():
+        p = _rows_path(1, cand["id"])
+        if p.exists():
+            rows += _read_jsonl(p)
+    if not rows:
+        return []
+    try:
+        return list(pick_winner(rows, cfg)["round2_candidates"])
+    except Exception:
+        return []
+
+
 def cmd_run(args) -> None:
-    from agentlab.multidistill import _vllm_engine, _write_jsonl, load_split
+    """Run tournament units on ONE engine.
+
+    Ten cold starts (eight round-one candidates plus two round-two) cost 0.80
+    GPU-hours of pure startup at the measured 289.7 s. The engine is built once
+    here and every pending (round, candidate) unit is fed to it; each unit still
+    writes its own file, so a kill costs one unit and re-invoking resumes.
+    """
+    from agentlab.multidistill import _vllm_engine, _write_jsonl, load_split, run_units
 
     cfg = load_config()
     cands = verify_frozen()
@@ -331,33 +356,66 @@ def cmd_run(args) -> None:
             "split in configs/suite_v1.toml (it is not a frozen file) and "
             "regenerate, or file a dated AMENDMENT. Refusing to run a smaller "
             "tournament under the preregistered name.")
-    cand = next((c for c in cands if c["id"] == args.candidate), None)
-    if cand is None:
-        raise SystemExit(f"unknown candidate {args.candidate!r}; "
-                         f"choose from {[c['id'] for c in cands]}")
-    out = _rows_path(args.round, cand["id"])
-    if out.exists() and not args.force:
-        print(f"[tournament] r{args.round} {cand['id']} already done")
+    by_id = {c["id"]: c for c in cands}
+    if args.candidate:
+        if args.candidate not in by_id:
+            raise SystemExit(f"unknown candidate {args.candidate!r}; "
+                             f"choose from {sorted(by_id)}")
+        units = [(args.round, args.candidate)]
+    elif args.round == 2:
+        units = [(2, cid) for cid in _round2_candidates(cfg)]
+        if not units:
+            raise SystemExit("round 2 is preregistered for the top two of round "
+                             "1; run round 1 first")
+    else:
+        units = [(1, c["id"]) for c in cands]
+    forced = set(units) if args.force else set()
+    pending = [u for u in units if u in forced or not _rows_path(*u).exists()]
+    if not pending:
+        print("[tournament] every requested unit already done")
         return
     ledger_guard("prompt_tournament", args.budget_minutes, cfg)
 
-    n = pc["round1_per_axis"] if args.round == 1 else pc["round2_per_axis"]
-    offset = 0 if args.round == 1 else pc["round1_per_axis"]
     bundles = load_split(cfg["suite"]["dev"], cfg)
-    prompt = candidate_text(cand)
-
-    t0 = time.time()
+    started = now_utc()
+    t_engine = time.time()
     engine = _vllm_engine(cfg, args, frozen=None)
-    rows = []
-    for axis in AXES:
-        rows += tournament_rows(engine, axis_bundles(bundles, axis, n, offset),
-                                axis, cand, prompt)
-    _write_jsonl(out, rows)
-    minutes = (time.time() - t0) / 60.0
-    cumulative = ledger_append("prompt_tournament", minutes, cfg)
-    rates = axis_rates(rows)[cand["id"]]
-    print(f"[tournament] r{args.round} {cand['id']}: combined {rates['combined']:.3f} "
-          f"over {len(rows)} dev tasks in {minutes:.1f} min (ledger {cumulative:.2f}h)")
+    startup_min = (time.time() - t_engine) / 60.0
+    ledger_append("prompt_tournament:engine_start", startup_min, cfg,
+                  kind="engine_start", started_at=started,
+                  work={"unit": "engine", "count": 1, "units_pending": len(pending)})
+    print(f"[tournament] engine up in {startup_min:.1f} min; it serves all "
+          f"{len(pending)} pending (round, candidate) units")
+
+    def is_done(unit):
+        return unit not in forced and _rows_path(*unit).exists()
+
+    def run_one(unit):
+        round_no, cid = unit
+        cand = by_id[cid]
+        n = pc["round1_per_axis"] if round_no == 1 else pc["round2_per_axis"]
+        offset = 0 if round_no == 1 else pc["round1_per_axis"]
+        prompt = candidate_text(cand)
+        t0 = time.time()
+        rows = []
+        for axis in AXES:
+            rows += tournament_rows(engine, axis_bundles(bundles, axis, n, offset),
+                                    axis, cand, prompt)
+        _write_jsonl(_rows_path(round_no, cid), rows)
+        forced.discard(unit)
+        minutes = (time.time() - t0) / 60.0
+        cumulative = ledger_append("prompt_tournament", minutes, cfg, kind="unit",
+                                   work={"unit": "dev_tasks", "count": len(rows),
+                                         "round": round_no, "candidate": cid})
+        rates = axis_rates(rows)[cid]
+        print(f"[tournament] r{round_no} {cid}: combined {rates['combined']:.3f} "
+              f"over {len(rows)} dev tasks in {minutes:.1f} min "
+              f"(ledger {cumulative:.2f}h)")
+
+    status = run_units(engine, units, run_one=run_one, is_done=is_done,
+                       budget_minutes=args.budget_minutes, label="tournament",
+                       cfg=cfg, work_unit="unit")
+    print(json.dumps(status))
 
 
 def cmd_finalize(args) -> None:
@@ -426,15 +484,16 @@ def main() -> None:
     sub.add_parser("verify")
     sub.add_parser("axes")
     run = sub.add_parser("run")
-    run.add_argument("--candidate", required=True,
-                     help="prompt file name, e.g. p4_error_repair.txt")
+    run.add_argument("--candidate", default=None,
+                     help="prompt file name, e.g. p4_error_repair.txt. Omit to "
+                          "serve EVERY pending candidate of --round from one "
+                          "engine (the default; startup is then paid once).")
     run.add_argument("--round", type=int, default=1, choices=(1, 2))
     run.add_argument("--force", action="store_true")
     run.add_argument("--model", default=None)
-    run.add_argument("--gpu-frac", type=float, default=0.85)
-    run.add_argument("--max-model-len", type=int, default=8192)
-    run.add_argument("--enforce-eager", action="store_true")
-    run.add_argument("--budget-minutes", type=float, default=8.0)
+    run.add_argument("--run-id", default=None)
+    # No engine knobs: configs/multifaceted.yaml `engine:` is the contract.
+    run.add_argument("--budget-minutes", type=float, default=55.0)
     sub.add_parser("finalize")
     args = ap.parse_args()
     if args.cmd == "run":

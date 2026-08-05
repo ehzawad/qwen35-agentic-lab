@@ -28,9 +28,90 @@ seed_salt: multifaceted-v1
 model:
   base: Qwen/Qwen3.5-4B
 
+# ---------------------------------------------------------------------------
+# HARDWARE (2026-08-05 pivot). This is a SINGLE-CARD NVIDIA RTX A5000 study.
+# The RTX A6000 is released completely: it is not waited for, not reserved, not
+# probed, and no opportunistic branch runs on it. A future A6000 experiment is a
+# separate registered run with its own locks, seeds, ledger and declaration.
+#
+# `cuda_visible_bytes` is the MEASURED torch total_memory of the pinned card,
+# not the board total nvidia-smi prints (25,757,220,864 B / 24,564 MiB): the
+# driver reserve is the difference. S19 HARDWARE-INTEGRITY compares the measured
+# value, so the two must not be confused.
+# ---------------------------------------------------------------------------
+hardware:
+  registered_gpu: A5000                 # EXPECT_GPU substring, effectively mandatory
+  expected_name: NVIDIA RTX A5000
+  gpu_count: 1
+  cuda_device_order: PCI_BUS_ID
+  cuda_visible_devices: "0"
+  cuda_visible_bytes: 25282805760       # 23.546 GiB, measured
+  # Exclusivity preflight. The card exposes 24,111 MiB CUDA-visible of a 24,564
+  # MiB board, so this is the ~24,000-MiB-class guard the A5000 pivot registered
+  # (it replaced a 45,056 MiB guard written for a 48 GB card, which no A5000 can
+  # ever satisfy). The margin below 24,000 is the driver's own few hundred MiB,
+  # NOT room for a co-tenant: anything larger than that gap fails the check.
+  min_free_mib: 23500
+  lock: results/agentic/hardware.json   # first GPU stage binds the UUID here
+
+# ---------------------------------------------------------------------------
+# THE REGISTERED ENGINE CONTRACT for every inference stage. ONE copy: every
+# stage reads it through agentlab.suite.configio.engine_contract(), scripts/
+# serve.sh reads the same keys, and configs/agentic_preregister.json
+# machine.engine_contract carries the analyzer's copy (tests cross-check them).
+#
+# Chosen from the live A5000 probe BEFORE any study GPU-hour: at 0.85 the engine
+# measured 19.857 GiB used / 3.69 GiB free with a 9.08 GiB (242,741-token) KV
+# cache and a 10.777 GiB non-KV footprint. 0.80 gives an estimated 7.90 GiB /
+# ~211k-token cache -- still 3.2x the 65,536 tokens eight full 8,192-token
+# requests can occupy -- and holds ~4.2 GiB of real slack. Deliberately NOT
+# compensated upward to 0.8725.
+# ---------------------------------------------------------------------------
+engine:
+  dtype: bfloat16
+  gpu_memory_utilization: 0.80
+  max_model_len: 8192
+  max_num_seqs: 8
+  max_num_batched_tokens: 8192
+  enforce_eager: false
+  enable_thinking: false                # this checkpoint defaults thinking ON
+  multimodal_inputs: REJECTED           # refused, not merely unused
+  tensor_parallel_size: 1
+  # MEASURED operational facts, used for the startup ledger, never as thresholds.
+  measured:
+    startup_s: 289.7
+    greedy_48_token_generation_s: 1.08
+    probe_gpu_memory_utilization: 0.85
+    probe_kv_cache_gib: 9.08
+    probe_kv_cache_tokens: 242741
+    probe_non_kv_footprint_gib: 10.777
+
 budget:
-  gpu_hours_ceiling: 36
+  # 120 measured GPU-hours: the forecaster's minimum defensible pre-calibration
+  # budget for the MANDATORY census below. The old 36 h was set before the
+  # mandatory BP/TP evaluation was costed from measured evaluator rates (25.10
+  # s/episode base, 44.27 s/episode trained over 7,800 mandatory episodes
+  # projects 75-99 h), so 36 h would have silently forced mandatory-sample
+  # shrinkage -- which is forbidden. This is an accounting envelope, not a
+  # decision threshold. The concurrent-vLLM evaluator may finish the whole
+  # programme in ~14-21 h; that is an EXPECTATION, never a registered
+  # measurement. If a post-calibration projection exceeds the ceiling, cut
+  # optional arms in the frozen order; if MANDATORY work still does not fit,
+  # STOP and report INCOMPLETE / INCONCLUSIVE.
+  gpu_hours_ceiling: 120
   ledger: results/agentic/gpu_ledger.jsonl
+  # Engine startup is a real budget line, not overhead to be hand-waved: at the
+  # measured 289.7 s a cold start costs 0.08047 GPU-hours. The pre-pivot chain
+  # paid 85 of them (6.840 h; 50 rejection-sampling shards alone were 4.02 h and
+  # 10 tournament processes 0.80 h). The persistent-engine restructure pays ONE
+  # per stage -- 6 starts, 0.483 h -- saving 6.357 h.
+  engine_starts:
+    registered: 6
+    pre_pivot: 85
+    hours_each: 0.08047
+    hours_registered: 0.483
+    hours_pre_pivot: 6.840
+    hours_saved: 6.357
   # Calibrated estimates (hours) from the council design report, not measurements.
   stage_estimates_h:
     prompt_tournament: [0.8, 1.2]
@@ -41,12 +122,24 @@ budget:
     grpo: [4.0, 6.0]
     final_eval: [2.5, 4.0]
 
+# Sampling for rejection sampling, the prompt tournament and the variance probe.
 decoding:
   temperature: 0.8
   top_p: 0.95
   top_k: 20
   enable_thinking: false
   max_tokens_per_decision: 384
+
+# Deterministic decoding for every preregistered CLAIM (the evaluation arms and
+# the shipping smoke). These are the frozen values in
+# configs/agentic_preregister.json `decoding:`; the evaluator reads them here.
+eval_decoding:
+  temperature: 0.0
+  top_p: 1.0
+  seed: 2786983945                      # 0xA61E0009
+  enable_thinking: false
+  max_tokens_per_decision: 1024
+  concurrency: 8                        # matches engine.max_num_seqs
 
 scenario:
   fault_types: [transient, rate_limit, malformed, wrong_unit]
@@ -174,6 +267,21 @@ sft:
   bsz: 2
   accum: 8
   packing: false
+  gradient_checkpointing: true
+  # The A5000 training arithmetic. Static training memory is 8.455 GiB (bf16 base
+  # policy) + 0.968 GiB (LoRA fp32 params, grads, two Adam moments) = 9.423 GiB.
+  # One 4,096-token sequence of logits over this 248,320-token vocabulary is
+  # ~2.03 GiB, so train batch 2 peaks around 13.5 GiB and gradient checkpointing
+  # keeps the working peak near 14-15 GiB of 23.3 GiB.
+  #
+  # eval_bsz is load-bearing: Hugging Face defaults per_device_eval_batch_size to
+  # 8, which is 8 x 2.03 = 16.24 GiB of logits on top of the 9.423 GiB static
+  # footprint = 25.66 GiB. That CANNOT fit on this card, and it would fail during
+  # the first evaluation rather than at start-up. At batch 1 the peak is ~11.45
+  # GiB. prediction_loss_only stops the trainer from gathering logits at all.
+  eval_bsz: 1
+  eval_accumulation_steps: 1
+  prediction_loss_only: true
 
 # ---------------------------------------------------------------------------
 # Elicitation control (agentlab.prompt_control).
@@ -222,6 +330,18 @@ variance_probe:
   groups_per_family: 48
   groups_per_cell: 12
   generations_per_group: 8
+  # STAGE DISPOSITION, not a gate state. GRPO cannot instantiate on the
+  # registered card (see grpo.stage_disposition), so the probe -- whose only
+  # purpose is to decide whether to spend GRPO hours -- is short-circuited before
+  # it runs. It is therefore NOT_EVALUATED, never "closed": recording "closed"
+  # would claim the complete 144-group / 1,152-rollout probe ran and that a
+  # binding gate failed, which is evidence about the RS-SFT policy that this run
+  # does not have. agentlab.variance refuses to run while this label stands.
+  stage_disposition: NOT_EVALUATED_HARDWARE_SHORT_CIRCUIT
+  # When the probe DOES run (a future registered study), it must run on the
+  # locked RS-SFT adapter -- not the base model. That is the policy whose group
+  # variance the GRPO decision is about.
+  policy: rs_sft_adapter
   gates:
     min_nonzero_reward_sd_frac: 0.60
     min_terminal_disagreement_frac: 0.40
@@ -235,6 +355,32 @@ variance_probe:
 # forbidden. The training pool starts after the probe groups in each cell.
 # ---------------------------------------------------------------------------
 grpo:
+  # NOT RUN. The registered colocate configuration cannot instantiate on the
+  # registered A5000, so the stage's outcome is a DISPOSITION -- what happened to
+  # the stage -- and never one of the gate states PASS/FAIL/INCONCLUSIVE/BUG.
+  #
+  # The arithmetic, all from the live probe:
+  #   vllm_gpu_memory_utilization 0.24 x 23.54644775390625 GiB = 5.651 GiB carve
+  #   vLLM's own colocated policy copy                         = 8.455 GiB
+  #   => the carve is 2.804 GiB SMALLER than the copy it must hold.
+  #   LoRA trainer static 9.420 GiB + that copy = 17.875 GiB of 23.334 GiB free
+  #   before ANY KV cache, CUDA graphs, checkpointed activations, or the 1.53 GiB
+  #   of bf16 logits every 3,072-token completion in the microbatch produces.
+  #
+  # `GRPO_NOT_RUN_HARDWARE_INFEASIBLE` is NOT interchangeable with
+  # `GRPO_NOT_RUN_VARIANCE_GATE_CLOSED`, which would mean the full 144-group
+  # probe ran and a binding gate failed. Microbatch 1, 2,048-token completions,
+  # no-vLLM generation, quantization, offload and another card each define a
+  # DIFFERENT treatment and may not be substituted under this branch.
+  stage_disposition: GRPO_NOT_RUN_HARDWARE_INFEASIBLE
+  disposition_artifact: results/agentic/grpo_disposition.json
+  disposition_arithmetic:
+    vllm_allocation_gib: 5.651
+    vllm_policy_copy_gib: 8.455
+    trainer_static_gib: 9.420
+    combined_gib: 17.875
+    card_free_gib: 23.334
+    logits_gib_per_3072_token_sequence: 1.53
   source_split: grpo_train
   pool_offset_per_cell: 12          # skip the probe groups
   prompt_groups: 192
@@ -279,11 +425,39 @@ grpo:
     clamp: [-0.5, 1.3]
 
 # ---------------------------------------------------------------------------
-# Final paired evaluation arms. The primary training claim is TP - BP.
+# Final paired evaluation. The primary training claim is TP - BP.
 # `tasks` is the frozen eval_core size from configs/agentic_preregister.json
-# (1,200 held-out specs, 100 per cell over 12 cells); the earlier 800 here
-# predated the twelve-cell design.
+# (1,200 held-out specs, 100 per cell over 12 cells).
+#
+# R0/RP are ABSENT BY DESIGN: no GRPO checkpoint exists (grpo.stage_disposition).
+# Listing them as planned arms and then silently failing to generate them would
+# read as missing data rather than as a registered decision, so they are named
+# here in their own key and never scheduled.
+#
+# `manifests` is the MANDATORY census, 7,800 episodes, and it is the work table
+# the chain's eval stage iterates -- so a registered manifest can no longer be
+# preregistered and then never invoked:
+#   core   1,200 x {clean, faulted} x {BP, TP}          = 4,800
+#   mt       600 x clean            x {BP, TP}          = 1,200
+#   h8       200 ADDITIONAL tasks   x {BP, TP}          =   400
+#            (the other 200 of the registered 400 H8 instances are already in
+#             core; adding faulted controls here would be a NEW preregistration)
+#   absent   600 x clean, redacted  x {BP, TP}          = 1,200
+#   perm     100 x clean, permuted  x {BP, TP}          =   200
+# Mandatory samples may never shrink. The descriptive B0/T0 arms and the stress
+# set are OPTIONAL (cut ranks 3 and 4) and are scheduled only after every
+# mandatory unit is complete, so a budget stop can never eat mandatory episodes.
 # ---------------------------------------------------------------------------
 eval:
   tasks: 1200
-  arms: [B0, BP, T0, TP, R0, RP]
+  mandatory_arms: [BP, TP]
+  descriptive_arms: [B0, T0]
+  absent_by_design_arms: [R0, RP]
+  mandatory_episodes: 7800
+  manifests:
+    - {name: core,   specs: eval.jsonl,        conditions: [clean, faulted], control: none,     tasks: 1200, mandatory: true}
+    - {name: mt,     specs: eval_mt.jsonl,     conditions: [clean],          control: none,     tasks: 600,  mandatory: true}
+    - {name: h8,     specs: eval_h8.jsonl,     conditions: [clean],          control: none,     tasks: 200,  mandatory: true}
+    - {name: absent, specs: eval_absent.jsonl, conditions: [clean],          control: redacted, tasks: 600,  mandatory: true}
+    - {name: perm,   specs: eval_perm.jsonl,   conditions: [clean],          control: permuted, tasks: 100,  mandatory: true}
+    - {name: stress, specs: eval_stress.jsonl, conditions: [stress],         control: none,     tasks: 280,  mandatory: false}
