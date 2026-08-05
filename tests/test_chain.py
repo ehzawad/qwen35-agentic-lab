@@ -248,6 +248,62 @@ def test_finalize_refuses_after_the_seed_is_revealed(tmp_path):
         mod.cmd_finalize_prereg(argparse.Namespace(force=False))
 
 
+@pytest.mark.parametrize("cmd,args,what", [
+    ("cmd_lock_prompt", {"file": "ignored"}, "prompt_winner"),
+    ("cmd_lock_checkpoint", {"path": "ignored", "stage": "rs_sft"}, "checkpoint"),
+])
+def test_neither_lock_can_be_changed_after_the_seed_is_revealed(tmp_path, cmd,
+                                                                args, what):
+    """Re-locking after a reveal is the one move that would make S18 worthless.
+
+    Once held-out results are unblinded, swapping in a different checkpoint or a
+    different prompt turns a preregistered comparison into a search over the test
+    set. Both locks refuse BEFORE reading their input, so a re-lock cannot even be
+    attempted with a valid file.
+    """
+    mod = _locks_module()
+    mod.ROOT = tmp_path
+    mod.RESULTS = tmp_path
+    mod.REVEAL = tmp_path / "seed_reveal.json"
+    mod.REVEAL.write_text("{}")
+    with pytest.raises(SystemExit, match="REFUSED") as e:
+        getattr(mod, cmd)(argparse.Namespace(**args))
+    assert what in str(e.value)
+    assert "AMENDMENT" in str(e.value)
+
+
+def test_a_reveal_that_is_not_strictly_after_the_last_lock_refuses(tmp_path,
+                                                                  monkeypatch):
+    """Same-second locking must not be allowed to read as "revealed after".
+
+    S18 is an ORDERING claim. If a lock and the reveal share a timestamp, the
+    receipt cannot show which came first, and a reader has to take it on trust.
+    The script refuses and says to wait a second rather than accepting an
+    ambiguous receipt or backdating one.
+    """
+    mod = _locks_module()
+    mod.ROOT = tmp_path
+    mod.RESULTS = tmp_path
+    mod.LOCKS = tmp_path / "locks.json"
+    mod.REVEAL = tmp_path / "seed_reveal.json"
+    stamp = "2026-08-05T12:00:00Z"
+    mod.LOCKS.write_text(json.dumps({
+        "prompt_winner": {"file": "p1", "sha256": "0" * 64, "locked_at": stamp},
+        "checkpoint": {"path": "out/x", "stage": "rs_sft", "locked_at": stamp}}))
+    monkeypatch.setattr(mod, "now", lambda: stamp)          # same second, not after
+    monkeypatch.setattr(mod, "verify_finalization",
+                        lambda: {"present": False, "anchor": "oldest-prereg-commit"})
+    monkeypatch.setattr(mod, "preregistration_commit", lambda: "a" * 40)
+    with pytest.raises(SystemExit, match="not strictly after"):
+        mod.cmd_reveal(argparse.Namespace(require_finalization=False))
+    assert not mod.REVEAL.exists()
+    # one second later the same call is accepted, so the refusal is an ORDERING
+    # check and not an unconditional block
+    monkeypatch.setattr(mod, "now", lambda: "2026-08-05T12:00:01Z")
+    assert mod.cmd_reveal(argparse.Namespace(require_finalization=False)) == 0
+    assert json.loads(mod.REVEAL.read_text())["revealed_at"] > stamp
+
+
 def test_reveal_can_be_required_to_anchor_on_the_finalized_prereg():
     """The chain's lock stage passes --require-finalization."""
     chain_text = CHAIN.read_text(encoding="utf-8")

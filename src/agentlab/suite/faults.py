@@ -259,12 +259,48 @@ def fault_payload_is_error(text: str) -> bool:
 
 
 # ===========================================================================
-# Suite v1 runtime injectors (env-architect spec; used by suite.runtime)
+# OPEN PRE-PUSH BLOCKER (2026-08-05): TWO FAULT CONTRACTS COEXIST HERE.
 #
-# The FaultInjector above is the *certification-layer* contract (recovery
-# tokens, marked envelopes) drafted for the evaluation harness. The episode
-# runtime for suite v1 uses the injectors below, whose payloads are the exact
-# committed forms from the council env-architect section:
+# `FaultInjector` above is the contract the CLAIM-BEARING evaluation harness
+# uses (`suite.evaluate.SpecRuntime`): every fault error carries a 128-bit
+# `recovery_token`, and `provenance.certify_recovery` credits recovery only when
+# the remediation contract is satisfied -- the token echoed back for
+# transient/malformed, the token echoed back on a LATER decision for rate_limit,
+# the corrected target unit for wrong_unit.
+#
+# `FaultEngine` below is the contract every OTHER consumer uses via
+# `suite.runtime.EpisodeRuntime`: rejection sampling (`multidistill`), the prompt
+# tournament (`prompt_control`), the variance probe (`variance`) and generation.
+# Its payloads carry NO token, `tool_schemas_for_family` does not offer a
+# `recovery_token` argument, `EpisodeRuntime.dispatch` neither parses nor strips
+# one, and `verify._fault_report` credits recovery for any later canonical
+# observation at the faulted node -- a bare retry.
+#
+# MEASURED CONSEQUENCES, all of them outcome-blind (no GPU stage has run):
+#   * the environment the policy is TRAINED in is not the environment it is
+#     EVALUATED in, for all four fault classes;
+#   * two definitions of strict success survive, and the weaker one is what the
+#     SFT acceptance filter enforces, so the corpus may contain trajectories the
+#     claim-bearing certifier would label `blind_retry`;
+#   * prompt candidates p4_error_repair and p8_combined instruct the model about
+#     `recovery_token`, but the tournament that SELECTS the winning prompt runs in
+#     the tokenless environment, where that instruction is inert.
+#
+# The paired TP-BP contrast is NOT invalidated -- both arms face the identical
+# evaluation environment -- but "one fault engine with recovery tokens" is false
+# as the tree stands, and a reader would wrongly conclude the trained arm was
+# trained on the contract it is scored against.
+#
+# THE FIX IS NOT A THRESHOLD CHANGE. It is to port the token-bearing envelope,
+# the `recovery_token` tool argument and the remediation predicate into the
+# canonical runtime and verifier so ONE engine serves both paths, then
+# re-measure `scenario.tool_output_max_tokens` (208, measured against the
+# tokenless payloads below). That changes the training treatment, so it belongs
+# to the protocol owner as a recorded decision, not to an integrator at a push
+# gate. Until then this file is deliberately NOT presented as reconciled.
+#
+# Suite v1 runtime injectors (env-architect spec; used by suite.runtime), whose
+# payloads are the exact committed forms from the council env-architect section:
 #
 #   transient    {"ok": false, "error": "transient_backend", "retryable": true,
 #                 "request_id": ...}; fires once, before any mutation; the next

@@ -5,8 +5,9 @@ SHELL := /bin/bash
 # index read off nvidia-smi selects the card you actually meant.
 export CUDA_DEVICE_ORDER ?= PCI_BUS_ID
 # Deliberately not forced: a single-GPU machine should just work. On a multi-GPU
-# box pick explicitly, e.g. `CUDA_VISIBLE_DEVICES=1 make smoke`, and optionally
-# set EXPECT_GPU=A6000 to make a wrong pin fail loudly instead of silently.
+# box pick explicitly, e.g. `CUDA_VISIBLE_DEVICES=0 make smoke`. EXPECT_GPU
+# defaults to the registered card (A5000) in agentlab.env, so a wrong pin fails
+# loudly instead of silently; set it explicitly only to override that default.
 export PYTHONPATH := src
 export TOKENIZERS_PARALLELISM := false
 
@@ -29,7 +30,7 @@ MERGED  := out/$(SLUG)-merged
         eval-base eval-rssft eval-grpo merge serve clean
 
 help:
-	@echo "Qwen3.5-4B agentic pipeline lab  (model=$(MODEL), GPU=A6000)"
+	@echo "Qwen3.5-4B agentic pipeline lab  (model=$(MODEL), GPU=A5000, single card)"
 	@echo
 	@echo "  agentic       THE supported end-to-end pipeline (see README)"
 	@echo "  agentic-plan  the same chain as a dry run: prints every command,"
@@ -127,7 +128,7 @@ verify:
 #         -> grpo? -> lock -> eval -> verdict
 #
 # Pin the card for a real run; the plan target needs no GPU at all:
-#   CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 EXPECT_GPU=A6000 make agentic
+#   CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 EXPECT_GPU=A5000 make agentic
 #
 # Pass stage selection through ARGS, e.g. `make agentic ARGS="--from sft"` or
 # `make agentic ARGS="--only verdict"`. Re-running after a kill resumes: each

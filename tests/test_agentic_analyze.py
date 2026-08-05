@@ -1017,6 +1017,35 @@ def test_s19_missing_hardware_provenance_is_inconclusive_and_no_winner(tmp_path)
     assert "S19" in v["winner"]
 
 
+def test_s19_no_claim_bearing_path_reaches_a_winner_without_provenance(tmp_path):
+    """The adversarial case: strip the WHOLE hardware fingerprint off one arm.
+
+    Making an inconvenient arm unattributable must not be cheaper than reporting
+    it. S19 skips unfingerprinted traces when it builds the paired comparison,
+    which is exactly why the *absence* has to be fatal on its own -- otherwise
+    stripping the losing arm would leave a clean-looking paired set behind.
+    Only the ten registered fingerprint fields are removed here, so the trace
+    still pairs and still carries its spec digest and base id, so nothing turns
+    into a BUG and S19 alone withholds the winner. (The `_mini` fixture supplies
+    no split/spec manifests, so S9-S15 and S18 are INCONCLUSIVE in every one of
+    these cases; the assertion below is that S19 joins them under nothing but a
+    missing fingerprint.)
+    """
+    def mutate(rows, specs):
+        for name in ("TP.clean.none.jsonl", "TP.faulted.none.jsonl"):
+            for row in rows[name]:
+                for field in _HW["required_trace_fields"]:
+                    row["provenance"].pop(field, None)
+    v = _mini(tmp_path, mutate, n=40)
+    s19 = v["vetoes"]["S19"]
+    assert s19["status"] == "INCONCLUSIVE", s19
+    assert s19["numbers"]["n_missing"] == 80
+    assert not v["any_bug"]
+    assert "S19" in v["mandatory_inconclusive"]
+    assert v["winner_rank"] == 2 and "NO VERDICT" in v["winner"]
+    assert "S19" in v["winner"]
+
+
 def test_s19_a_known_wrong_card_is_a_bug(tmp_path):
     """Outcome 2 of 4: the wrong GPU model is a harness BUG, not a nuance."""
     def mutate(rows, specs):

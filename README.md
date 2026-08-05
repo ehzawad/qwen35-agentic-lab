@@ -70,22 +70,35 @@ end-to-end workflow, and alternate pipelines are out of scope.
 
 ## Task families and the tool cap
 
-Three task families, no more:
+Three task families, no more. The names in parentheses are the committed family
+identifiers used by the code, the suite manifests, the preregistration and the
+analyzer — there is one taxonomy, not a prose one and a machine one:
 
-1. **Compositional quantitative tasks** — require `kb_lookup → unit_convert →
-   calculator`, with facts unavailable in the prompt and exact independently
-   computed answers.
-2. **Synthetic multi-hop knowledge-graph tasks** — each lookup reveals the key
-   for the next; dependency depth generated at 2, 4, and 8+; the verifier
-   confirms the minimal dependency path.
-3. **Constrained stateful procurement** — inventory, units, budget, and
-   irreversible commitments, adding exactly two environment tools:
-   `inspect_inventory` and `commit_order`.
+1. **Compositional quantitative tasks** (`typed_relay`) — require `kb_lookup →
+   unit_convert → calculator` in a causally forced order, with facts unavailable
+   in the prompt and exact independently computed answers.
+2. **Synthetic multi-hop knowledge-graph tasks** (`lookup_chain`) — each lookup
+   reveals the key for the next; dependency depth generated at 2, 4, 8 and 12;
+   the verifier confirms the minimal dependency path.
+3. **Constrained stateful procurement** (`fulfillment`) — inventory, units,
+   budget, and irreversible commitments, adding exactly two environment tools:
+   `warehouse_query` and `warehouse_update`.
 
-That is a hard cap of **five tools**: the three existing ones plus the two
-environment operations. Error recovery is an evaluation and training axis
-applied across the families (deterministic, seeded fault injection with held-out
-wording), not a fourth family.
+That is a hard cap of **five tools**: `kb_lookup`, `unit_convert`, `calculator`,
+`warehouse_query`, `warehouse_update`. Only `fulfillment` is offered the two
+environment operations; the other two families see three tools.
+
+> **Correction (forward, no history rewrite).** Earlier revisions of this README
+> named the two environment tools `inspect_inventory` and `commit_order`. Those
+> names never existed in the code. The tools are, and always were,
+> `warehouse_query` and `warehouse_update` — the names the committed schemas, the
+> eight prompt candidates and every trace use. Nothing but this README was
+> wrong, and the mistake is corrected here rather than by rewriting the pushed
+> commit that contained it.
+
+Error recovery is an evaluation and training axis applied across the families
+(deterministic, seeded fault injection with held-out wording), not a fourth
+family.
 
 ## The mandatory elicitation control
 

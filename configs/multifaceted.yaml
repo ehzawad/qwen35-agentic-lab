@@ -171,9 +171,12 @@ suite:
   rs_source: distill            # 2,400 specs, 200 per cell, train templates 0-7
   oracle_source: oracle_sft     # 4,800 specs, 400 per cell, train templates 0-7
   grpo_pool: grpo_train         # 2,400 specs, 200 per cell, train templates 0-7
-  dev: dev                      # 240 specs, 20 per cell, dev templates 8-9
+  dev: dev                      # 3,600 specs, 300 per cell, dev templates 8-9
   eval: eval                    # 1,200 specs, 100 per cell, eval templates 10-11
   stress: eval_stress           # 280 specs, 40 per cell at or above H8
+  # The four claim/control splits the eval stage also consumes are listed in
+  # `eval.manifests` below, so the work table and the split names have ONE
+  # definition: eval_mt 600, eval_h8 200, eval_absent 600, eval_perm 100.
 
 # ---------------------------------------------------------------------------
 # Training mixture over the RS source split. H means causally necessary calls,
@@ -297,15 +300,16 @@ sft:
 # 200 per axis for the top two), over the three CLAIM axes -- recovery,
 # all-three-tools orchestration at H4, and clean H8 -- not per family.
 #
-# OPEN CONFLICT, for the tournament stage to resolve before spending GPU time:
-# the committed dev split (20 specs per cell, 240 total) cannot supply 300
-# instances per axis. Measured shortfalls: recovery 240/300, orchestration
-# 20/300 (typed_relay-h4 only), h8 40/300. `python -m agentlab.prompt_control
-# axes` prints the per-cell dev size that would satisfy each axis; raising it in
-# configs/suite_v1.toml (not a frozen file) and regenerating is the cheap fix,
-# and it changes the tournament's GPU cost, so it is a budget decision rather
-# than a reconciliation one. prompt_control refuses to run a smaller tournament
-# under the preregistered name.
+# CONFLICT RESOLVED (2026-08-05) BY GENERATING THE REGISTERED SAMPLES, NOT BY
+# SHRINKING THE TOURNAMENT. The dev split used to hold 20 specs per cell (240
+# total) and could supply only recovery 240/300, orchestration 20/300
+# (typed_relay-h4 only) and h8 40/300. Lowering `round1_per_axis` would have been
+# a moved goalpost, so configs/suite_v1.toml raised dev to 300 per cell (3,600
+# total) and the suite was regenerated. Realized axis pools, asserted by the
+# generator and recorded in data/suite/v1/manifest.json `realized`: recovery
+# 3,600, orchestration 300, h8 600, against the registered 300 each.
+# `python -m agentlab.prompt_control axes` re-derives them, and prompt_control
+# still refuses to run a smaller tournament under the preregistered name.
 # ---------------------------------------------------------------------------
 prompt_control:
   n_candidates: 8
@@ -349,10 +353,17 @@ variance_probe:
     max_clip_frac: 0.05
 
 # ---------------------------------------------------------------------------
-# Selective env-mode GRPO (agentlab.multigrpo). Map-style dataset only: rows
-# carry family/task_id/spec/kb/nodes so TRL's repeat sampler reconstructs the
-# identical task for every group member. Dataset-free random reset() is
-# forbidden. The training pool starts after the probe groups in each cell.
+# Selective env-mode GRPO. The settings below are the REGISTERED configuration
+# whose infeasibility is the finding; there is deliberately NO `agentlab.multigrpo`
+# module, because writing a trainer for a stage that cannot instantiate would
+# invite someone to run a substituted variant under this branch's name. The GRPO
+# branch is out of v1 scope by unanimous council ruling; these keys exist so the
+# arithmetic below is checkable against something concrete rather than recalled.
+#
+# Had it run: map-style dataset only, rows carrying family/task_id/spec/kb/nodes
+# so TRL's repeat sampler reconstructs the identical task for every group member;
+# dataset-free random reset() forbidden; the training pool starting after the
+# probe groups in each cell.
 # ---------------------------------------------------------------------------
 grpo:
   # NOT RUN. The registered colocate configuration cannot instantiate on the

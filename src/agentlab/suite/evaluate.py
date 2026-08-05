@@ -333,6 +333,13 @@ def _trace_row(spec: dict, *, arm: str, condition: str, control: str, budgets: d
         "split": spec.get("split"), "horizon": spec.get("horizon"),
         "template_id": spec.get("template_id"),
         "template_hash": spec.get("template_hash"),
+        # FROZEN SEAM (clustering): `template_cluster_id` is the STRUCTURAL
+        # cluster the preregistered bootstrap resamples, and the paraphrase
+        # `template_id` is explicitly NOT it. It is carried natively here rather
+        # than back-filled by the analyzer from the --specs manifest, so a trace
+        # set is self-describing: an episode whose cluster is unknown makes its
+        # gate INCONCLUSIVE instead of silently clustering on something else.
+        "template_cluster_id": spec.get("template_cluster_id"),
         "pattern_id": spec.get("pattern_id"),
         "all_tools_required": bool(spec.get("all_tools_required")),
         "arm": arm, "condition": condition, "control": control,

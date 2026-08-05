@@ -309,18 +309,12 @@ def run(spec: dict, policy, *, arm: str = "TP", condition: str = "clean",
                 "max_tokens": 1024, "enable_thinking": False},
         run_meta=run_meta,
     )
-    # ---- SEAM (frozen contract, one line owed by the trace writer) ----------
-    # The analyzer clusters the bootstrap on `template_cluster_id`. The spec
-    # carries it (frozen contract), but agentlab.suite.evaluate._trace_row copies
-    # a fixed field list from the spec onto the trace row and does not yet copy
-    # this one -- that line belongs to the suite/runtime owner, not here, and is
-    # reported as a seam rather than reimplemented.
-    #
-    # Two things make this shim safe. First, the analyzer ALSO reads the field
-    # from the authoritative --specs manifest (analyze._backfill_from_specs), so
-    # production works today without the shim. Second, the shim only propagates a
-    # value the spec already declares; it invents nothing. Delete it the moment
-    # _trace_row carries `template_cluster_id`.
+    # SEAM CLOSED: `evaluate._trace_row` now carries `template_cluster_id`
+    # itself, so this helper no longer stamps it. The assertion below is the
+    # regression guard: if the trace writer ever stops carrying the registered
+    # clustering field, every scored fixture fails here rather than quietly
+    # falling back to the analyzer's --specs manifest back-fill.
     if spec.get("template_cluster_id") is not None:
-        trace.setdefault("template_cluster_id", spec["template_cluster_id"])
+        assert trace.get("template_cluster_id") == spec["template_cluster_id"], \
+            "evaluate._trace_row must carry the registered clustering field"
     return trace
