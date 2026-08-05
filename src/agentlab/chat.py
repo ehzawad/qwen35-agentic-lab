@@ -122,7 +122,7 @@ def render(proc, messages: list[dict], tools: list[dict] | None = None,
 def run_agent_loop(model, proc, messages: list[dict], tools_schemas: list[dict],
                    max_turns: int = 4, max_new_tokens: int = 768,
                    enable_thinking: bool = True, verbose: bool = True,
-                   episode=None, **gen_kw) -> tuple[list[dict], str]:
+                   episode=None, dispatcher=call_tool, **gen_kw) -> tuple[list[dict], str]:
     """Generate, execute any tool calls, feed results back, repeat.
 
     Returns the full transcript and the final assistant text. Stops as soon as a
@@ -130,14 +130,23 @@ def run_agent_loop(model, proc, messages: list[dict], tools_schemas: list[dict],
 
     Pass `episode` (a trace.Episode) to record each turn's thinking, calls and
     tool results. It is optional and costs nothing when absent.
+
+    `dispatcher(name, arguments) -> str` routes tool execution. The default is
+    the global call_tool; suite evaluation passes an EpisodeRuntime so each
+    rollout gets its own KB view, state and fault schedule. If the dispatcher
+    exposes begin_decision(), it is called once per assistant turn -- that is
+    the logical clock the rate-limit fault contract counts in.
     """
     import torch
 
     convo = list(messages)
     final = ""
     device = next(model.parameters()).device
+    begin_decision = getattr(dispatcher, "begin_decision", None)
 
     for turn in range(max_turns):
+        if begin_decision is not None:
+            begin_decision()
         text = render(proc, convo, tools=tools_schemas, enable_thinking=enable_thinking)
         inputs = proc(text=[text], return_tensors="pt").to(device) if _is_processor(proc) \
             else proc([text], return_tensors="pt").to(device)
@@ -159,6 +168,9 @@ def run_agent_loop(model, proc, messages: list[dict], tools_schemas: list[dict],
             convo.append({"role": "assistant", "content": final})
             if episode is not None:
                 episode.turn(thinking=extract_thinking(completion), text=final)
+            record_final = getattr(dispatcher, "finalize_text", None)
+            if record_final is not None:
+                record_final(final)
             break
 
         convo.append(
@@ -172,7 +184,7 @@ def run_agent_loop(model, proc, messages: list[dict], tools_schemas: list[dict],
         )
         results = []
         for c in calls:
-            result = call_tool(c["name"], c["arguments"])
+            result = dispatcher(c["name"], c["arguments"])
             results.append(result)
             if verbose:
                 print(f"    -> {c['name']}({c['arguments']}) = {result}")

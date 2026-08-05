@@ -1,0 +1,29 @@
+# Suite v1 committed generation seeds and sizes.
+#
+# The seed block below is the exact committed form from the council
+# env-architect spec. After the Preregister phase commit these values are
+# FROZEN: a genuinely broken gate gets a dated AMENDMENT section plus fresh
+# held-out seeds, never an in-place change.
+
+suite = "agentlab-suite-v1"
+oracle_sft = 0xA61E0001
+distill = 0xA61E0002
+grpo_train = 0xA61E0003
+dev = 0xA61E0004
+eval = 0xA61E0005
+stress = 0xA61E0006
+
+# Per-cell sizes over the 12 primary family/horizon cells
+# (lookup_chain/typed_relay at H 2/4/8/12; fulfillment at H 4/8/14/20).
+# Totals: oracle_sft 4,800; distill 2,400; grpo_train 2,400; dev 240;
+# eval 1,200; stress 280 (40 per cell at or above H8, 7 cells).
+[sizes]
+oracle_sft = 400
+distill = 200
+grpo_train = 200
+dev = 20
+eval = 100
+stress = 40
+
+[layout]
+out_dir = "data/suite/v1"
