@@ -198,6 +198,85 @@ def test_s11_redacted_success_is_a_bug(tmp_path):
     assert v["any_bug"] and v["winner"].startswith("NO VERDICT")
 
 
+def test_s11_unexecuted_redacted_control_is_a_bug_not_a_pass(tmp_path):
+    """A control that never ran must never read as a clean control.
+
+    Before the fix every redacted episode looked like this row: the runtime
+    rejected the deliberately-broken oracle, so the policy made zero decisions and
+    S11 reported "zero raw and certified success" over nothing at all.
+    """
+    def mutate(rows, specs):
+        red = provenance.redact_spec(specs[0])
+        stub = run(red, Guesser("whatever"), arm="TP", condition="clean",
+                   control="redacted", prompt_sha=P8_SHA)
+        stub["messages"], stub["events"] = [], []
+        stub["runner"] = {"n_decisions": 0, "n_calls": 0,
+                          "termination_reason": "spec_error", "wall_s": 0.0}
+        stub["score"] = {"raw_success": False, "certified_success": False,
+                         "runaway": False, "hallucinated": False}
+        rows["TP.clean.redacted.jsonl"] = [stub]
+    v = _mini(tmp_path, mutate)
+    assert v["vetoes"]["S11"]["status"] == "BUG", v["vetoes"]["S11"]
+    assert "never ran" in v["vetoes"]["S11"]["detail"]
+    assert v["any_bug"] and v["winner"].startswith("NO VERDICT")
+
+
+def test_a_harness_bug_vetoes_every_gate_and_floor_without_erasing_them(tmp_path):
+    """A BUG vetoes downstream model-level gates AND floors, relabel not delete."""
+    def mutate(rows, specs):
+        rows["TP.clean.none.jsonl"] = rows["TP.clean.none.jsonl"][:-1]
+    v = _mini(tmp_path, mutate)
+    assert v["vetoes"]["S8"]["status"] == "BUG"
+    assert {g["status"] for g in v["gates"].values()} == {"BUG"}
+    assert {f["status"] for arm in v["floors"].values() for f in arm.values()} == {"BUG"}
+    # nothing is hidden: what each gate measured survives for the record
+    assert all("measured_status" in g for g in v["gates"].values())
+    assert all("S8" in g["detail"] for g in v["gates"].values())
+    assert v["winner"].startswith("NO VERDICT")
+
+
+def test_no_gate_silently_degrades_a_fail_into_inconclusive(tmp_path):
+    """Underpowered gates say INCONCLUSIVE, but a measured FAIL stays on the record.
+
+    Also pins the companion rule: an interval gate whose threshold is unreachable
+    at the observed n is INCONCLUSIVE (a sample-size statement), never a FAIL
+    blamed on the policy.
+    """
+    v = _mini(tmp_path)  # n=12: far below every preregistered sample size
+    for name in ("ER2", "ER3", "ER6", "ER7"):
+        assert v["gates"][name]["status"] == "INCONCLUSIVE", (name, v["gates"][name])
+    # ER6/ER7 are unmeasurable at n=24, and they say so with the arithmetic
+    assert "unmeasurable at n=" in v["gates"]["ER7"]["detail"]
+    assert v["gates"]["ER7"]["numbers"]["best_possible_ub"] > 0.01
+    # a downgrade never deletes the measurement it downgraded
+    for name in ("ER2", "ER3"):
+        g = v["gates"][name]
+        if "measured_status" in g:
+            assert g["measured_status"] in ("PASS", "FAIL")
+            assert "measured anyway for the record" in g["detail"]
+    # and INCONCLUSIVE never reads as support
+    assert v["claims"]["primary_certified_error_recovery"] == "INCONCLUSIVE"
+    assert not v["winner"].startswith("TP")
+
+
+def test_a_real_fail_outranks_missing_evidence_in_a_claim(tmp_path):
+    """One refuted gate refutes the claim even when other gates are unmeasured."""
+    traces = tmp_path / "traces"
+    specs = [chain_spec(i, horizon=2) for i in range(40)]
+    for arm in ("BP", "TP"):
+        _run_arm_traces(specs, arm, traces, recover_pct={"BP": 90, "TP": 10})
+    secret_path = tmp_path / "secret.hex"
+    secret_path.write_text(SECRET.hex())
+    v = agentic_verdict(str(traces), str(PREREG), str(secret_path),
+                        results_dir=str(tmp_path))
+    assert not v["any_bug"]
+    # the trained arm recovers far worse than the prompted base: ER8 must FAIL
+    assert v["gates"]["ER8"]["status"] == "FAIL", v["gates"]["ER8"]
+    assert any(g["status"] == "INCONCLUSIVE" for g in v["gates"].values())
+    assert v["claims"]["primary_certified_error_recovery"] == "FAIL"
+    assert not v["winner"].startswith("TP")
+
+
 def test_s13_forged_receipt_is_a_bug(tmp_path):
     def mutate(rows, specs):
         row = rows["TP.clean.none.jsonl"][0]

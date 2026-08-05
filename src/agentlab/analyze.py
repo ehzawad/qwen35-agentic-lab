@@ -501,6 +501,68 @@ def _g(status: str, detail: str, **numbers) -> dict:
     return {"status": status, "detail": detail, "numbers": numbers}
 
 
+def _no_verdict(res: dict, why: str) -> dict:
+    """Downgrade a measured gate to INCONCLUSIVE without ERASING what it measured.
+
+    Underpowered evidence must never be read as a PASS -- but it must never be
+    used to bury a FAIL either. A downgrade therefore keeps the measured status
+    under `measured_status` and repeats the original detail, so a FAIL is always
+    still visible in the record and in the rendered report.
+    """
+    if res["status"] not in ("PASS", "FAIL"):
+        return res
+    out = _g("INCONCLUSIVE", f"{why}; measured anyway for the record "
+             f"[{res['status']}]: {res['detail']}", **res["numbers"])
+    out["measured_status"] = res["status"]
+    return out
+
+
+def _wilson_ub_gate(name: str, k: int, n: int, threshold: float, detail: str,
+                    **numbers) -> dict:
+    """A Wilson-UPPER-bound gate, with an explicit unmeasurable-at-this-n state.
+
+    If the interval is so wide that even k=0 cannot clear the threshold, the gate
+    is not a statement about the model at all: reporting FAIL would blame the
+    policy for a sample size, and reporting PASS is impossible. That is
+    INCONCLUSIVE. It can never turn a real FAIL into a PASS -- the k=0 bound is
+    the smallest upper bound available at this n, so if it clears the threshold
+    the gate is genuinely measurable and the observed k decides.
+    """
+    from agentlab.suite.stats import wilson as _wilson
+
+    p, lo, hi = _wilson(k, n)
+    _, _, best = _wilson(0, n)
+    if best > threshold:
+        return _g("INCONCLUSIVE",
+                  f"{detail}: unmeasurable at n={n} (even k=0 gives UB {best:.4f} "
+                  f"> {threshold}); observed {k}/{n}, UB {hi:.4f}",
+                  k=k, n=n, ub=hi, best_possible_ub=best, **numbers)
+    return _g("PASS" if hi <= threshold else "FAIL",
+              f"{detail} {p:.4f} [{lo:.4f},{hi:.4f}], Wilson UB vs {threshold}",
+              k=k, n=n, ub=hi, **numbers)
+
+
+def _wilson_lb_gate(name: str, k: int, n: int, threshold: float, detail: str,
+                    **numbers) -> dict:
+    """A Wilson-LOWER-bound floor gate, with the same unmeasurable-at-this-n state.
+
+    Mirror of `_wilson_ub_gate`: if even a perfect k=n cannot clear the floor,
+    the sample is too small for the gate to be a statement about the model.
+    """
+    from agentlab.suite.stats import wilson as _wilson
+
+    p, lo, hi = _wilson(k, n)
+    _, best, _ = _wilson(n, n)
+    if best < threshold:
+        return _g("INCONCLUSIVE",
+                  f"{detail}: unmeasurable at n={n} (even k=n gives LB {best:.4f} "
+                  f"< {threshold}); observed {k}/{n}, LB {lo:.4f}",
+                  k=k, n=n, lb=lo, best_possible_lb=best, **numbers)
+    return _g("PASS" if lo >= threshold else "FAIL",
+              f"{detail} {p:.3f} [{lo:.3f},{hi:.3f}], Wilson LB vs {threshold}",
+              k=k, n=n, lb=lo, **numbers)
+
+
 def load_preregister(path: str | pathlib.Path) -> dict:
     return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
 
@@ -618,9 +680,20 @@ def veto_s10_splits(split_manifests: dict[str, list[dict]] | None) -> dict:
 
 
 def veto_s11_absent_info(eps: dict, prereg: dict, arms=("BP", "TP")) -> dict:
+    """Absent-information control: zero raw AND zero certified success.
+
+    Precedence is fixed and BUG-first, because the two failure modes are not
+    comparable: a LEAK (any raw success on a redacted instance) means the answers
+    are recoverable without the hidden value, which invalidates every capability
+    number in the run, so it can never be reported as mere missing coverage. A
+    control episode that never ran is the second BUG: "zero success" over
+    unattempted episodes is a vacuous pass on the one control that makes the rest
+    of the suite mean anything. Only genuinely thin-but-honest coverage is
+    INCONCLUSIVE.
+    """
     need = int(prereg["controls"]["absent_information"]["n_per_family"])
     per_family: dict = {}
-    leaks = []
+    leaks, unexecuted = [], []
     for (arm, condition, control), tasks in eps.items():
         if control != "redacted" or arm not in arms:
             continue
@@ -628,9 +701,18 @@ def veto_s11_absent_info(eps: dict, prereg: dict, arms=("BP", "TP")) -> dict:
             per_family[ep["family"]] = per_family.get(ep["family"], 0) + 1
             if ep["rep"]["raw_success"] or ep["rep"]["certified_success"]:
                 leaks.append(f"{arm}/{ep['task_id']}")
+            runner = ep["trace"].get("runner") or {}
+            if (runner.get("termination_reason") == "spec_error"
+                    or not runner.get("n_decisions")):
+                unexecuted.append(f"{arm}/{ep['task_id']}")
     if leaks:
         return _g("BUG", f"redacted-control SUCCESS (harness leakage): {leaks[:3]}",
                   leaks=len(leaks))
+    if unexecuted:
+        return _g("BUG", f"{len(unexecuted)} redacted-control episodes never ran a "
+                  f"single decision, e.g. {unexecuted[:3]} -- their zero success rate "
+                  f"is vacuous, not evidence that the hidden value is required",
+                  unexecuted=len(unexecuted))
     if not per_family:
         return _g("INCONCLUSIVE", "no redacted-control traces found")
     short = {f: n for f, n in per_family.items() if n < need * len(arms)}
@@ -882,8 +964,6 @@ def _bootstrap_gate(pairs: list[tuple], outcome_fn, *, label: str, seed: int,
 
 
 def evaluate_agentic_gates(eps: dict, prereg: dict) -> dict:
-    from agentlab.suite.stats import wilson as _wilson
-
     seed = int(prereg["statistics"]["clustered_bootstrap"]["seed"])
     replicates = int(prereg["statistics"]["clustered_bootstrap"]["replicates"])
     gates: dict = {}
@@ -913,20 +993,15 @@ def evaluate_agentic_gates(eps: dict, prereg: dict) -> dict:
                           f"p={er2['mcnemar']['p_two_sided']:.4g}", **{k: v for k, v in
                           er2.items() if k != "mcnemar"}, mcnemar=er2["mcnemar"])
         k = sum(1 for t in c_set if _recovery_ok(faulted[t][1]))
-        p, lo, hi = _wilson(k, len(c_set))
-        gates["ER3"] = _g("PASS" if lo >= 0.60 else "FAIL",
-                          f"TP certified recovery on C {p:.3f} [{lo:.3f},{hi:.3f}], "
-                          f"Wilson LB vs 0.60", k=k, n=len(c_set), lb=lo)
+        gates["ER3"] = _wilson_lb_gate("ER3", k, len(c_set), 0.60,
+                                       "TP certified recovery on C")
     else:
         gates["ER2"] = _g("INCONCLUSIVE", "no common-clean pairs with faulted replays")
         gates["ER3"] = _g("INCONCLUSIVE", "no common-clean pairs with faulted replays")
     if gates["ER1"]["status"] == "INCONCLUSIVE":
         for name in ("ER2", "ER3"):
-            if gates[name]["status"] != "INCONCLUSIVE":
-                gates[name] = _g("INCONCLUSIVE",
-                                 f"|C| below the preregistered floor; measured anyway for "
-                                 f"the record: {gates[name]['detail']}",
-                                 **gates[name]["numbers"])
+            gates[name] = _no_verdict(gates[name],
+                                      "|C| below the preregistered floor of 500")
 
     if clean:
         er4 = _bootstrap_gate(list(clean.values()),
@@ -962,15 +1037,11 @@ def evaluate_agentic_gates(eps: dict, prereg: dict) -> dict:
                for ep in tasks.values()]
     if tp_core:
         k_run = sum(ep["rep"]["runaway"]["runaway"] for ep in tp_core)
-        p, lo, hi = _wilson(k_run, len(tp_core))
-        gates["ER6"] = _g("PASS" if hi <= 0.03 else "FAIL",
-                          f"TP runaway {p:.4f} [{lo:.4f},{hi:.4f}], Wilson UB vs 0.03",
-                          k=k_run, n=len(tp_core), ub=hi)
+        gates["ER6"] = _wilson_ub_gate("ER6", k_run, len(tp_core), 0.03,
+                                       "TP runaway")
         k_h = sum(ep["rep"]["hallucination"]["hallucinated"] for ep in tp_core)
-        p, lo, hi = _wilson(k_h, len(tp_core))
-        gates["ER7"] = _g("PASS" if hi <= 0.01 else "FAIL",
-                          f"TP hallucinated-result {p:.4f} [{lo:.4f},{hi:.4f}], Wilson UB "
-                          f"vs 0.01", k=k_h, n=len(tp_core), ub=hi)
+        gates["ER7"] = _wilson_ub_gate("ER7", k_h, len(tp_core), 0.01,
+                                       "TP hallucinated-result")
     else:
         gates["ER6"] = _g("INCONCLUSIVE", "no TP episodes")
         gates["ER7"] = _g("INCONCLUSIVE", "no TP episodes")
@@ -1021,21 +1092,27 @@ def evaluate_agentic_gates(eps: dict, prereg: dict) -> dict:
     if mt_pairs:
         tp_eps = [tp for _, tp in mt_pairs.values()]
         k = sum(bool(ep.get("orch", {}).get("certified_orchestration")) for ep in tp_eps)
-        p, lo, hi = _wilson(k, len(tp_eps))
-        gates["MT2"] = _g("PASS" if lo >= 0.60 else "FAIL",
-                          f"TP certified all-tools {p:.3f} [{lo:.3f},{hi:.3f}] vs 0.60",
-                          k=k, n=len(tp_eps), lb=lo)
+        gates["MT2"] = _wilson_lb_gate("MT2", k, len(tp_eps), 0.60,
+                                       "TP certified all-tools")
         calls = sorted(ep["rep"]["n_calls"] for ep in tp_eps)
         med = calls[len(calls) // 2]
         gates["MT3"] = _g("PASS" if med <= 4 + 2 else "FAIL",
                           f"TP median calls {med} vs oracle 4 + 2", median=med)
         k_run = sum(ep["rep"]["runaway"]["runaway"] for ep in tp_eps)
-        _, _, ub_run = _wilson(k_run, len(tp_eps))
         k_h = sum(ep["rep"]["hallucination"]["hallucinated"] for ep in tp_eps)
-        _, _, ub_h = _wilson(k_h, len(tp_eps))
-        gates["MT4"] = _g("PASS" if ub_run <= 0.03 and ub_h <= 0.01 else "FAIL",
-                          f"TP MT runaway UB {ub_run:.4f} (<=0.03), hallucination UB "
-                          f"{ub_h:.4f} (<=0.01)", runaway_ub=ub_run, halluc_ub=ub_h)
+        mt4_run = _wilson_ub_gate("MT4run", k_run, len(tp_eps), 0.03, "TP MT runaway")
+        mt4_h = _wilson_ub_gate("MT4hal", k_h, len(tp_eps), 0.01,
+                                "TP MT hallucinated-result")
+        # A compound gate is only as measurable as its weakest leg; a FAIL on
+        # either leg is still a FAIL (never softened by the other's INCONCLUSIVE).
+        legs = [mt4_run["status"], mt4_h["status"]]
+        status = ("FAIL" if "FAIL" in legs
+                  else "INCONCLUSIVE" if "INCONCLUSIVE" in legs else "PASS")
+        gates["MT4"] = _g(status, f"runaway leg [{mt4_run['status']}] "
+                          f"{mt4_run['detail']}; hallucination leg [{mt4_h['status']}] "
+                          f"{mt4_h['detail']}",
+                          runaway_ub=mt4_run["numbers"]["ub"],
+                          halluc_ub=mt4_h["numbers"]["ub"])
         pat: dict = {}
         for bp, tp in mt_pairs.values():
             pid = bp.get("pattern_id")
@@ -1089,13 +1166,11 @@ def evaluate_agentic_gates(eps: dict, prereg: dict) -> dict:
     if hr_pairs:
         tp_eps = [tp for _, tp in hr_pairs.values()]
         k_run = sum(ep["rep"]["runaway"]["runaway"] for ep in tp_eps)
-        _, _, ub = _wilson(k_run, len(tp_eps))
-        gates["HR2"] = _g("PASS" if ub <= 0.03 else "FAIL",
-                          f"TP H8 runaway Wilson UB {ub:.4f} vs 0.03", ub=ub)
+        gates["HR2"] = _wilson_ub_gate("HR2", k_run, len(tp_eps), 0.03,
+                                       "TP H8 runaway")
         k_h = sum(ep["rep"]["hallucination"]["hallucinated"] for ep in tp_eps)
-        _, _, ub = _wilson(k_h, len(tp_eps))
-        gates["HR3"] = _g("PASS" if ub <= 0.01 else "FAIL",
-                          f"TP H8 hallucinated-result Wilson UB {ub:.4f} vs 0.01", ub=ub)
+        gates["HR3"] = _wilson_ub_gate("HR3", k_h, len(tp_eps), 0.01,
+                                       "TP H8 hallucinated-result")
     else:
         gates["HR2"] = _g("INCONCLUSIVE", "no H8 clean pairs")
         gates["HR3"] = _g("INCONCLUSIVE", "no H8 clean pairs")
@@ -1234,10 +1309,33 @@ def agentic_verdict(traces_dir: str, preregister: str, secret_path: str,
                     "detail": f"absent-information control (S11): {s11['detail']}",
                     "numbers": s11["numbers"]}
 
+    # A harness BUG vetoes every DOWNSTREAM model-level gate, not only the
+    # claims: a reader (or a script) that pulled gates["ER2"]["status"] out of a
+    # vetoed verdict would otherwise see "PASS" for a number the run cannot
+    # support. The measured value is kept under `measured_status` so nothing is
+    # hidden -- it is relabelled, not deleted.
+    bug_names = sorted(n for n, v in vetoes.items() if v["status"] == "BUG")
+    if any_bug:
+        for name, res in gates.items():
+            gates[name] = {"status": "BUG", "measured_status": res["status"],
+                           "detail": f"vetoed by harness BUG {','.join(bug_names)}; "
+                                     f"measured [{res['status']}]: {res['detail']}",
+                           "numbers": res["numbers"]}
+
     def claim_status(names: list[str]) -> str:
+        # Reads the EFFECTIVE status. `measured_status` is deliberately not used:
+        # a gate downgraded for underpower is preregistered as no-verdict, and
+        # promoting its measured FAIL back into the claim would read an
+        # underpowered sample as a refutation.
         st = [gates[n]["status"] for n in names]
         if any_bug:
             return "BUG"
+        # A real FAIL outranks missing evidence: one refuted gate refutes the
+        # claim whatever else is unmeasured. Only when nothing FAILed does thin
+        # evidence make the claim INCONCLUSIVE -- and INCONCLUSIVE never reads
+        # as support.
+        if any(s == "FAIL" for s in st):
+            return "FAIL"
         if any(s == "INCONCLUSIVE" for s in st):
             return "INCONCLUSIVE"
         return "PASS" if all(s == "PASS" for s in st) else "FAIL"
@@ -1255,6 +1353,17 @@ def agentic_verdict(traces_dir: str, preregister: str, secret_path: str,
 
     def floors_pass(fl: dict) -> bool:
         return all(v["status"] == "PASS" for v in fl.values())
+
+    if any_bug:
+        # Launch floors are model-level statements too; a vetoed run must not
+        # show an arm "clearing the floor". Same relabel-not-delete rule.
+        for fl in (floors_tp, floors_bp):
+            for name, res in list(fl.items()):
+                fl[name] = {"status": "BUG", "measured_status": res["status"],
+                            "detail": f"vetoed by harness BUG "
+                                      f"{','.join(bug_names)}; measured "
+                                      f"[{res['status']}]: {res['detail']}",
+                            "numbers": res["numbers"]}
 
     if any_bug:
         winner = "NO VERDICT: harness BUG vetoes every claim and the winner rule"

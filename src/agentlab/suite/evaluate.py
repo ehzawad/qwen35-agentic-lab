@@ -97,12 +97,26 @@ def suite_tool_schemas(family: str = "typed_relay") -> list[dict]:
 # ---------------------------------------------------------------------------
 
 class SpecRuntime:
-    """Episode-scoped dispatch: isolated KB view, fault schedule, receipts."""
+    """Episode-scoped dispatch: isolated KB view, fault schedule, receipts.
 
-    def __init__(self, spec: dict, secret: bytes, condition: str, fault_seed: int):
+    An unreplayable oracle is a spec defect (S9) and aborts the episode with
+    termination_reason "spec_error" -- EXCEPT under the absent-information
+    control, whose entire construction is to make the required lookup fail. That
+    exception is load-bearing: with it the redacted arm runs the real policy
+    against a KB missing the hidden record, so a leaking harness shows up as a
+    raw success (S11 BUG). Without it every redacted episode returned a
+    zero-decision spec_error stub, the policy never ran, and S11 reported "zero
+    raw and certified success" over episodes that had never been attempted --
+    a vacuous PASS on the one control that certifies the answers are not
+    recoverable from the prompt.
+    """
+
+    def __init__(self, spec: dict, secret: bytes, condition: str, fault_seed: int,
+                 control: str = "none"):
         self.spec = spec
         self.secret = secret
         self.condition = condition
+        self.control = control
         self.fault_seed = fault_seed
         self.task_id = spec["task_id"]
         self.env = None
@@ -113,9 +127,12 @@ class SpecRuntime:
             # episode and from the oracle replay's own throwaway copy.
             self.env = WarehouseState(spec["env"])
         replay = provenance.execute_oracle(spec)
-        if not replay["ok"]:
+        self.oracle_ok = bool(replay["ok"])
+        if not replay["ok"] and control != "redacted":
             raise ValueError(f"spec {self.task_id}: oracle replay failed: "
                              f"{replay.get('error')}")
+        # Under the redacted control the trailing nodes are unreachable by
+        # construction; the reachable prefix still carries the fault-node digests.
         self.oracle_nodes = replay["nodes"]
         self.canonical_answer = replay["answer"]
         self.injectors: list[faults_mod.FaultInjector] = []
@@ -238,7 +255,7 @@ def run_episode(spec: dict, *, arm: str, condition: str, control: str,
     budgets = budgets_for(horizon, condition)
     t0 = time.monotonic()
     try:
-        runtime = SpecRuntime(spec, secret, condition, fault_seed)
+        runtime = SpecRuntime(spec, secret, condition, fault_seed, control=control)
     except (ValueError, NotImplementedError) as exc:
         return _trace_row(spec, arm=arm, condition=condition, control=control,
                           budgets=budgets, messages=[], events=[],

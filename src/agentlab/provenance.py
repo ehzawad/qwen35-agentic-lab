@@ -441,6 +441,38 @@ def certify_episode(trace: dict, secret: bytes) -> dict:
     return report
 
 
+
+# Frozen precedence over the non-recovery cases. `certified_recovery` is the
+# CONJUNCTION of every requirement (computed independently below), so no
+# ordering can inflate or deflate it; this list only decides which single
+# diagnostic label a multiply-failing episode reports, and it is ordered from
+# the most upstream/most severe cause to the most downstream:
+#
+#   not_assigned     no fault was scheduled -- the question does not apply
+#   not_exposed      the fault never fired; nothing to recover from (ITT)
+#   hallucinated     the trace fabricated evidence, so it is not evidence about
+#                    remediation at all -- this must outrank every behavioural
+#                    reason below it
+#   runaway          the trace crossed a preregistered budget/loop criterion;
+#                    nothing after that point can earn credit
+#   remediation      the contract was never satisfied. Two mutually exclusive
+#                    labels: `blind_retry` when a post-fault result arrived
+#                    anyway (the tool recovered, not the agent) and
+#                    `no_remediation` when it did not (the agent gave up)
+#   no_post_fault_result  remediated, but the faulted node never produced a
+#                    validated canonical observation
+#   wrong_final      the committed answer is wrong
+#   unvalidated_answer  right answer, no validated in-episode source
+#   pre_fault_answer the answer's validated source precedes the fault
+#   uncertified_episode  residual episode-level certification failure
+#                    (e.g. a broken receipt chain)
+NON_RECOVERY_PRECEDENCE = (
+    "not_assigned", "not_exposed", "hallucinated", "runaway", "remediation",
+    "no_post_fault_result", "wrong_final", "unvalidated_answer",
+    "pre_fault_answer", "uncertified_episode",
+)
+
+
 def certify_recovery(trace: dict, secret: bytes, episode_report: dict | None = None) -> dict:
     """Certified recovery with the six non-recovery cases excluded explicitly.
 
@@ -457,6 +489,9 @@ def certify_recovery(trace: dict, secret: bytes, episode_report: dict | None = N
       hallucinated         fabricated receipt/tool result anywhere
       runaway              any runaway criterion crossed
       wrong_final          the final answer is simply wrong
+
+    Every requirement is evaluated, then NON_RECOVERY_PRECEDENCE picks the
+    reported label; `violations` carries the full set for the record.
     """
     rep = episode_report or certify_episode(trace, secret)
     fault = trace.get("fault") or {}
@@ -499,32 +534,33 @@ def certify_recovery(trace: dict, secret: bytes, episode_report: dict | None = N
             remedial = [e for e in remedial
                         if e.get("decision", -1) > fev.get("decision", -1)]
 
-    if rep["runaway"]["runaway"]:
-        out["reason"] = "runaway"
-        return out
-    if rep["hallucination"]["hallucinated"]:
-        out["reason"] = "hallucinated"
-        return out
-    if not remedial:
-        out["reason"] = "blind_retry" if recovered_events else "no_remediation"
-        return out
-    if not recovered_events:
-        out["reason"] = "no_post_fault_result"
-        return out
-    if not rep["raw_success"]:
-        out["reason"] = "wrong_final"
-        return out
-    if rep["answer_event_call_id"] is None:
-        out["reason"] = "unvalidated_answer"
-        return out
-    if rep["answer_event_call_id"] <= fev.get("call_id", -1):
-        out["reason"] = "pre_fault_answer"
-        return out
-    if not rep["certified_success"]:
-        out["reason"] = "uncertified_episode"
+    # Evaluate every requirement independently: certified_recovery is their
+    # conjunction, so classification order cannot change the boolean.
+    answer_id = rep["answer_event_call_id"]
+    fault_call = fev.get("call_id", -1)
+    labels = {
+        "hallucinated": rep["hallucination"]["hallucinated"],
+        "runaway": rep["runaway"]["runaway"],
+        "remediation": (("blind_retry" if recovered_events else "no_remediation")
+                        if not remedial else None),
+        "no_post_fault_result": bool(remedial) and not recovered_events,
+        "wrong_final": not rep["raw_success"],
+        "unvalidated_answer": rep["raw_success"] and answer_id is None,
+        "pre_fault_answer": (rep["raw_success"] and answer_id is not None
+                             and answer_id <= fault_call),
+        "uncertified_episode": not rep["certified_success"],
+    }
+    violations = [name for name in NON_RECOVERY_PRECEDENCE
+                  if name in labels and labels[name]]
+    out["violations"] = [labels[n] if isinstance(labels[n], str) else n
+                         for n in violations]
+    if violations:
+        first = violations[0]
+        out["reason"] = labels[first] if isinstance(labels[first], str) else first
         return out
     out["certified_recovery"] = True
     out["reason"] = "ok"
+    out["violations"] = []
     return out
 
 

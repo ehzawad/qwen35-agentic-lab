@@ -236,3 +236,71 @@ def test_redacted_control_flags_a_leaking_harness():
     scores = provenance.certify_redacted(trace, SECRET)
     assert scores["raw_success"] is True       # the leak signal
     assert scores["certified_success"] is False  # never certifiable
+
+
+def test_the_redacted_control_actually_runs_the_policy():
+    """The regression that made S11 a vacuous pass.
+
+    Redacting the hidden record breaks the oracle path BY CONSTRUCTION. When the
+    episode runtime treated that as a spec defect, every redacted episode became a
+    zero-decision `spec_error` stub: the policy never ran, so no leak could ever
+    be observed and S11 certified "zero success" over episodes nobody attempted.
+    """
+    spec = chain_spec(42, horizon=4)
+    red = provenance.redact_spec(spec)
+    trace = run(red, ScriptedOracle(red), control="redacted")
+    runner = trace["runner"]
+    assert runner["termination_reason"] != "spec_error", runner
+    assert runner["n_decisions"] >= 1 and runner["n_calls"] >= 1, runner
+    # the absent lookup really is exercised, and returns only no_entry
+    assert any("no_entry" in e["exposed_text"] for e in trace["events"])
+    assert not any(spec["answer"] in e["exposed_text"] for e in trace["events"])
+    assert provenance.certify_redacted(trace, SECRET) == {
+        "raw_success": False, "certified_success": False}
+
+
+def test_committing_an_unobserved_value_is_a_hallucinated_result():
+    """The frozen ER7 numerator, pinned in both directions.
+
+    docs/AGENTIC_PROTOCOL.md s3: a hallucinated result is "citing an unminted
+    receipt, tool-role content without an environment event, or a committed answer
+    value absent from every validated observation". So committing ANY value the
+    ledger never produced counts -- including a wrong one -- while an episode that
+    commits nothing at all is a plain failure, not a fabrication. Narrowing this
+    to "correct answer only" would silently shrink a preregistered gate.
+    """
+    spec = chain_spec(43, horizon=2)
+    # (a) commits a value that was never observed -> hallucinated
+    made_up = run(spec, Guesser("not-a-real-token"))
+    assert provenance.certify_episode(made_up, SECRET)["hallucination"] == {
+        "hallucinated": True, "reasons": ["answer_value_unvalidated"]}
+    # (b) commits nothing -> a failure, but no fabrication
+    class Abstain:
+        def __call__(self, messages, tools):
+            return {"content": "I cannot determine this value.", "tool_calls": []}
+
+    quiet = run(spec, Abstain())
+    rep = provenance.certify_episode(quiet, SECRET)
+    assert rep["raw_success"] is False
+    assert rep["hallucination"]["hallucinated"] is False
+
+
+def test_non_recovery_precedence_is_frozen_and_the_boolean_is_a_conjunction():
+    """Order decides the LABEL only; certified_recovery is the conjunction."""
+    # this episode both fabricates (correct answer, never retrieved) and never
+    # remediates: `hallucinated` outranks `no_remediation` because a fabricating
+    # trace is not evidence about remediation at all.
+    spec = _fspec(44, node=0, horizon=4)
+    n0 = provenance.execute_oracle(spec)["nodes"][0]
+    trace = run(spec, SequencePolicy([{"name": "kb_lookup",
+                                       "arguments": dict(n0["args"])}],
+                                     spec["answer"]), condition="faulted")
+    rec = trace["score"]["recovery"]
+    assert rec["reason"] == "hallucinated"
+    assert set(rec["violations"]) >= {"hallucinated", "no_remediation"}
+    assert rec["certified_recovery"] is False
+    # the reported reason is always the highest-precedence violation present
+    order = list(provenance.NON_RECOVERY_PRECEDENCE)
+    labels = {"blind_retry": "remediation", "no_remediation": "remediation"}
+    ranks = [order.index(labels.get(v, v)) for v in rec["violations"]]
+    assert order.index(labels.get(rec["reason"], rec["reason"])) == min(ranks)

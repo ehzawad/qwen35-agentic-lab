@@ -106,6 +106,20 @@ def _parse_lines(payload):
     return out
 
 
+# An agent that gives up commits NOTHING. The frozen protocol defines a
+# hallucinated result as "citing an unminted receipt, tool-role content without
+# an environment event, or a committed answer value absent from every validated
+# observation" (docs/AGENTIC_PROTOCOL.md s3), and the committed-answer reader is
+# `ANSWER: <value>` / \boxed{} (schema.extract_committed_answer). So a scripted
+# policy that abandons an episode with "ANSWER: unknown" is not modelling an
+# honest failure -- it is asserting a value it never observed, which is exactly a
+# hallucinated result under the preregistration. Abandonment must therefore end
+# the episode with no commitment at all: that is a plain unrecovered failure
+# (`no_remediation`), which is what the fault-recovery fixtures mean to exercise.
+ABANDON_TEXT = ("giving up: the tool error blocks the required lookup and I have "
+                "no validated value to report")
+
+
 class ScriptedOracle:
     """Follows the oracle path one call per decision; repairs faults properly."""
 
@@ -128,7 +142,7 @@ class ScriptedOracle:
             prev = self.calls[self.idx - 1]
             if err is not None and err.get("error") != "no_entry":
                 if self.abandon_on_error:
-                    return {"content": "giving up\nANSWER: unknown", "tool_calls": []}
+                    return {"content": ABANDON_TEXT, "tool_calls": []}
                 args = dict(prev["arguments"])
                 if not self.blind_retry and err.get("recovery_token"):
                     args["recovery_token"] = err["recovery_token"]
@@ -140,7 +154,7 @@ class ScriptedOracle:
                     and objs[0]["unit"] != str(prev["arguments"].get("to_unit", ""))
                     .strip().lower()):
                 if self.abandon_on_error:
-                    return {"content": "giving up\nANSWER: unknown", "tool_calls": []}
+                    return {"content": ABANDON_TEXT, "tool_calls": []}
                 return {"content": "wrong unit returned; correcting",
                         "tool_calls": [{"name": prev["name"],
                                         "arguments": dict(prev["arguments"])}]}
