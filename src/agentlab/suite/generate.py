@@ -1045,9 +1045,12 @@ def _generate_into(cfg: dict, out_dir: str) -> dict:
             meta["control_kinds"] = sorted({
                 (b.spec.control_meta or {}).get("kind", "?")
                 for b in result["bundles"]})
-            meta["min_hidden_entropy_bits"] = min(
-                int((b.spec.control_meta or {}).get("hidden_entropy_bits", 0))
-                for b in result["bundles"])
+            if CONTROL_SPLITS[split] == "redacted":
+                # Only the absent-information control has a hidden-entropy
+                # budget; reporting 0 for a permutation would read as a defect.
+                meta["min_hidden_entropy_bits"] = min(
+                    int((b.spec.control_meta or {}).get("hidden_entropy_bits", 0))
+                    for b in result["bundles"])
         if split == "eval_perm":
             meta["derangement"] = result["permutation"]
         manifest_splits[split] = meta
