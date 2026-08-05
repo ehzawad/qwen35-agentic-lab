@@ -35,8 +35,10 @@ from agentlab.suite import rng
 
 RECEIPT_PREFIX = "r-"
 _RECEIPT_RE = re.compile(r"\br-[0-9a-f]{32}\b")
-_ANSWER_RE = re.compile(r"ANSWER\s*:\s*([^\s`*]+)", re.IGNORECASE)
-_BOXED_RE = re.compile(r"\\boxed\{([^{}]*)\}")
+# No local copy of the answer grammar lives here on purpose: `extract_final_answer`
+# below delegates to suite.schema.extract_committed_answer, and an unused duplicate
+# pair of patterns is exactly how the certification layer would silently drift away
+# from the strict verifier's reading of a commitment.
 
 RUNAWAY_TERMINATIONS = {"token_budget", "wall_clock", "parser_budget"}
 

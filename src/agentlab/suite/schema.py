@@ -102,6 +102,11 @@ def file_sha256(path: str) -> str:
 # the committed answer format (frozen in configs/agentic_preregister.json:
 # "final assistant line matching /ANSWER\s*:\s*(\S+)/, last occurrence;
 #  \boxed{} accepted as fallback")
+#
+# The two frozen forms NEST -- `ANSWER: \boxed{x}` -- because the neutral system
+# prompt and the generated task prompt ask for one each. `extract_committed_answer`
+# is the only reader of this grammar; every other module must call it rather than
+# recompile these patterns, or "verified" and "certified" can drift apart.
 # ---------------------------------------------------------------------------
 
 ANSWER_RE = re.compile(r"ANSWER\s*:\s*([^\s`*]+)", re.IGNORECASE)
@@ -116,11 +121,36 @@ def extract_committed_answer(final_text: str) -> str | None:
     as a fallback. Both the strict verifier and the certification layer must read
     a commitment the same way -- if they disagreed, a model following one prompt
     would be scored as never committing an answer at all.
+
+    The two instructions are given TOGETHER (system prompt plus task prompt), so
+    obeying both at once -- `ANSWER: \\boxed{x}` -- is reasonable compliance, and
+    it must commit `x`, not the literal string `\\boxed{x}`. Reading only the
+    `ANSWER:` token scored a correctly-answering model wrong on 7 of 12 dev
+    episodes and mislabelled all 7 as hallucinations, because `\\boxed{x}` has no
+    source in any tool observation.
+
+    The unwrap is deliberately narrow: it is anchored at the first character of
+    the selected `ANSWER:` value, so nothing is scraped out of surrounding prose.
+    Precedence, unchanged from the preregistration:
+
+      * the LAST `ANSWER:` bearing a value wins;
+      * `ANSWER: \\boxed{x}` returns `x`;
+      * with no `ANSWER:` at all, the last `\\boxed{x}` is accepted;
+      * a later WRONG `ANSWER:` is never rescued by an earlier correct box --
+        the boxed fallback is reachable only when no `ANSWER:` value exists.
     """
-    hits = ANSWER_RE.findall(final_text or "")
+    text = final_text or ""
+    hits = list(ANSWER_RE.finditer(text))
     if hits:
-        return hits[-1].strip().rstrip(".,;")
-    boxed = BOXED_RE.findall(final_text or "")
+        value = hits[-1]
+        # Anchored at value.start(1): a full `\boxed{...}` opening exactly where
+        # the committed value begins. Matching against `text` rather than the
+        # captured token also keeps a box whose contents contain spaces intact.
+        nested = BOXED_RE.match(text, value.start(1))
+        if nested and nested.group(1).strip():
+            return nested.group(1).strip()
+        return value.group(1).strip().rstrip(".,;")
+    boxed = BOXED_RE.findall(text)
     if boxed:
         return boxed[-1].strip()
     return None
