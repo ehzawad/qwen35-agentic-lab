@@ -385,6 +385,28 @@ endian integer. The commit that introduces this protocol *is* the commitment;
 `results/agentic/locks.json` (checkpoint + prompt winner) must exist before
 `results/agentic/seed_reveal.json` is written.
 
+> **AMENDMENT 2026-08-05 (pre-run; zero GPU-hours, zero held-out results
+> existed).** As implemented, S18 delivers **test-set commitment, not
+> test-blindness**, and the veto must not be described as the latter until this
+> is closed. The held-out specs, KBs, oracles and answers are absent from the
+> repository and their hashes are pinned, so the set cannot be swapped after the
+> fact — that part holds. But `scripts/generate_suite.py` is committed and the
+> eval generation seed in `configs/suite_v1.toml` is public, and byte-identical
+> regeneration is itself an acceptance criterion, so all 1,200 held-out answers
+> are recoverable from this commit before any lock exists. The `heldout_seed`
+> above is never consumed by the generator.
+>
+> The **registered target is real blindness**: derive the held-out *generation*
+> seed from public entropy that exists only after `results/agentic/locks.json` is
+> committed — the locks commit SHA — so the held-out set cannot be generated
+> until the prompt winner and trained checkpoint are already frozen. Under that
+> scheme this push pins train/dev only, and the held-out artifacts are pinned at
+> reveal.
+>
+> Until that lands, `finalize-prereg` must not be run and no GPU stage may
+> start. This amendment changes no threshold, margin, sample size or claim
+> definition.
+
 ## 8. Launch floors and winner rule
 
 Whichever arm ships must clear **all** floors: overall clean certified

@@ -6,11 +6,40 @@ machine-checkable: multi-tool composition, dependency depth up to 8 required
 calls, stateful constraints with irreversible commitments, and recovery from
 injected tool failures — all scored by exact verifiers, never by an LLM judge.
 
-**Status: pipeline under evaluation — machine verdict pending.** No capability
-claim is made here until the preregistered gates have run. The training legs
-(distilled SFT, conditional GRPO) are candidates, not predetermined winners:
-if training does not beat the locked elicitation control without harming clean
-performance, the shipped pipeline is the prompted base model.
+**Status: CPU harness complete; preregistration NOT yet finalized; zero GPU
+hours spent.** No capability claim is made here, and none can be: no model has
+been trained or evaluated against this suite. What is verified today is the
+harness — deterministic generation, the strict verifier, the analyzer and its
+vetoes, and 506 passing tests. The training legs (distilled SFT, conditional
+GRPO) are candidates, not predetermined winners: if training does not beat the
+locked elicitation control without harming clean performance, the shipped
+pipeline is the prompted base model.
+
+Two known defects must close before `agentic_locks.py finalize-prereg` may run,
+and therefore before any GPU stage:
+
+1. **Two fault contracts.** The evaluation runtime emits token-bearing fault
+   envelopes (`recovery_token` + `remediation`); the runtime used by rejection
+   sampling, the prompt tournament and the variance probe emits tokenless ones,
+   and the canonical tool schema offers no `recovery_token` argument. A policy
+   would be trained in a different environment than it is scored in, and
+   `provenance.certify_episode` checks a strictly weaker success predicate than
+   `verify.verify_episode` (no oracle-node completion, final state, or call
+   budget) while the gates are denominated in the former. Fix: unify on the
+   registered token-bearing contract — the one the prompt candidates already
+   instruct against — and require node completion, state validity and budget for
+   certified success. This changes the training treatment, which is why it is a
+   recorded decision rather than a silent edit.
+2. **S18 delivers test-set commitment, not test-blindness.** Held-out specs and
+   answers are absent from the repository and their hashes are pinned, so the
+   set cannot be swapped. But the generator is committed and the eval seed is
+   public, so the 1,200 held-out answers are regenerable from this commit. The
+   registered target is real blindness: derive the held-out generation seed from
+   the locks commit so the eval set cannot exist until the prompt and checkpoint
+   are locked. Until that lands, S18's guarantee is commitment only.
+
+Until the finalization marker exists the preregistration is a **draft**, and
+`reveal` says so out loud and refuses under `--require-finalization`.
 
 ## The one supported entry point
 
