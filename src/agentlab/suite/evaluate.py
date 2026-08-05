@@ -19,6 +19,13 @@ measured-only). Controls: none | redacted (absent-information; certified
 success is zero by construction, any raw success is a harness BUG) | permuted
 (counterfactual value permutation; outputs must track the returned value).
 
+This is a pure HTTP client: it opens no CUDA context, reads no nvidia-smi and
+never assumes the registered card. The process that produced the tokens is the
+authority on the hardware that produced them, so `--runtime-manifest` is
+MANDATORY and is verified -- whole, current, and against this run's physical
+binding -- before the trace file is opened and before the first request. A run
+that cannot attest its producer writes nothing at all.
+
 Spec contract consumed here. Specs are NOT written by hand or by a second
 generator: they are `agentlab.suite.generate.certification_spec(bundle)` over
 the committed suite v1 bundles, frozen by hash before any held-out result.
@@ -352,7 +359,10 @@ def _trace_row(spec: dict, *, arm: str, condition: str, control: str, budgets: d
         # FROZEN SEAM (S19): run_meta is copied VERBATIM into every trace's
         # `provenance`, so the hardware/engine fingerprint is owned here in the
         # runtime layer and merely read by the analyzer. `timestamp_utc` is
-        # stamped per row rather than per shard.
+        # stamped per row rather than per shard. In a claim run run_meta is COPIED
+        # from the producer's verified runtime manifest; the refusal to SERIALIZE
+        # an incomplete one lives at the write in run_shard, so this stays a pure
+        # function that an offline single-episode replay can still call.
         "provenance": dict(run_meta,
                            timestamp_utc=configio.now_utc(),
                            secret_sha256=provenance.observation_digest(secret.hex()),
@@ -453,6 +463,55 @@ def require_same_fingerprint(out_path: pathlib.Path, fingerprint: dict) -> int:
     return len(rows)
 
 
+def refuse_null_hardware_rows(out_path: pathlib.Path) -> None:
+    """A claim run may not APPEND to a trace file that carries null hardware.
+
+    The D1 traces exist: 12 rows with `gpu_uuid: null`, written because the
+    server was started outside the attested path. Those rows are evidence of the
+    defect and must be QUARANTINED under their own run id, never backfilled from
+    a later manifest and never extended -- a file with one attributed and one
+    unattributed row supports no same-card claim at all.
+    """
+    for i, row in enumerate(existing_rows(out_path)):
+        gaps = configio.fingerprint_gaps(row.get("provenance") or {})
+        if gaps:
+            raise SystemExit(
+                f"REFUSED: {out_path} row {i} carries incomplete hardware "
+                f"provenance ({', '.join(gaps)}), so it was produced by an "
+                f"unattested engine.\n"
+                f"  Move that trace set aside under its own run id (it is "
+                f"evidence of the defect) and start a NEW directory. Appending "
+                f"attested rows to it would neither repair the old rows nor "
+                f"produce a trace set S19 can pass.")
+
+
+def require_producer_attestation(args, cfg: dict) -> dict:
+    """The fail-closed D1 gate: no producer manifest, no episode. No exceptions.
+
+    Runs BEFORE the trace file is opened, before the run secret is created and
+    before a single HTTP request, because the point of failing closed is that a
+    refused run leaves nothing behind that looks like a result.
+
+    The evaluator never probes a card and never synthesizes hardware from the
+    registered A5000 expectation: the server process that produced the tokens is
+    the authority, and this reads its attestation.
+    """
+    path = getattr(args, "runtime_manifest", None)
+    if not path:
+        raise SystemExit(
+            "REFUSED: --runtime-manifest is required. This evaluator is a pure "
+            "HTTP client: it opens no CUDA context, so it cannot know which card "
+            "answered it. The vLLM launcher (scripts/serve.sh) captures a "
+            "producer manifest and the driver countersigns it once /v1/models "
+            "answers; without it a trace row could only claim `gpu_uuid: null`, "
+            "which S19 reads as INCONCLUSIVE. Start the server through the "
+            "supported chain, or pass the manifest that server wrote.")
+    return configio.require_runtime_manifest(
+        path, run_id=args.run_id, cfg=cfg, stage="serve", server=args.server,
+        model=args.model, adapter=args.adapter,
+        served_adapter_name=(args.served_adapter_name if args.adapter else None))
+
+
 def git_sha() -> str | None:
     """One definition, in configio, so the ledger and the traces cannot disagree."""
     return configio.git_sha()
@@ -470,32 +529,10 @@ def load_or_create_secret(path: pathlib.Path) -> bytes:
     return secret
 
 
-def run_shard(args, chat_fn=None) -> dict:
-    specs = load_specs(args.specs)
-    specs = apply_control(specs, args.control, args.permutation_seed)
-    specs = [s for i, s in enumerate(specs) if i % args.num_shards == args.shard]
-
-    cfg = configio.load_config()
+def run_shard(args, chat_fn=None, cfg: dict | None = None) -> dict:
+    cfg = cfg or configio.load_config()
     contract = configio.engine_contract(cfg)
     dec_cfg = cfg.get("eval_decoding") or {}
-
-    out_dir = pathlib.Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{args.arm}.{args.condition}.{args.control}.jsonl"
-
-    secret = load_or_create_secret(pathlib.Path(args.secret_file))
-    prompt_raw = pathlib.Path(args.prompt).read_text(encoding="utf-8")
-    system_prompt = prompt_raw.strip()
-    # hash the raw committed file, so S16 can compare against the preregistration
-    prompt_meta = {"path": str(args.prompt),
-                   "sha256": provenance.observation_digest(prompt_raw)}
-    decode = {"temperature": float(dec_cfg.get("temperature", 0.0)),
-              "top_p": float(dec_cfg.get("top_p", 1.0)),
-              "seed": args.decode_seed,
-              "max_tokens": args.max_tokens,
-              # The contract is the authority; the request states it explicitly
-              # and the trace records what was actually sent.
-              "enable_thinking": bool(contract["enable_thinking"])}
 
     # A trained arm must be served the ADAPTER, not the base weights. The server
     # registers the LoRA under an alias (`trained` by default) and the request has
@@ -511,25 +548,62 @@ def run_shard(args, chat_fn=None) -> dict:
                 "trained arm that requests the base model id evaluates the BASE "
                 "policy and labels it trained.")
 
-    fingerprint = configio.fingerprint(args.run_id, cfg,
-                                       enable_thinking=contract["enable_thinking"])
+    # ---- FAIL CLOSED, before any file is opened and before any HTTP ----------
+    manifest = require_producer_attestation(args, cfg)
+    fingerprint = configio.fingerprint_from_manifest(manifest, cfg)
+    out_dir = pathlib.Path(args.out)
+    out_path = out_dir / f"{args.arm}.{args.condition}.{args.control}.jsonl"
+    refuse_null_hardware_rows(out_path)
+    checked = require_same_fingerprint(out_path, fingerprint)
     # The evaluator READS the ledger and refuses to start work that would cross the
     # ceiling. It does not APPEND: the driver charges the whole server-resident
     # interval -- startup, every client shard and the idle gaps -- exactly once, and
     # a per-shard row would double-charge the same seconds.
     configio.ledger_guard(f"eval:{args.arm}.{args.condition}.{args.control}",
                           float(args.time_budget_s) / 60.0, cfg)
-    checked = require_same_fingerprint(out_path, fingerprint)
+    # -------------------------------------------------------------------------
+
+    specs = load_specs(args.specs)
+    specs = apply_control(specs, args.control, args.permutation_seed)
+    specs = [s for i, s in enumerate(specs) if i % args.num_shards == args.shard]
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    secret = load_or_create_secret(pathlib.Path(args.secret_file))
+    prompt_raw = pathlib.Path(args.prompt).read_text(encoding="utf-8")
+    system_prompt = prompt_raw.strip()
+    # hash the raw committed file, so S16 can compare against the preregistration
+    prompt_meta = {"path": str(args.prompt),
+                   "sha256": provenance.observation_digest(prompt_raw)}
+    decode = {"temperature": float(dec_cfg.get("temperature", 0.0)),
+              "top_p": float(dec_cfg.get("top_p", 1.0)),
+              "seed": args.decode_seed,
+              "max_tokens": args.max_tokens,
+              # The contract is the authority; the request states it explicitly
+              # and the trace records what was actually sent.
+              "enable_thinking": bool(contract["enable_thinking"])}
+
     done = done_task_ids(out_path)
     todo = [s for s in specs if s["task_id"] not in done]
     if args.limit:
         todo = todo[: args.limit]
 
+    # Every extra field here is the PRODUCER's, copied from its manifest: the
+    # session that produced the tokens, the digest of the attestation that says
+    # so, its pid, and the exact adapter tree it had loaded. `client_git_sha` is
+    # this process's own commit and is deliberately separate from the producer's
+    # `git_sha` -- a commit between server start and evaluation is legitimate and
+    # S19 does not pair on it, but the two must remain distinguishable.
     run_meta = dict(fingerprint,
                     started_at_utc=fingerprint["timestamp_utc"],
                     server_model=served_model, requested_model=args.model,
                     base_id=args.base_id, adapter=args.adapter,
-                    resumed_rows=checked)
+                    resumed_rows=checked,
+                    runtime_manifest_sha256=manifest[configio.MANIFEST_HASH_FIELD],
+                    session_id=manifest["session_id"],
+                    producer_pid=manifest["pid"],
+                    producer_stage=manifest["stage"],
+                    adapter_sha256=manifest.get("adapter_sha256"),
+                    client_git_sha=configio.git_sha())
     if chat_fn is None:
         chat_fn = make_http_chat(args.server, served_model, decode)
 
@@ -568,6 +642,13 @@ def run_shard(args, chat_fn=None) -> dict:
             for fut in done_futs:
                 pending.pop(fut)
                 trace = fut.result()
+                # The last line of defence, at the write itself: a row whose
+                # provenance is not whole is not serialized at all. The gate above
+                # already refused an unattested run, so reaching this is a bug --
+                # but "refuse to write" is the property, and it belongs where the
+                # bytes are produced.
+                configio.require_complete_fingerprint(
+                    trace["provenance"], f"the trace row for {trace['task_id']}")
                 with lock:
                     fh.write(json.dumps(trace, ensure_ascii=False) + "\n")
                     fh.flush()
@@ -581,6 +662,8 @@ def run_shard(args, chat_fn=None) -> dict:
               "served_model": served_model,
               "enable_thinking_effective": decode["enable_thinking"],
               "gpu_uuid": fingerprint["gpu_uuid"],
+              "session_id": manifest["session_id"],
+              "runtime_manifest_sha256": manifest[configio.MANIFEST_HASH_FIELD],
               "elapsed_s": round(time.monotonic() - t0, 1)}
     print(json.dumps(status))
     return status
@@ -605,6 +688,14 @@ def main() -> None:
     ap.add_argument("--out", default="results/agentic/traces")
     ap.add_argument("--secret-file", default="out/agentic/run_secret.hex")
     ap.add_argument("--run-id", default="agentic-v1")
+    # REQUIRED, with no off switch. The manifest is written by the process that
+    # owns the card (scripts/serve.sh captures it and then execs vLLM) and
+    # countersigned by the driver once /v1/models answers. Without it this client
+    # cannot say which card produced its episodes, and a trace row that says
+    # `gpu_uuid: null` is not a claim -- so the run refuses instead.
+    ap.add_argument("--runtime-manifest", required=True,
+                    help="the producer session manifest the serving process "
+                         "wrote (results/agentic/manifests/serve.*.json)")
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=1)
     ap.add_argument("--limit", type=int, default=0)

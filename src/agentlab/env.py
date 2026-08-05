@@ -159,6 +159,104 @@ def lock_hardware(cfg=None, run_id: str | None = None,
     return record
 
 
+def capture_runtime_manifest(*, stage: str, cfg=None, run_id: str | None = None,
+                             session_id: str | None = None,
+                             model: str | None = None,
+                             adapter: str | None = None,
+                             served_adapter_name: str | None = None,
+                             port: int | None = None,
+                             server_url: str | None = None,
+                             pid: int | None = None,
+                             path=None) -> tuple:
+    """The PRODUCER-side attestation, written before the process does model work.
+
+    This is the fix for D1. The evaluator is a pure HTTP client: it opens no CUDA
+    context, so it cannot know which card answered it. Previously the standalone
+    server path (scripts/serve.sh) started vLLM without writing anything, the
+    client's `gpu_fingerprint()` legitimately found nothing, and a claim-bearing
+    trace was written with `gpu_uuid: null`. Now the process that OWNS the card
+    measures it, records which OS process it is and what it serves, hashes that,
+    and every consumer copies it.
+
+    Runs the full hardware veto first (PCI ordering, the registered index, the
+    registered card, exclusive free memory, then the run's UUID binding), so a
+    manifest cannot exist for a card this run does not own. The freshly measured
+    identity is cross-checked against the run binding: if they disagree, no side
+    wins and the stage aborts (S19).
+
+    Ideally the caller then `exec`s the model process, so the recorded pid IS the
+    server's pid and a consumer can tell a live session from a stale manifest.
+    Returns (path, record).
+    """
+    import torch
+
+    from agentlab.suite import configio
+
+    cfg = cfg or configio.load_config()
+    run_id = run_id or configio.DEFAULT_RUN_ID
+    binding = require_registered_gpu(cfg, run_id=run_id)
+
+    props = torch.cuda.get_device_properties(0)
+    index = (os.environ.get("CUDA_VISIBLE_DEVICES") or "0").split(",")[0].strip()
+    smi = configio.nvidia_smi_identity(index)
+    measured = {
+        "gpu_name": torch.cuda.get_device_name(0),
+        "gpu_uuid": smi["gpu_uuid"],
+        "cuda_visible_bytes": int(props.total_memory),
+        "driver_version": smi["driver_version"],
+        "pci_bus_id": smi["pci_bus_id"],
+        "compute_capability": f"{props.major}.{props.minor}",
+        "visible_ordinal": 0,
+    }
+    for key in ("gpu_name", "gpu_uuid", "cuda_visible_bytes"):
+        want, got = binding.get(key), measured.get(key)
+        if want is not None and got is not None and str(want) != str(got):
+            sys.exit(
+                f"REFUSED: this run is bound to {key}={want!r} and this producer "
+                f"measures {got!r}. Neither the binding nor the producer wins: "
+                f"the stage aborts as a hardware-integrity failure (S19).")
+    missing = [k for k, v in measured.items() if v in (None, "")]
+    if missing:
+        sys.exit(
+            f"REFUSED: the producer could not measure {', '.join(missing)} for "
+            f"the pinned card. A producer that cannot attest its hardware must "
+            f"fail BEFORE it produces output; writing nulls would make its "
+            f"episodes unattributable (S19).")
+
+    contract = configio.engine_contract(cfg)
+    record = dict(measured)
+    record.update({
+        "run_id": run_id,
+        "session_id": session_id or configio.new_session_id(stage),
+        "stage": stage,
+        "cuda_device_order": os.environ.get("CUDA_DEVICE_ORDER"),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "git_sha": configio.git_sha(),
+        "config_hash": configio.config_hash(),
+        "engine_fingerprint": configio.engine_fingerprint(cfg),
+        "enable_thinking_effective": bool(contract["enable_thinking"]),
+        "model": model or MODEL,
+        "adapter": str(adapter) if adapter else None,
+        "adapter_sha256": configio.checkpoint_tree_sha256(adapter),
+        "served_adapter_name": served_adapter_name or None,
+        "port": int(port) if port else None,
+        "server_url": server_url or (f"http://127.0.0.1:{int(port)}" if port else None),
+        "captured_at_utc": configio.now_utc(),
+        # Stamped by the driver once /v1/models answers: a manifest for a server
+        # that never came up must not certify anything.
+        "ready_at_utc": None,
+    })
+    record.update(configio.process_identity(pid))
+    if adapter and not record["adapter_sha256"]:
+        sys.exit(f"REFUSED: --adapter {adapter} does not exist, so the producer "
+                 f"cannot hash the checkpoint it claims to serve.")
+    out, record = configio.write_runtime_manifest(record, path, cfg)
+    print(f"[gpu] runtime manifest {stage}/{record['session_id']}: "
+          f"{record['gpu_name']} {record['gpu_uuid']} pid {record['pid']} "
+          f"-> {out}", file=sys.stderr)
+    return out, record
+
+
 def require_single_gpu(expect: str | None = None) -> str:
     """Assert exactly one GPU is visible, that it is the intended one, and name it.
 
@@ -301,24 +399,65 @@ SAMPLING_INSTRUCT = dict(temperature=0.7, top_p=0.8, top_k=20, presence_penalty=
 
 
 def main() -> None:
-    """`python -m agentlab.env pin` -- bind this run's card; `... fingerprint`.
+    """`pin` / `capture` / `ready` / `fingerprint` / `contract`.
 
-    `pin` is what a served (HTTP) stage runs before its server starts: the
-    evaluator process never opens a CUDA context, so without this the card that
-    produced its episodes would be unrecorded, and S19 treats missing provenance
-    as INCONCLUSIVE rather than as an assumed A5000.
+    `pin` binds the run's physical card (the run binding). `capture` is what a
+    GPU-OWNING process runs immediately before it starts model work -- serve.sh
+    captures and then `exec`s vLLM, so the recorded pid is the server's own -- and
+    `ready` is the driver's countersignature once /v1/models answers.
+
+    The evaluator process never opens a CUDA context, so without a producer
+    manifest the card that produced its episodes is unrecorded and S19 reads
+    missing provenance as INCONCLUSIVE rather than as an assumed A5000.
+
+    `capture` prints ONLY the manifest path on stdout, so a launcher can do
+    MANIFEST="$(... capture ...)"; the human summary goes to stderr.
     """
     import argparse
 
     from agentlab.suite import configio
 
-    ap = argparse.ArgumentParser(description="hardware pin / fingerprint")
-    ap.add_argument("cmd", choices=("pin", "fingerprint", "contract"))
+    ap = argparse.ArgumentParser(description="hardware pin / capture / fingerprint")
+    ap.add_argument("cmd", choices=("pin", "capture", "ready", "fingerprint",
+                                   "contract"))
     ap.add_argument("--run-id", default=None)
+    ap.add_argument("--stage", default=None, help="capture: producing stage name")
+    ap.add_argument("--session-id", default=None)
+    ap.add_argument("--model", default=None)
+    ap.add_argument("--adapter", default=None)
+    ap.add_argument("--served-adapter-name", default=None)
+    ap.add_argument("--port", type=int, default=None)
+    ap.add_argument("--pid", type=int, default=None,
+                    help="capture: the pid that will own the card (the launcher's "
+                         "own $$ when it execs the engine)")
+    ap.add_argument("--manifest", default=None, help="ready: manifest to sign")
+    ap.add_argument("--out", default=None, help="capture: manifest path")
     args = ap.parse_args()
     if args.cmd == "pin":
         record = require_registered_gpu(run_id=args.run_id)
         print(json.dumps(record, indent=2, sort_keys=True))
+    elif args.cmd == "capture":
+        if not args.stage:
+            sys.exit("capture needs --stage: a manifest states WHICH producer "
+                     "measured the card")
+        path, _ = capture_runtime_manifest(
+            stage=args.stage, run_id=args.run_id, session_id=args.session_id,
+            model=args.model, adapter=args.adapter,
+            served_adapter_name=args.served_adapter_name, port=args.port,
+            pid=args.pid, path=args.out)
+        print(path)
+    elif args.cmd == "ready":
+        if not args.manifest:
+            sys.exit("ready needs --manifest")
+        server = f"http://127.0.0.1:{args.port}" if args.port else None
+        rec = configio.mark_manifest_ready(args.manifest, run_id=args.run_id,
+                                          stage=args.stage, server=server)
+        print(json.dumps({k: rec[k] for k in
+                          ("run_id", "session_id", "stage", "gpu_name", "gpu_uuid",
+                           "cuda_visible_bytes", "driver_version", "pid", "port",
+                           "captured_at_utc", "ready_at_utc",
+                           configio.MANIFEST_HASH_FIELD)},
+                         indent=2, sort_keys=True))
     elif args.cmd == "fingerprint":
         print(json.dumps(configio.fingerprint(args.run_id), indent=2, sort_keys=True))
     else:

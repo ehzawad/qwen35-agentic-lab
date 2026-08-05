@@ -31,6 +31,17 @@
 #                  is released completely: not waited for, not reserved, not
 #                  probed. One GPU process at a time; served stages stop their
 #                  server before returning.
+#   THE PRODUCER ATTESTS
+#                  The process that produced the tokens is the authority on the
+#                  hardware that produced them. scripts/serve.sh captures a unique
+#                  session manifest and then execs vLLM (so the recorded pid owns
+#                  the card); this driver countersigns it once /v1/models answers
+#                  and hands it to every evaluator invocation, which refuses to
+#                  write an episode without it. The run binding, the client's
+#                  environment and this driver are CONSTRAINTS, not competing
+#                  sources of truth -- if they disagree with the producer, the
+#                  stage aborts as a hardware-integrity failure rather than
+#                  preferring one of them.
 #   LEDGER CEILING The GPU ledger is read before any GPU stage and the projected
 #                  cost is refused against the hard ceiling. Every row is a
 #                  receipt: timestamps, GPU identity, driver, engine fingerprint,
@@ -238,16 +249,22 @@ print(f"    GPU ledger: {ledger_hours(cfg):.2f} h used of "
 PYEOF
 }
 
-ledger_note() {  # stage, minutes, [kind], [work-json] -- full receipt rows
+ledger_note() {  # stage, minutes, [kind], [work-json], [started], [manifest]
   (( DRY_RUN )) && return 0
-  "$PY" - "$1" "$2" "${3:-stage}" "${4:-{\}}" "${5:-}" <<'PYEOF'
+  "$PY" - "$1" "$2" "${3:-stage}" "${4:-{\}}" "${5:-}" "${6:-}" <<'PYEOF'
 import json
 import sys
 from agentlab.suite.configio import ledger_append
 stage, minutes, kind = sys.argv[1], float(sys.argv[2]), sys.argv[3]
 work = json.loads(sys.argv[4] or "{}")
 started = sys.argv[5] or None
-cumulative = ledger_append(stage, minutes, kind=kind, work=work, started_at=started)
+# The producer session that actually spent the minutes. Given one, the receipt
+# COPIES that session's snapshot (UUID, driver, engine, manifest digest, session
+# id) instead of recomputing a fingerprint in this bookkeeping process, which is
+# how the ledger row ends up carrying the same identity as the traces it charges.
+manifest = sys.argv[6] or None
+cumulative = ledger_append(stage, minutes, kind=kind, work=work, started_at=started,
+                           manifest=manifest)
 print(f"    ledger: {stage} ({kind}) +{minutes:.1f} min -> "
       f"{cumulative:.2f} h cumulative  work={json.dumps(work)}")
 PYEOF
@@ -276,13 +293,30 @@ session_end() {  # stage-name
   [[ -n "$SESSION_T0" ]] || return 0
   local minutes
   minutes="$(awk "BEGIN{print ($(date +%s) - $SESSION_T0)/60}")"
+  # The manifest is passed even though the server has already been stopped: a
+  # session is charged AFTER it ends, and the row must carry the identity of the
+  # process that spent the minutes, not of this shell. A session that died before
+  # writing one is still charged -- the card really was busy, and an unrecorded
+  # interval understates the run -- from the run's own fingerprint.
+  local manifest=""
+  [[ -n "$RUNTIME_MANIFEST" && -s "$RUNTIME_MANIFEST" ]] && manifest="$RUNTIME_MANIFEST"
   ledger_note "$1" "$minutes" "server_session" \
-    "{\"unit\":\"work_units\",\"units\":[${SESSION_WORK}]}" "$SESSION_STARTED"
+    "{\"unit\":\"work_units\",\"units\":[${SESSION_WORK}]}" "$SESSION_STARTED" \
+    "$manifest"
   SESSION_T0=""
 }
 
 # ---- vLLM server lifecycle -------------------------------------------------
+# The server is the PRODUCER AUTHORITY for every served arm: it captures a unique
+# session manifest (physical UUID, driver, PCI bus, CUDA-visible bytes, engine
+# fingerprint, thinking mode, model, adapter hash, pid/process-start, port) and
+# then execs vLLM, so the pid in that manifest is the pid that owns the card. This
+# driver countersigns the manifest once /v1/models answers, and every evaluator
+# invocation is handed it. Nothing else may attest this hardware: the evaluator is
+# a pure HTTP client and would otherwise write `gpu_uuid: null` (S19).
 SERVER_PID=""
+SESSION_ID=""
+RUNTIME_MANIFEST=""
 
 stop_server() {
   [[ -n "$SERVER_PID" ]] || return 0
@@ -312,24 +346,48 @@ start_server() {  # extra serve flags in "$@"
   if (( DRY_RUN )); then
     printf '    $ bash scripts/serve.sh %s %s   (background, log -> %s)\n' \
       "$MODEL" "$*" "$log"
+    printf '    $ %s -m agentlab.env ready --manifest <session manifest>   (after /v1/models)\n' "$PY"
     return 0
   fi
   mkdir -p "$(dirname "$log")"
+  # One session id and one manifest path per server, derived from the registered
+  # hardware.lock location so there is no second copy of that path in this driver.
+  SESSION_ID="$("$PY" -c "
+from agentlab.suite.configio import new_session_id
+print(new_session_id('serve'))")" || die "cannot mint a session id"
+  RUNTIME_MANIFEST="$("$PY" - "$AGENTIC_RUN_ID" "$SESSION_ID" <<'PYEOF'
+import sys
+from agentlab.suite.configio import manifest_path
+print(manifest_path("serve", sys.argv[1], sys.argv[2]))
+PYEOF
+)" || die "cannot resolve the runtime manifest path"
   info "starting vLLM: $MODEL $* (log $log)"
-  PORT="$PORT" bash scripts/serve.sh "$MODEL" "$@" >"$log" 2>&1 &
+  info "session $SESSION_ID -> $RUNTIME_MANIFEST"
+  PORT="$PORT" AGENTIC_SESSION_ID="$SESSION_ID" \
+    RUNTIME_MANIFEST="$RUNTIME_MANIFEST" \
+    bash scripts/serve.sh "$MODEL" "$@" >"$log" 2>&1 &
   SERVER_PID=$!
   # vLLM can sit for minutes compiling CUDA graphs before the KV cache is
   # allocated. That is not a hang, so the wait is generous and reports progress.
+  local up=0
   for i in $(seq 1 90); do
     if curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
       info "server up after ~$((i * 10))s"
-      return 0
+      up=1
+      break
     fi
     kill -0 "$SERVER_PID" 2>/dev/null || { tail -30 "$log"; die "vLLM died; see $log"; }
     sleep 10
   done
-  tail -30 "$log"
-  die "vLLM did not answer /v1/models within 15 min; see $log"
+  (( up )) || { tail -30 "$log"; die "vLLM did not answer /v1/models within 15 min; see $log"; }
+  # Re-validate the producer attestation now that the engine is actually serving,
+  # and countersign it. A manifest for a server that never came up must certify
+  # nothing, and the evaluator requires this signature.
+  [[ -s "$RUNTIME_MANIFEST" ]] || { tail -30 "$log"; die \
+    "the server answered but wrote no producer manifest at $RUNTIME_MANIFEST. An \
+unattested server may not produce claim-bearing episodes (S19/D1)."; }
+  run "$PY" -m agentlab.env ready --manifest "$RUNTIME_MANIFEST" \
+    --run-id "$AGENTIC_RUN_ID" --stage serve --port "$PORT"
 }
 
 # ---- resumable shard loop --------------------------------------------------
@@ -342,11 +400,17 @@ eval_arm() {  # arm condition control specs adapter
   case "$arm" in
     BP|TP|RP) prompt="$(prompt_winner_file)" ;;
   esac
+  if [[ -z "$RUNTIME_MANIFEST" ]] && ! (( DRY_RUN )); then
+    die "REFUSED: no producer session manifest for $arm/$condition/$control. The \
+evaluator is a pure HTTP client and cannot attest the card that answers it; the \
+serving process writes the manifest (see start_server)."
+  fi
   local -a cmd=("$PY" -m agentlab.suite.evaluate
     --model "$MODEL" --base-id "$MODEL" --arm "$arm" --condition "$condition"
     --control "$control" --specs "$specs" --prompt "$prompt"
     --out "$TRACES" --secret-file "$SECRET_FILE" --run-id "$AGENTIC_RUN_ID"
-    --server "http://127.0.0.1:$PORT" --time-budget-s 360)
+    --server "http://127.0.0.1:$PORT" --time-budget-s 360
+    --runtime-manifest "${RUNTIME_MANIFEST:-<session manifest>}")
   # A trained arm REQUESTS the LoRA alias the server registered. Passing the
   # adapter for provenance while sending the base model id would evaluate the
   # base weights and label them trained.
@@ -810,6 +874,7 @@ import json; print(json.load(open('results/agentic/locks.json'))['checkpoint']['
     --specs "$CERTSPECS/dev.jsonl" --prompt "$(prompt_winner_file)" \
     --out out/multiface/ship_smoke --secret-file "$SECRET_FILE" \
     --server "http://127.0.0.1:$PORT" --limit 8 --time-budget-s 300 \
+    --runtime-manifest "${RUNTIME_MANIFEST:-<session manifest>}" \
     ${adapter:+--adapter "$adapter" --served-adapter-name trained}
   session_add "ship_smoke"
   stop_server
@@ -832,7 +897,13 @@ PYEOF
 # argument parsing -- deliberately before anything that could touch a GPU
 # ---------------------------------------------------------------------------
 
-usage() { sed -n '2,62p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# The header IS the usage text, so it cannot drift: print every comment line
+# above `set -uo pipefail` rather than a hardcoded line range that silently
+# truncates the moment a design rule is added.
+usage() {
+  sed -n '2,/^set -uo pipefail/p' "${BASH_SOURCE[0]}" \
+    | sed '$d' | sed 's/^# \{0,1\}//'
+}
 
 while (( $# )); do
   case "$1" in
