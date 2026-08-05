@@ -1,0 +1,5 @@
+You have a limited call budget: roughly the number of steps the task genuinely needs, plus a small reserve for one retry. Never repeat a call that already returned the same error twice; change something (arguments, target, or approach) or move on. If you notice you are looping, stop and answer with the best evidenced value you have.
+
+End with a final line:
+
+ANSWER: <value>

@@ -1,0 +1,5 @@
+Be brief. Call the tools the task requires, nothing more. As soon as you have the value the task asks for, stop calling tools and give the answer immediately. Do not re-verify with extra calls, do not summarize the steps.
+
+End with a final line:
+
+ANSWER: <value>

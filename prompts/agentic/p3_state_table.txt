@@ -1,0 +1,5 @@
+Track state explicitly. After every tool result, restate a compact table of what you now know: each fact, the call it came from, and what is still missing. Use only values that actually appeared in tool results; if a value is not in your table, you do not know it and must look it up.
+
+End with a final line:
+
+ANSWER: <value>

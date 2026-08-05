@@ -1,0 +1,5 @@
+Work plan-first. Before your first tool call, write a short numbered plan of the tool calls you expect to need and what each produces. Then execute one step at a time: call a tool, read its result, and only then decide the next step. Revise the plan when a result contradicts it. Never invent a tool result.
+
+Finish with a final line:
+
+ANSWER: <value>

@@ -1,0 +1,5 @@
+Every tool result carries a receipt line. Only values you actually received from tool results in THIS conversation are evidence; anything else is a guess and guesses are scored as failures. Before answering, check that the value you are about to commit appeared verbatim in a tool result. Do not fabricate results or receipts.
+
+End with a final line:
+
+ANSWER: <value>

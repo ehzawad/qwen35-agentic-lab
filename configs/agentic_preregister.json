@@ -1,0 +1,227 @@
+{
+  "preregistration_version": 1,
+  "date": "2026-08-04",
+  "frozen": true,
+  "amendment_rule": "After this file is committed, no threshold, margin, sample size, seed, estimand, or interpretation rule in it may be edited in place. A genuinely broken gate gets a dated AMENDMENT section in docs/AGENTIC_PROTOCOL.md plus entirely fresh held-out seeds; the original gate is still reported.",
+
+  "model": {
+    "base_id": "Qwen/Qwen3.5-4B",
+    "trained_candidate": "exactly one locked checkpoint (RS-SFT, or GRPO if it wins dev selection), chosen on dev data and recorded in results/agentic/locks.json BEFORE the held-out seed reveal"
+  },
+
+  "arms": {
+    "B0": {"weights": "base", "prompt": "neutral (p1_minimal.txt)", "role": "descriptive"},
+    "BP": {"weights": "base", "prompt": "frozen tournament winner", "role": "elicitation control; primary comparator"},
+    "T0": {"weights": "trained", "prompt": "neutral (p1_minimal.txt)", "role": "descriptive"},
+    "TP": {"weights": "trained", "prompt": "frozen tournament winner (identical to BP)", "role": "primary candidate"},
+    "R0": {"weights": "grpo", "prompt": "neutral", "role": "descriptive, only if GRPO ran"},
+    "RP": {"weights": "grpo", "prompt": "frozen tournament winner", "role": "candidate, only if GRPO ran and was the locked selection"},
+    "pairing": "identical task IDs, values, budgets, schemas, decoding, and seeds across compared arms (S8)"
+  },
+
+  "decoding": {
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "seed": 2786983945,
+    "max_tokens_per_decision": 1024,
+    "note": "deterministic decoding for all preregistered claims; stochastic robustness is out of scope"
+  },
+
+  "budgets": {
+    "max_decisions": {"clean": "H+3", "faulted": "H+5", "stress": "H+8"},
+    "max_calls": "2H+4",
+    "episode_wall_s": 240
+  },
+
+  "runaway_definition": [
+    "hard call cap 2H+4 reached",
+    "three identical normalized calls each returning the identical error observation",
+    "four consecutive calls that do not advance the provenance ledger",
+    "runner termination for token, wall-clock, or parser budget (termination_reason in {token_budget, wall_clock, parser_budget})"
+  ],
+
+  "answer_format": "final assistant line matching /ANSWER\\s*:\\s*(\\S+)/, last occurrence; \\boxed{} accepted as fallback; token answers compared case-insensitively after strip, integer answers numerically",
+
+  "seeds": {
+    "fault_seed_eval": 2786983943,
+    "permutation_seed": 2786983944,
+    "decode_seed": 2786983945,
+    "redaction_seed": 2786983946,
+    "bootstrap_seed": 2786983947,
+    "note_hex": "0xA61E0007..0xA61E000B; suite generation seeds 0xA61E0001..0xA61E0006 live in the suite manifest",
+    "heldout_seed_commitment": "heldout_seed = int.from_bytes(SHA256(<preregistration commit sha> + ':agentic-heldout-v1')[:8], 'big'). The preregistration commit sha is the commit that introduces this file; it cannot be chosen to favour any arm because changing any frozen content changes the sha. The reveal stage writes results/agentic/seed_reveal.json AFTER results/agentic/locks.json records the locked checkpoint and prompt winner (S18)."
+  },
+
+  "prompt_candidates": {
+    "directory": "prompts/agentic",
+    "sha256": {
+      "p1_minimal.txt": "96931bfebcf449932e75dbc937c23e8d66848085e16e0f9fb69e9bfe6d4ffb1b",
+      "p2_plan_state_act.txt": "5facfd02997dae6985ff3cdcfda67fa83c0b6765fb5ca9658f46261aec18971d",
+      "p3_state_table.txt": "c84c6dd7fdee88e8f5658bc048b0139d3c5b2fe11e0f95f4ac2c58eb1bb9e60d",
+      "p4_error_repair.txt": "1cfabcf822732789a3ced69b6a1af5b1875b5ccc528d00ec2f54f67ef278b83a",
+      "p5_provenance.txt": "6d1fa366cfe47f9b8eaea03c953266174522ec1dbf1bbe755664d7557afa2fda",
+      "p6_concise_termination.txt": "7d802782cf981bbd4374db7b542a9d294bacc2ffaffa71c7f250fb68004f64a3",
+      "p7_budget_loop.txt": "07e2b62676220be4edca39a256fade2c7f21fc506449c5f641dc5648b91db57c",
+      "p8_combined.txt": "76ff5291704fcb4ee591b6d8da3b5d6a471c484ac8b5f07444373468988e89eb"
+    },
+    "tournament": {
+      "round1": "100 dev instances per axis for all eight prompts",
+      "round2": "another 200 dev instances per axis for the top two",
+      "winner_rule": "highest mean certified strict success on the combined 300 across the three axes weighted equally; ties broken by shorter file byte length, then lower file index",
+      "honest_description": "best of eight preregistered system prompts under a fixed search budget, never 'best possible prompt'",
+      "no_few_shot": "no few-shot examples, weight changes, adapters, retrieval additions, or task-specific answers in any candidate; tool schemas identical across arms"
+    },
+    "neutral_default": "p1_minimal.txt"
+  },
+
+  "statistics": {
+    "paired_difference": "D_i = Y_TP,i - Y_BP,i in {-1,0,1} on identical task IDs",
+    "clustered_bootstrap": {
+      "cluster_field": "template_id",
+      "statistic": "ratio of sums: sum(resampled cluster diff sums) / sum(resampled cluster sizes)",
+      "replicates": 100000,
+      "seed": 2786983947,
+      "stream": "SHAKE-256 over '0x{seed}:{label}:chunk{i}' (agentlab.suite.rng)",
+      "quantile_rule": "lower bound = the floor(alpha*R)-th order statistic, 0-based",
+      "alpha_one_sided": 0.025,
+      "note": "one-sided 97.5% lower confidence bound, fixed by the orchestrator's claim hierarchy (single primary claim)"
+    },
+    "mcnemar": "exact binomial on discordant pairs at any n, two-sided and one-sided reported; REPORTED as supporting evidence, the gate is the clustered lower bound",
+    "holm": "Holm-adjusted exact McNemar p-values reported across the two secondary claims",
+    "wilson": "95% score intervals for every arm-level rate"
+  },
+
+  "claims": {
+    "hierarchy_note": "Fixed by the orchestrator: ONE primary claim, two secondary claims, everything else descriptive. No general-agentic-competence or general-planning language is permitted even if every gate passes.",
+    "primary": {
+      "name": "certified_error_recovery_common_clean",
+      "estimand": "On the preregistered subset C of held-out fault-assigned tasks where BOTH BP and TP achieve certified success in the clean replay, the difference (TP - BP) in certified recovery on the injected replay.",
+      "margin": 0.05,
+      "bound": "one-sided 97.5% template-clustered bootstrap lower bound > +0.05",
+      "sample": "all >= 900 assigned fault pairs; |C| >= 500 required, else INCONCLUSIVE",
+      "itt": "intention-to-treat certified recovery difference over ALL assigned fault pairs is also reported and must be nonnegative",
+      "gates": ["ER1", "ER2", "ER3", "ER4", "ER5", "ER6", "ER7", "ER8"]
+    },
+    "secondary": [
+      {
+        "name": "certified_all_tools_orchestration_H4",
+        "estimand": "difference (TP - BP) in certified all-three-tools success on >= 600 paired held-out tasks at fixed oracle horizon 4 whose answer causally requires kb_lookup, unit_convert and calculator",
+        "margin": 0.05,
+        "bound": "one-sided 97.5% template-clustered bootstrap lower bound > +0.05; PASS only on a lower bound exceeding the margin",
+        "gates": ["MT1", "MT2", "MT3", "MT4", "MT5", "MT6"]
+      },
+      {
+        "name": "H8_execution_reliability",
+        "estimand": "difference (TP - BP) in certified strict success on >= 400 paired clean held-out instances at oracle horizon 8 (families lookup_chain and typed_relay, balanced)",
+        "margin": 0.05,
+        "bound": "one-sided 97.5% template-clustered bootstrap lower bound > +0.05; PASS only on a lower bound exceeding the margin",
+        "gates": ["HR1", "HR2", "HR3"]
+      }
+    ],
+    "descriptive": [
+      "full success-vs-horizon curves per family/condition/arm with pointwise 95% Wilson bands; NO logistic or other extrapolation; H50 reported only if the observed curve crosses 50%, otherwise reported as left- or right-censored",
+      "two-fault stress set (280 tasks) as measured-only extrapolation; never trained on, never gated",
+      "B0/T0 arms quantify elicitation; reported, never gated"
+    ]
+  },
+
+  "gates": {
+    "ER1": {"rule": "|C| >= 500", "on_fail": "INCONCLUSIVE (underpowered; no verdict, favourable point estimates notwithstanding)"},
+    "ER2": {"rule": "on C, certified recovery diff (TP-BP) one-sided 97.5% clustered LB > +0.05; exact McNemar reported"},
+    "ER3": {"rule": "TP certified recovery on C has Wilson 95% lower bound >= 0.60"},
+    "ER4": {"rule": "TP clean certified success non-inferior to BP: clustered 97.5% LB of (TP-BP) clean diff > -0.03"},
+    "ER5": {"rule": "intention-to-treat certified recovery diff (TP-BP) over all assigned faults >= 0"},
+    "ER6": {"rule": "TP runaway rate Wilson 95% upper bound <= 0.03"},
+    "ER7": {"rule": "TP hallucinated-result rate Wilson 95% upper bound <= 0.01"},
+    "ER8": {"rule": "no fault group (transient_or_rate_limit, malformed, wrong_unit) has TP-BP point diff < -0.05"},
+    "MT1": {"rule": "certified all-tools success diff (TP-BP) one-sided 97.5% clustered LB > +0.05; requires >= 600 pairs, else INCONCLUSIVE"},
+    "MT2": {"rule": "TP certified all-tools success Wilson 95% lower bound >= 0.60"},
+    "MT3": {"rule": "TP median tool calls <= oracle minimum + 2 on MT tasks"},
+    "MT4": {"rule": "TP runaway Wilson upper bound <= 0.03 AND hallucinated-result upper bound <= 0.01 on MT tasks"},
+    "MT5": {"rule": "none of the six registered order patterns (pattern_id 0..5, balanced >= 80 pairs each, concrete tool sequences committed in the suite manifest before any held-out result) has TP-BP point diff < -0.05"},
+    "MT6": {"rule": "absent-information control clean on MT family (see controls; any raw success is a harness BUG)"},
+    "HR1": {"rule": "H8 clean certified success diff (TP-BP) one-sided 97.5% clustered LB > +0.05; requires >= 400 pairs and >= 20 discordant pairs, else INCONCLUSIVE"},
+    "HR2": {"rule": "TP H8 runaway Wilson upper bound <= 0.03"},
+    "HR3": {"rule": "TP H8 hallucinated-result Wilson upper bound <= 0.01"}
+  },
+
+  "fault_protocol": {
+    "classes": ["transient", "rate_limit", "malformed", "wrong_unit"],
+    "groups_for_ER": {"transient_or_rate_limit": 300, "malformed": 300, "wrong_unit": 300},
+    "assignment": "deterministic per (task_id, fault_seed_eval); emitted exactly once at the registered critical oracle node on the first semantically valid call; always recoverable within the remaining registered budget; wrong_unit only on unit_convert nodes",
+    "recovery_token": "128-bit HMAC(run_secret) token in every error envelope (transient, rate_limit, malformed); certification requires the token in the remedial call; rate_limit additionally requires a later assistant decision; wrong_unit emits no token and requires a corrected-target conversion",
+    "non_recovery_cases": ["not_exposed (stays in ITT denominator)", "unvalidated_answer (guessing / clean-run value reuse / invention)", "blind_retry (post-fault result without the remediation contract)", "no_post_fault_result", "pre_fault_answer", "hallucinated", "runaway", "wrong_final"]
+  },
+
+  "sample_sizes": {
+    "eval_core": "1200 held-out specs (100 per family/horizon cell over 12 cells), each run clean AND faulted per arm: >= 900 fault-assigned pairs balanced >= 300 per fault group",
+    "eval_mt": ">= 600 additional held-out typed-relay pairs at fixed H4, all three tools causally required, six order patterns balanced >= 80 each, >= 240 structural templates, <= 5 value instantiations per template",
+    "eval_h8": ">= 400 paired clean H8 instances (eval_core H8 cells plus augmentation, balanced across lookup_chain and typed_relay)",
+    "stress": "280 two-fault tasks, >= 40 per cell at H >= 8, fault rate 2/H, measured-only",
+    "no_enlargement": "final-test sample sizes must not be enlarged after looking at results; if template dependence makes the design underpowered, the verdict is INCONCLUSIVE"
+  },
+
+  "controls": {
+    "absent_information": {
+      "n_per_family": 200,
+      "arms": ["BP", "TP"],
+      "construction": "the required lookup never returns the hidden value (hidden_key record removed); every scored task depends on an episode-specific hidden value of >= 48 bits entropy generated outside the prompt",
+      "expectation": "certified success exactly zero BY CONSTRUCTION; any raw exact success is a harness-leakage BUG (S11), never evidence of ability"
+    },
+    "counterfactual_permutation": {
+      "n_min": 100,
+      "arms": ["BP", "TP"],
+      "construction": "hidden terminal values permuted BETWEEN task IDs with permutation_seed; correct outputs must track the returned value, not the prompt/task identity (S14)",
+      "scope": "token-answer tasks (terminal kb_lookup); all other scored tasks must carry a generation-time counterfactual_sensitive flag verified by the suite validator"
+    },
+    "isolation": "clean and injected replays run in isolated processes/caches so a clean result can never leak into the faulted replay"
+  },
+
+  "harness_vetoes": {
+    "S8": "PAIRING: identical task IDs, values, budgets, schemas, decoding, and seeds across compared arms",
+    "S9": "ORACLE: every task reachable; registered minimum horizon independently verified by replay",
+    "S10": "SPLITS: no train/dev/test overlap in task IDs, KB namespace or keys, graph isomorphism, or template hashes",
+    "S11": "ABSENT-INFO: redacted controls have zero certified AND zero raw exact success",
+    "S12": "INJECTION: scheduled failures fire exactly once, at the registered critical dependency, and remain recoverable",
+    "S13": "RECEIPTS: every certified outcome has a valid environment-only receipt chain (HMAC with the run secret)",
+    "S14": "COUNTERFACTUAL: changing the hidden value changes the oracle answer and the scorer decision; permuted replays track the returned value",
+    "S15": "ATTRITION: every assigned task has a trace; timeouts, parser failures, crashes, and runaways remain in denominators (missing traces -> INCONCLUSIVE, never favourable)",
+    "S16": "CONTROL-INTEGRITY: base checkpoint and prompt hashes match this preregistration; no adapter loaded in prompt-only arms",
+    "S17": "TRACE-SUMMARY: independent recomputation agrees on calls, failures, exposure, recovery, hallucinations, and final score",
+    "S18": "TEST-BLINDNESS: checkpoint and prompt winners locked (results/agentic/locks.json) before the held-out seed reveal (results/agentic/seed_reveal.json)",
+    "precedence": "any BUG vetoes every capability gate and the winner rule; missing traces or an underpowered common-clean subset yield INCONCLUSIVE, never a favourable interpretation"
+  },
+
+  "outcome_states": ["PASS", "FAIL", "INCONCLUSIVE", "BUG"],
+
+  "launch_floors": {
+    "applies_to": "the winning arm (whichever ships)",
+    "F1": "overall clean certified success >= 0.65",
+    "F2": "no family below 0.50 clean",
+    "F3": "overall faulted strict success (intention-to-treat over assigned faults) >= 0.40",
+    "F4": "no family below 0.25 faulted",
+    "F5": "loop/crash rate (runaway + crash + parser failure) < 0.02"
+  },
+
+  "winner_rule": {
+    "W1": "the trained arm becomes the shipped default ONLY if it clears every launch floor AND is clean-non-inferior at -0.03 (ER4) AND certified recovery clustered LB > +0.05 (ER2)",
+    "W2": "otherwise the frozen prompted base (BP) ships if it clears every launch floor",
+    "W3": "otherwise the honest verdict is: no successful multifaceted pipeline yet",
+    "veto": "no winner is declared while any harness veto is BUG"
+  },
+
+  "claims_to_reject": [
+    "Qwen3.5-4B has general agentic competence",
+    "training creates general long-horizon planning",
+    "the model can plan arbitrary eight-step tasks",
+    "the model is robust to arbitrary tool/API failures",
+    "the model orchestrates real-world tools",
+    "training beats prompt engineering (without the fixed eight-prompt qualification)",
+    "the learned policy understands why recovery works",
+    "GRPO improves RS-SFT (unless separately preregistered and powered as a paired stage-attribution experiment)",
+    "success continues beyond horizon eight (extrapolating a fitted curve is not falsification)",
+    "broad BFCL or tau-bench claims via judge models, user simulators, remote APIs, or contaminated public tasks",
+    "multimodal, 262K-context, or speculative-decoding capability claims",
+    "successful dependency-chain execution reveals an internal planning mechanism (the protocol supports a narrow behavioural claim only)"
+  ]
+}

@@ -1,0 +1,9 @@
+Tools can fail. Read every tool result carefully before using it.
+
+- If a result is an error with "recovery_token": re-issue the SAME call and include the argument recovery_token set to that exact token. If the error says to retry after your next turn, make the retry in your NEXT reply, not the current one.
+- If a result looks truncated or malformed, treat it as unusable and re-issue the call with the recovery_token from the accompanying error.
+- If a conversion returns a different unit than you asked for, do not use the number; request the conversion again with the correct target unit and use only the corrected result.
+
+Never guess a value a tool failed to deliver. End with a final line:
+
+ANSWER: <value>

@@ -1,0 +1,12 @@
+Plan first: before your first tool call, list the calls you expect to need. Execute one step at a time and keep a compact running note of every value received and the call it came from. Use only values that appeared in tool results; never invent a result or a receipt.
+
+Handle failures precisely:
+- an error with "recovery_token": re-issue the same call including recovery_token set to that token (if told to wait, retry in your next reply);
+- a truncated result: unusable; re-issue with the recovery_token from the error;
+- a conversion in the wrong unit: discard it and re-request the correct target unit.
+
+Do not repeat a call that failed identically twice. Stop as soon as you have the required value.
+
+End with a final line:
+
+ANSWER: <value>
