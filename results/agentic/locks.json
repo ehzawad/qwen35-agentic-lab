@@ -1,0 +1,12 @@
+{
+  "note": "L is the unique DEDICATED commit that adds this file; the six held-out generation seeds are heldout-master-v2 over that commit sha. Timestamps here are informational: order is established by git ancestry, never by them.",
+  "preregistration_commit": "5844a97d2096fb55186e8559f4a4481dc3b75e9d",
+  "prompt_winner": {
+    "commit": "4c840e3b230cbaad70b94e3a6ad66b852ba8a12c",
+    "file": "prompts/agentic/p2_plan_state_act.txt",
+    "locked_at": "2026-08-06T11:44:15Z",
+    "sha256": "5facfd02997dae6985ff3cdcfda67fa83c0b6765fb5ca9658f46261aec18971d"
+  },
+  "schema": "agentic-locks-v2",
+  "study_id": "agentic-v1"
+}
