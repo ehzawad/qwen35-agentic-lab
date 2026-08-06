@@ -1,0 +1,102 @@
+{
+  "winner": {
+    "candidate": "p2_plan_state_act.txt",
+    "sha256": "5facfd02997dae6985ff3cdcfda67fa83c0b6765fb5ca9658f46261aec18971d",
+    "prompt_sha256": "4c351f5fe07c096c6e551e48f85d088aafe5edf213e1b73a3305bfe5d9ad13db",
+    "rates": {
+      "recovery": 0.84,
+      "orchestration": 0.9833,
+      "h8": 0.9867,
+      "combined": 0.9367,
+      "n": 900
+    }
+  },
+  "ranking": [
+    "p2_plan_state_act.txt",
+    "p8_combined.txt",
+    "p6_concise_termination.txt",
+    "p1_minimal.txt",
+    "p7_budget_loop.txt",
+    "p4_error_repair.txt",
+    "p5_provenance.txt",
+    "p3_state_table.txt"
+  ],
+  "round2_candidates": [
+    "p2_plan_state_act.txt",
+    "p8_combined.txt"
+  ],
+  "per_candidate": {
+    "p1_minimal.txt": {
+      "recovery": 0.78,
+      "orchestration": 0.97,
+      "h8": 0.97,
+      "combined": 0.9067,
+      "n": 300
+    },
+    "p2_plan_state_act.txt": {
+      "recovery": 0.84,
+      "orchestration": 0.9833,
+      "h8": 0.9867,
+      "combined": 0.9367,
+      "n": 900
+    },
+    "p3_state_table.txt": {
+      "recovery": 0.7,
+      "orchestration": 0.94,
+      "h8": 0.93,
+      "combined": 0.8567,
+      "n": 300
+    },
+    "p4_error_repair.txt": {
+      "recovery": 0.79,
+      "orchestration": 0.94,
+      "h8": 0.99,
+      "combined": 0.9067,
+      "n": 300
+    },
+    "p5_provenance.txt": {
+      "recovery": 0.8,
+      "orchestration": 0.93,
+      "h8": 0.96,
+      "combined": 0.8967,
+      "n": 300
+    },
+    "p6_concise_termination.txt": {
+      "recovery": 0.79,
+      "orchestration": 0.98,
+      "h8": 0.9833,
+      "combined": 0.9178,
+      "n": 900
+    },
+    "p7_budget_loop.txt": {
+      "recovery": 0.8,
+      "orchestration": 0.94,
+      "h8": 0.98,
+      "combined": 0.9067,
+      "n": 300
+    },
+    "p8_combined.txt": {
+      "recovery": 0.8,
+      "orchestration": 0.99,
+      "h8": 1.0,
+      "combined": 0.93,
+      "n": 300
+    }
+  },
+  "h8": {
+    "best_prompt_success": 1.0,
+    "feasibility_min": 0.05,
+    "measured_only": false
+  },
+  "honest_description": "best of eight preregistered system prompts under a fixed search budget, never 'best possible prompt'",
+  "round1_ranking": [
+    "p2_plan_state_act.txt",
+    "p6_concise_termination.txt",
+    "p8_combined.txt",
+    "p1_minimal.txt",
+    "p7_budget_loop.txt",
+    "p4_error_repair.txt",
+    "p5_provenance.txt",
+    "p3_state_table.txt"
+  ]
+}
