@@ -22,7 +22,7 @@ held-out set is derived, generated and evaluated — which cannot happen before
 | `R` — seed reveal | does not exist; the six held-out generation seeds are a function of `L`, so the held-out set **cannot be generated yet** | `heldout-master-v2` derivation, `configs/agentic_preregister.json` |
 | current stage | **`distill` (rejection sampling) IN PROGRESS** on the pinned A5000. Snapshot at `2026-08-06T14:26:33Z`: 10 of 60 planned shards sealed and receipt-validated, 2,800 verified rollouts. Both counts move while the stage runs | `data/multiface/raw/shard-*.receipt.json` |
 | GPU hours | **non-zero**: **5.982 h** charged at that same instant, and still rising. The ledger is the authority, not this table | `results/agentic/gpu_ledger.jsonl`, `gpu_sessions.jsonl` |
-| CPU test suite | **985 passed, 1 failed, 6 skipped** (402.9 s). The one failure is a test-isolation defect, not a harness regression — see below | `PYTHONPATH=src .venv/bin/python -m pytest -q` |
+| CPU test suite | **998 passed, 1 failed, 6 skipped** (417.3 s). The one failure is a test-isolation defect, not a harness regression — see below | `PYTHONPATH=src .venv/bin/python -m pytest -q` |
 | dev preflight | **five probes green, 87 checks, all pass** | `results/agentic/preflight/probe{1..5}.json` |
 | capability claim | **NONE. No trained checkpoint exists, no held-out bytes exist, no gate has been evaluated.** | — |
 
@@ -132,6 +132,50 @@ Helper targets (`make help`) exist for tests and debugging — `make verify`
 (CPU test suite), `make suite`, `make validate-suite`, `make locks`,
 `make smoke`, `make serve`, `make gpu` — but there is exactly one supported
 end-to-end workflow, and alternate pipelines are out of scope.
+
+## Serving the shippable configuration, and the demo
+
+Two client model ids, one script, one demo — the whole shipping surface is
+[docs/SERVING.md](docs/SERVING.md). `Qwen/Qwen3.5-4B` (the base weights under the
+frozen winning prompt) is always shipped and is the default; `trained` (the same
+base plus a validated `out/multiface/rssft-lora`) is shipped only if training
+completes and validates, is labelled experimental, and **is not claimed to beat
+the prompt-only base** unless separately reported evidence says so.
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 EXPECT_GPU=A5000 \
+AGENTIC_RUN_ID=agentic-v1 PORT=8000 bash scripts/serve.sh Qwen/Qwen3.5-4B
+
+# once out/multiface/rssft-lora exists and validates, the same one command
+# serves both ids:
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 EXPECT_GPU=A5000 \
+AGENTIC_RUN_ID=agentic-v1 PORT=8000 bash scripts/serve.sh Qwen/Qwen3.5-4B \
+  --enable-lora --lora-modules trained=out/multiface/rssft-lora \
+  --max-lora-rank 32
+```
+
+The prompt is **not** injected by the server. Every request must begin with a
+system message carrying the exact bytes of
+`prompts/agentic/p2_plan_state_act.txt` (`sha256 5facfd02997d…`); a bare request
+to `Qwen/Qwen3.5-4B` without it is not the shipped configuration and must not be
+presented as one. Thinking is disabled and multimodal input is rejected.
+
+Against a server you started:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/demo_agentic.py
+```
+
+[`scripts/demo_agentic.py`](scripts/demo_agentic.py) runs a five-episode panel
+whose task ids are fixed in the source before the server is contacted — one of
+them under a real injected `rate_limit` fault, and one at the deep-horizon
+boundary where the model is expected to fail — and prints the exact tool calls,
+the fault envelope the model read, its recovery token, the remedial call and the
+verifier's verdict for each. It selects nothing by outcome and rerolls nothing.
+**These are five synthetic dev demonstrations, not a benchmark and not held-out
+evidence**, and one warning is load-bearing: fulfillment was 94.3–97.8%
+certified at H4/H8 but **59/1,152 (5.1%) at H14** in the 13-shard distill
+snapshot — H14/H20 are outside the supported reliability envelope.
 
 ## Task families and the tool cap
 

@@ -216,7 +216,7 @@ markdown file.
 ## D5 — One test consults the live repository instead of an isolated git history
 
 **File:** `tests/test_chain.py:431`, `test_lock_prompt_refuses_before_P_exists`. This is
-the single failing test in the current suite (**985 passed, 1 failed, 6 skipped**).
+the single failing test in the current suite (**998 passed, 1 failed, 6 skipped**).
 
 The test asserts that `lock-prompt` refuses *because no preregistration commit exists*:
 
