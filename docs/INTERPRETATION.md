@@ -128,6 +128,14 @@ filled from the analyzer's emitted numbers, never from prose):
 > established on this endpoint. It must not be interpreted as evidence that the
 > training intervention had zero effect.
 
+**Superseded-in-part, forward, no deletion.** Council round 8 restated that template with
+two additions: it also requires the registered reason to be named (`for the following
+registered reason: [reason]`) and requires the sentence "the registered >0.05 superiority
+claim failed" whenever the status is FAIL. That stricter version is recorded verbatim in
+[docs/RESULTS.md](RESULTS.md) §3 and is the one to use. The block above is kept exactly as
+first fixed — neither version softens the other, and rule 1 below already demanded the
+FAIL sentence.
+
 If held-out `BP` is itself at least 0.95, add:
 
 > At the observed held-out BP rate, the largest arithmetically possible sample

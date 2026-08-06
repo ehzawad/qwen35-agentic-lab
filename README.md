@@ -20,11 +20,15 @@ held-out set is derived, generated and evaluated — which cannot happen before
 | prompt winner | **locked under `P`**: `prompts/agentic/p2_plan_state_act.txt`, `sha256 5facfd02997d…`, frozen at commit `4c840e3` | `results/agentic/locks.json` (on disk, deliberately **not** committed yet — `L` must be the dedicated commit adding the *complete* lock) |
 | `L` — checkpoint lock | **does not exist, and was correctly refused**: `status` reports `REFUSED: the lock is INCOMPLETE, so there is nothing for the held-out seed to be a function of` | `python scripts/agentic_locks.py status` |
 | `R` — seed reveal | does not exist; the six held-out generation seeds are a function of `L`, so the held-out set **cannot be generated yet** | `heldout-master-v2` derivation, `configs/agentic_preregister.json` |
-| current stage | **`distill` (rejection sampling) IN PROGRESS** on the pinned A5000. Snapshot at `2026-08-06T14:26:33Z`: 10 of 60 planned shards sealed and receipt-validated, 2,800 verified rollouts. Both counts move while the stage runs | `data/multiface/raw/shard-*.receipt.json` |
-| GPU hours | **non-zero**: **5.982 h** charged at that same instant, and still rising. The ledger is the authority, not this table | `results/agentic/gpu_ledger.jsonl`, `gpu_sessions.jsonl` |
-| CPU test suite | **998 passed, 1 failed, 6 skipped** (417.3 s). The one failure is a test-isolation defect, not a harness regression — see below | `PYTHONPATH=src .venv/bin/python -m pytest -q` |
+| current stage | **`distill` (rejection sampling) IN PROGRESS** on the pinned A5000. Snapshot at `2026-08-06T17:42:45Z`: 15 of 60 planned shards sealed and receipt-validated, 4,400 verified rollouts. Both counts move while the stage runs | `data/multiface/raw/shard-*.receipt.json` |
+| GPU hours | **non-zero**: **9.249 h** charged at that same instant, and still rising. The ledger is the authority, not this table | `results/agentic/gpu_ledger.jsonl`, `gpu_sessions.jsonl` |
+| CPU test suite | **1,053 passed, 1 failed, 6 skipped** (406.8 s). The one failure is a test-isolation defect, not a harness regression — see below | `PYTHONPATH=src .venv/bin/python -m pytest -q` |
 | dev preflight | **five probes green, 87 checks, all pass** | `results/agentic/preflight/probe{1..5}.json` |
 | capability claim | **NONE. No trained checkpoint exists, no held-out bytes exist, no gate has been evaluated.** | — |
+| registered evaluation | the full **7,800**-episode mandatory census **is being completed**, not descoped — projected **~6.4 GPU-h** from a measured 177.6 min per 3,600 episodes | [docs/AMENDED_REPLICATION_NOT_RUN.md](docs/AMENDED_REPLICATION_NOT_RUN.md) |
+| dropped work | the **optional cluster-balanced amended replication is not being run**. It was never registered, so this is **not a deviation**, and no deviation notice is due | same file, with the tripwire that would make one mandatory |
+| read before using it | **[docs/USAGE.md](docs/USAGE.md)** — the deep-horizon collapse, what the recovery number is and is not, the exact serving contract, the licence and the pinned base revision | `env/model_revision.json` |
+| results document | **[docs/RESULTS.md](docs/RESULTS.md)** — the verbatim required wording and every gate template, with **all held-out slots UNFILLED** on purpose | — |
 
 The single failing test is `tests/test_chain.py::test_lock_prompt_refuses_before_P_exists`.
 It asserts *which* refusal `lock-prompt` emits when no preregistration commit
@@ -60,12 +64,40 @@ predetermined winners: if training does not beat the locked elicitation control
 by the registered margin without harming clean performance, the shipped
 pipeline is the prompted base model.
 
-**How the two saturated secondary endpoints will be reported is fixed in
-advance**, in [docs/INTERPRETATION.md](docs/INTERPRETATION.md): the required
-pre-results wording, the per-gate reporting template, and the correction to my
-earlier framing — the analyzer produces `FAIL` (not "INCONCLUSIVE by
-saturation") when a computable lower bound does not clear `+0.05`, and a
-saturated *development* endpoint does not establish that training has no effect.
+**How every endpoint will be reported is fixed in advance**, before the numbers
+exist: [docs/RESULTS.md](docs/RESULTS.md) carries the verbatim required wording,
+the per-gate template, the underpowered-primary template and the descriptive-number
+prefix with every slot unfilled, and
+[docs/INTERPRETATION.md](docs/INTERPRETATION.md) carries the analyzer semantics
+behind them — the analyzer produces `FAIL` (not "INCONCLUSIVE by saturation")
+when a computable lower bound does not clear `+0.05`, and a saturated
+*development* endpoint does not establish that training has no effect.
+
+## What is measured today — all of it training-side
+
+**Descriptive only; not a preregistered claim.** Every row is a **dev** or
+**distill** observation from the base model under the frozen prompt, with
+repeated samples per task. None of it is held-out, none of it is the adapter,
+and no gate is computed on any of it. The sealed shards at that snapshot hold the
+`fulfillment` family only, so no row is a whole-suite rate; the corpus is still
+growing, and a later snapshot replaces these rather than mixing with them. Every
+caveat, the per-cell decomposition and the reason no intervals are printed:
+[docs/RESULTS.md](docs/RESULTS.md) §6 and §10.
+
+| observation | value | split | snapshot |
+|---|---|---|---|
+| certified success, `fulfillment-h4` | 1,174/1,200 (97.8%) | distill | 13 shards, `2026-08-06T16:46:19Z` |
+| certified success, `fulfillment-h8` | 1,509/1,600 (94.3%) | distill | 13 shards, `2026-08-06T16:46:19Z` |
+| certified success, `fulfillment-h14` | **59/1,152 (5.1%)** | distill | 13 shards, `2026-08-06T16:46:19Z` |
+| recovery predicate met, fault-assigned | 1,302/1,752 (74.3%) — a **mixture** over cells: 575/600 H4, 714/800 H8, 13/352 H14 | distill | 13 shards, `2026-08-06T16:46:19Z` |
+| certified success, all sealed cells pooled | 2,742/3,952 (69.4%) | distill | 13 shards, `2026-08-06T16:46:19Z` |
+| prompt-only control, H4 all-tools orchestration | 295/300 (0.9833) | dev | prompt tournament, `2026-08-06` |
+| prompt-only control, H8 execution | 296/300 (0.9867) | dev | prompt tournament, `2026-08-06` |
+| anything held-out | **none exists** | — | — |
+
+> **Deep horizons collapse: fulfillment certified success falls from 94.3–97.8%
+> at H4/H8 to 59/1,152 (5.1%) at H14, so H12/H14/H20 are outside the supported
+> reliability envelope and are measured-only cells.**
 
 ## The one supported entry point
 
@@ -136,11 +168,13 @@ end-to-end workflow, and alternate pipelines are out of scope.
 ## Serving the shippable configuration, and the demo
 
 Two client model ids, one script, one demo — the whole shipping surface is
-[docs/SERVING.md](docs/SERVING.md). `Qwen/Qwen3.5-4B` (the base weights under the
-frozen winning prompt) is always shipped and is the default; `trained` (the same
-base plus a validated `out/multiface/rssft-lora`) is shipped only if training
-completes and validates, is labelled experimental, and **is not claimed to beat
-the prompt-only base** unless separately reported evidence says so.
+[docs/SERVING.md](docs/SERVING.md), and what a user must know before running it
+is [docs/USAGE.md](docs/USAGE.md). `Qwen/Qwen3.5-4B` (the base weights under the
+frozen winning prompt, Hub revision `851bf6e8…`) is always shipped and is the
+default; `trained` (the same base plus a validated `out/multiface/rssft-lora`,
+LoRA rank 32) is shipped only if training completes and validates, is labelled
+experimental, and **is not claimed to beat the prompt-only base** unless
+separately reported evidence says so.
 
 ```bash
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 EXPECT_GPU=A5000 \
@@ -173,9 +207,10 @@ boundary where the model is expected to fail — and prints the exact tool calls
 the fault envelope the model read, its recovery token, the remedial call and the
 verifier's verdict for each. It selects nothing by outcome and rerolls nothing.
 **These are five synthetic dev demonstrations, not a benchmark and not held-out
-evidence**, and one warning is load-bearing: fulfillment was 94.3–97.8%
-certified at H4/H8 but **59/1,152 (5.1%) at H14** in the 13-shard distill
-snapshot — H14/H20 are outside the supported reliability envelope.
+evidence** — the deep-horizon warning above is the one to carry away, and
+[docs/USAGE.md](docs/USAGE.md) states the rest, including that certified
+recovery was measured under an injected token-bearing fault contract rather
+than arbitrary production failures.
 
 ## Task families and the tool cap
 
@@ -223,16 +258,16 @@ is reported, not hidden.
 
 ## Results
 
-**None yet.** No trained checkpoint exists, no held-out bytes exist, and no gate
-has been evaluated — the held-out seeds cannot be derived until `L`, which the
-lock refuses while the checkpoint is missing. This section will carry only
-machine-checked numbers produced by the preregistered analyzer, with the paired
-base-model arm and the elicitation control on every row.
-
-When it is filled, it is filled under
-[docs/INTERPRETATION.md](docs/INTERPRETATION.md): the required wording before the
-held-out secondary results, the per-gate template, the machine statuses reported
-as the analyzer emits them, and the four phrases that may not appear.
+**No held-out result yet, and the results document says so on purpose.**
+[docs/RESULTS.md](docs/RESULTS.md) is the study ledger — this README is not. It
+already carries, verbatim and *before* any number exists, the study-status
+paragraph, the saturated-secondaries paragraph, the per-gate template, the
+underpowered-primary template and the descriptive-number prefix; every held-out
+slot in it is **UNFILLED**, and a slot is filled only from the analyzer's emitted
+output. It also holds the training-side observations in full, the
+failure-category skeleton with complete denominators, and the corrections that
+travel with the results. The analyzer semantics behind the templates are in
+[docs/INTERPRETATION.md](docs/INTERPRETATION.md).
 
 ## Hardware and stack
 
@@ -290,12 +325,18 @@ candidate, selected explicitly rather than by preferring whichever adapter
 happens to exist.
 
 The measured GPU-hour ceiling is **120 h**, an accounting envelope rather than a
-threshold: the mandatory 7,800-episode evaluation projects 75–99 h from directly
-measured evaluator rates, so the earlier 36 h would have silently forced
-mandatory-sample shrinkage. Mandatory samples may never shrink; if the
-post-calibration projection does not fit, optional arms are cut in the frozen
-order, and if the mandatory work still does not fit the run STOPS and reports
-INCOMPLETE / INCONCLUSIVE.
+threshold: the registered pre-calibration projection for the mandatory
+7,800-episode evaluation is 75–99 h from the older *serial* evaluator rates, so
+the earlier 36 h would have silently forced mandatory-sample shrinkage. The
+throughput this tree actually measured is far higher — 177.6 charged GPU-minutes
+per 3,600 tournament episodes, i.e. **~6.4 h projected for the 7,800**, with the
+one-arm and paired-arm caveats spelled out in
+[docs/AMENDED_REPLICATION_NOT_RUN.md](docs/AMENDED_REPLICATION_NOT_RUN.md) — a
+projection from a measured rate, never a measured cost, never a reason to lower
+the ceiling, and never enterable into the ledger. Mandatory samples may never
+shrink; if the post-calibration projection does not fit, optional arms are cut in
+the frozen order, and if the mandatory work still does not fit the run STOPS and
+reports INCOMPLETE / INCONCLUSIVE.
 
 The venv is hash-locked: `env/requirements.lock.txt` pins all 213 distributions
 with `==` and SHA-256 hashes on CPython 3.12.13 (`.python-version`), and
