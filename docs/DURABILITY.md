@@ -1,6 +1,6 @@
 # Surviving host or disk loss
 
-Council round 6 rated three things P0 that this document answers (Auditor,
+Council round 6 rated two things P0 that this document answers (Auditor,
 "Outright blockers" 6 and 7; Architect, section 1):
 
 > Expensive raw shards, accepted corpus, SFT views, adapters, and manifests
@@ -28,9 +28,13 @@ seeds and manifests, the probe verdicts, the GPU ledger and the receipts under
 | token census (original) | `out/agentic/token_census.json` | `out/` |
 | rejection-sampling shards | `data/multiface/raw/**` | `data/*` |
 | accepted corpus | `data/multiface/accepted.jsonl` | `data/*` |
-| SFT views | `out/multiface/views/**` | `out/` |
-| **the locked adapter** | `out/qwen35-4b-rssft-lora/**` | `out/` |
+| SFT views | `data/multiface/sft_views.jsonl` | `data/*` |
+| **the locked adapter** | `out/multiface/rssft-lora/**` | `out/` |
 | the run secret | `out/agentic/run_secret.hex` | `out/` |
+
+(Those are the chain's own `ACCEPTED`, `VIEWS` and `RSSFT` variables. A test
+asserts the group table matches them, because writing them down from memory is
+how this file got two of them wrong the first time.)
 
 Atomic writes plus sealed shard receipts already make a *process* crash
 survivable. They do nothing about the loss of this disk.
@@ -58,14 +62,14 @@ The tool is deliberately not on any stage's import path and imports no
 
 A digest of a file that is still being appended to is a lie, and an index entry
 built from one is worse than no entry: it points at bytes that have moved. So
-every candidate is digested at four points:
+every candidate is digested four times, at three checkpoints:
 
-1. twice before upload — a cheap prescan that stops an obviously live file from
+1. **twice before upload** — a prescan that stops an obviously live file from
    being transferred at all (`digest_moved_prescan`);
-2. again immediately after its upload (`digest_moved`);
-3. once more when the whole run ends (`digest_moved_during_run`).
+2. **again immediately after its own upload** (`digest_moved`);
+3. **once more when the whole run ends** (`digest_moved_during_run`).
 
-Point 3 exists because points 1 and 2 only cover a file's own upload window. The
+Checkpoint 3 exists because 1 and 2 only cover a file's own upload window. The
 GPU session journal heartbeats about every 30 s and sailed straight through that
 window on the first real run — `verify` showed its recorded digest was already
 stale nine seconds later. So the end-of-run recheck also holds the observation
