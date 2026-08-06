@@ -254,6 +254,34 @@ the cell composition, not only with model behaviour:
 | `fulfillment-h14` | 13/352 | 3.7% |
 | **pooled** | **1,302/1,752** | **74.3%** |
 
+**Worked example: how the pooled figure fell 14.6 points while no cell moved.** Sealing
+two more shards took the corpus from 13 to 15. Those two shards were *entirely*
+`fulfillment-h14`, the hardest cell, and every rollout in them was fault-assigned. The
+arithmetic is checkable from the two snapshots:
+
+| | fault-assigned | predicate met | rate |
+|---|---:|---:|---:|
+| pooled at 13 shards | 1,752 | 1,302 | **74.3%** |
+| the block those two shards added | +448 | +11 | **2.5%** |
+| pooled at 15 shards | 2,200 | 1,313 | **59.7%** |
+
+Per cell across the same two snapshots: H4 stayed at 95.8%, H8 at 89.3%, and H14 read
+3.7% (13/352) then 3.0% (24/800) — a small-rate wobble on a rate near zero, not a change
+in behaviour. **The model, the frozen prompt, the fault contract and the code were
+byte-identical throughout.** All 14.6 points came from the denominator: H14 grew from 20%
+of the fault-assigned pool (352/1,752) to 36% of it (800/2,200), and a block scoring 2.5%
+pulls any average it is added to.
+
+This is why a pooled recovery number is not reported anywhere in this repository as a
+property of the model. It is a property of whichever cells the sampler happened to have
+sealed when the number was taken. The per-cell rows above are the reportable form; the
+pooled row exists only so the mechanism can be audited.
+
+**The drop that IS real is by task depth, not over time.** Within one unchanged model,
+fault-assigned recovery runs 95.8% at four required calls, 89.3% at eight, and ~3% at
+fourteen. Reliability holds through eight dependent tool calls and then collapses. That
+cliff is the finding; the pooled movement above is an artefact of sampling order.
+
 And by declared fault class at the same snapshot (each fault-assigned rollout carries
 exactly one class, so these four rows partition the 1,752):
 

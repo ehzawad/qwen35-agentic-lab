@@ -88,6 +88,15 @@ counts. Real-world API errors, network partitions, arbitrary exceptions, and too
 not implement this remediation contract are **not** covered by that number, and the number
 must not be quoted as robustness against them.
 
+**A worked example, because this bit is counter-intuitive.** Sealing two more shards moved
+this pooled number from 74.3% to 59.7% — and *no cell got worse*. Those two shards were
+entirely the hardest cell (H14), all fault-assigned: they added 448 fault-assigned episodes
+of which 11 met the predicate, a 2.5% block. Pooled went 1,302/1,752 → 1,313/2,200. Per
+cell, H4 held at 95.8% and H8 at 89.3% across both snapshots. The model, the frozen prompt,
+the fault contract and the code were byte-identical. All 14.6 points came from H14 growing
+from 20% to 36% of the pool. **If you quote a single recovery number from this repository,
+you are quoting the sampler's draw order.** Use the per-depth rows.
+
 It is also a **mixture over the distillation cells that happened to be sealed**, not a
 property of the model alone: per-cell it was 575/600 at H4, 714/800 at H8 and 13/352 at
 H14, and adding two further H14 shards moved the pooled figure to **1,313/2,200 (59.7%)**
