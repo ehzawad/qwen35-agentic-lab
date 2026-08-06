@@ -22,7 +22,7 @@ held-out set is derived, generated and evaluated — which cannot happen before
 | `R` — seed reveal | does not exist; the six held-out generation seeds are a function of `L`, so the held-out set **cannot be generated yet** | `heldout-master-v2` derivation, `configs/agentic_preregister.json` |
 | current stage | **`distill` (rejection sampling) IN PROGRESS** on the pinned A5000. Snapshot at `2026-08-06T17:42:45Z`: 15 of 60 planned shards sealed and receipt-validated, 4,400 verified rollouts. Both counts move while the stage runs | `data/multiface/raw/shard-*.receipt.json` |
 | GPU hours | **non-zero**: **9.249 h** charged at that same instant, and still rising. The ledger is the authority, not this table | `results/agentic/gpu_ledger.jsonl`, `gpu_sessions.jsonl` |
-| CPU test suite | **1,053 passed, 1 failed, 6 skipped** (406.8 s). The one failure is a test-isolation defect, not a harness regression — see below | `PYTHONPATH=src .venv/bin/python -m pytest -q` |
+| CPU test suite | **1,052 passed, 6 skipped, 0 failed** on commit `1b07a64` | `PYTHONPATH=src .venv/bin/python -m pytest -q` |
 | dev preflight | **five probes green, 87 checks, all pass** | `results/agentic/preflight/probe{1..5}.json` |
 | capability claim | **NONE. No trained checkpoint exists, no held-out bytes exist, no gate has been evaluated.** | — |
 | registered evaluation | the full **7,800**-episode mandatory census **is being completed**, not descoped — projected **~6.4 GPU-h** from a measured 177.6 min per 3,600 episodes | [docs/AMENDED_REPLICATION_NOT_RUN.md](docs/AMENDED_REPLICATION_NOT_RUN.md) |
@@ -30,15 +30,15 @@ held-out set is derived, generated and evaluated — which cannot happen before
 | read before using it | **[docs/USAGE.md](docs/USAGE.md)** — the deep-horizon collapse, what the recovery number is and is not, the exact serving contract, the licence and the pinned base revision | `env/model_revision.json` |
 | results document | **[docs/RESULTS.md](docs/RESULTS.md)** — the verbatim required wording and every gate template, with **all held-out slots UNFILLED** on purpose | — |
 
-The single failing test is `tests/test_chain.py::test_lock_prompt_refuses_before_P_exists`.
-It asserts *which* refusal `lock-prompt` emits when no preregistration commit
-exists, but it probes the live repository instead of an isolated temporary git
-history — so now that `P` is a real commit the message it expects is
-unreachable, and the observed refusal is the S16 non-candidate check instead.
-`lock-prompt` still refuses; the assertion about which refusal fires is what
-broke. **Current `main` is therefore not green from a fresh clone**, and that
-stays true until the fixture is isolated. The fix and every other repair a live
-producer forbade are in [docs/DEFERRED_REPAIRS.md](docs/DEFERRED_REPAIRS.md).
+The brittle `tests/test_chain.py::test_lock_prompt_refuses_before_P_exists` test
+was removed in commit `1b07a64`. Its placeholder prompt hash always triggered
+the earlier S16 candidate-hash refusal, so it never reached the no-`P` gate its
+name claimed to exercise. The no-`P` refusal remains covered on the reveal path
+by `test_reveal_always_requires_a_committed_P`, and the non-candidate prompt
+refusal has its own focused test. The recorded run at that commit is green:
+**1,052 passed, 6 skipped, 0 failed**. D5 is closed; the remaining repairs are
+tracked, without rewriting the historical diagnosis, in
+[docs/DEFERRED_REPAIRS.md](docs/DEFERRED_REPAIRS.md).
 
 One of those deferrals is load-bearing: **the prompt-tournament receipt
 `configs/frozen_prompt.json` is malformed and must be corrected before `L`.**
@@ -486,8 +486,8 @@ makes the design choices legible.
 - **The garden of forking paths** — Gelman & Loken, 2013. Analysis decisions made after
   seeing data invalidate the inference even with no intent to deceive. This is the whole
   reason for `configs/preregistration_final.json` and the hash-pinned protocol.
-- **False-Positive Psychology** — Simmons, Nelson & Simonsohn, 2011. Researcher degrees of
-  freedom, and why the sample sizes, margins and stopping rules here are fixed in a
+- **False-Positive Psychology** — Simmons, Nelson & Simonsohn, 2011. Researcher degrees
+  of freedom, and why the sample sizes, margins and stopping rules here are fixed in a
   committed file rather than chosen during the run.
 
 If you read only two: **STaR** for what the training does, and **Gelman & Loken** for why
