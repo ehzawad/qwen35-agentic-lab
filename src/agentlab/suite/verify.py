@@ -196,6 +196,14 @@ def _qualifying_recovery(fault, fire, events) -> tuple[object | None, bool, bool
                  and bool(fault.params.get("ambiguous_mutation")))
 
     if req["corrected_target_required"]:
+        # `remediation_requirement("wrong_unit")` reports
+        # `later_decision_required: False` -- that field states whether the
+        # REGISTERED CONTRACT names a timing rule, and for the wrong-unit trap it
+        # does not. The later-decision filter below is nonetheless kept, because
+        # it is what the claim-bearing certifier has always enforced and it is the
+        # STRICTER reading: a corrected conversion issued inside the same decision
+        # as the trap was batched, not read off the trap. Dropping it would relax
+        # the predicate, which is not something a refactor may do.
         want_unit = fire.requested_unit
         attempted = [e for e in later
                      if e.tool == "unit_convert"

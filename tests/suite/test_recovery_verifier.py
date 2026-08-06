@@ -504,3 +504,24 @@ def test_aggregate_recovery_denominators():
     assert abs(agg["fault_arm_certified_success"] - 1 / 3) < 1e-9
     assert abs(agg["fault_trigger_rate"] - 2 / 3) < 1e-9
     assert abs(agg["recovery_success_over_triggered"] - 1 / 2) < 1e-9
+
+
+def test_a_same_decision_corrected_conversion_is_not_certified():
+    """The stricter reading the claim-bearing certifier has always enforced.
+
+    A corrected conversion issued inside the SAME decision as the trap was
+    batched, not read off the trap, so it does not certify recovery even though
+    the registered wrong-unit contract names no timing rule.
+    """
+    b = mk_bundle("typed_relay", 2, [("wrong_unit", False)])
+    rt = rt_for(b)
+    _idx, node, _token = drive_to_fault(rt, b)
+    # same decision, correct target unit, canonical result
+    same = obj(rt.dispatch(node.tool, dict(node.args)))
+    assert same["unit"] == str(node.args["to_unit"]).lower()
+    assert rt.events[-1].exposed_canonical
+    assert rt.events[-1].decision_id == rt.events[-2].decision_id
+    rt.begin_decision()
+    verdict = rt.verify(boxed(b))
+    assert verdict.recovery_reason == "blind_retry"
+    assert not verdict.certified_success
