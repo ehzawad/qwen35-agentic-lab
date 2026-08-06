@@ -123,6 +123,122 @@ def assistant_tool_message(text: str, calls: list[dict]) -> dict:
     return msg
 
 
+# ---------------------------------------------------------------------------
+# the OpenAI WIRE form of that same assistant turn
+# ---------------------------------------------------------------------------
+#
+# The canonical turn above is the TEMPLATE form: the Qwen3.5 chat template does
+# `tool_call.arguments|items`, so `arguments` must be a MAPPING for any local
+# render (rejection sampling, the token census, the parity test) to work at all.
+# The OpenAI-compatible request model in front of a served engine wants the
+# opposite: `id` is required and `function.arguments` must be a JSON *string*
+# (vLLM's `_postprocess_messages` parses it straight back into the mapping the
+# template needs, so the rendered prefix is identical either way -- that is why
+# the conversion is a transport detail and not a second transcript).
+#
+# The dev preflight found this the hard way: the evaluator posted the canonical
+# object verbatim and every episode's SECOND decision died on
+#
+#     ('body', 0, 'ChatCompletionMessageFunctionToolCallParam', 'id')
+#         -> Field required
+#     ('body', 0, 'ChatCompletionMessageFunctionToolCallParam',
+#      'function', 'arguments')                 -> Input should be a string
+#
+# with the server perfectly healthy. Six transport failures, zero scored rows.
+# The fix is HERE, next to the canonical builder, so the two shapes cannot drift
+# apart: one function owns "what the model conditions on" and one owns "what that
+# looks like on the wire".
+
+_TOOL_CALL_ID_DOMAIN = "served-tool-call-v1"
+
+
+def tool_call_id(ordinal: int, name: str, arguments) -> str:
+    """A DETERMINISTIC id for one served tool call.
+
+    Keyed by the call's ordinal within the episode (its `call_id` in the hidden
+    ledger's sense: calls are numbered in the order the transcript made them),
+    its tool name, and a digest of its arguments. Never a uuid4 and never a
+    clock: an id that varied per invocation would make two replays of the same
+    episode post different bytes, and the rendered-prefix parity assertion --
+    which is the assertion that caught the dropped tool-call object in the first
+    place -- can only hold over byte-identical requests.
+
+    Argument key ORDER is deliberately normalised out of the id (`sort_keys`)
+    while the posted `arguments` string preserves the order the model emitted:
+    the id identifies the call, the string reproduces the render.
+    """
+    import hashlib
+
+    payload = json.dumps(arguments, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False)
+    key = f"{_TOOL_CALL_ID_DOMAIN}|{int(ordinal)}|{name}|{payload}"
+    return "call-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+
+
+def wire_arguments(arguments) -> str:
+    """`function.arguments` as the API requires it: a JSON-encoded STRING.
+
+    Serialisation is fixed (compact separators, no key sorting, no ASCII
+    escaping) so it is a pure function of the canonical arguments mapping. Key
+    order is preserved because the server parses this string back into a mapping
+    and the template prints the pairs in iteration order -- sorting here would
+    silently re-order the arguments the served model sees relative to the offline
+    render. A value that is already a string is passed through untouched rather
+    than double-encoded.
+
+    NOTHING is coerced: an argument object JSON cannot represent raises here
+    rather than being stringified, because a stringified value would be posted as
+    different bytes from the ones the offline path renders -- a silent
+    model-visible drift of exactly the kind D2 closed. The caller turns the raise
+    into a fail-closed transport refusal, so it can never become a scored row.
+    """
+    if isinstance(arguments, str):
+        return arguments
+    return json.dumps(arguments if arguments is not None else {},
+                      separators=(",", ":"), ensure_ascii=False)
+
+
+def served_messages(messages: list[dict]) -> list[dict]:
+    """The canonical transcript, in the shape the OpenAI-compatible API accepts.
+
+    Pure and non-mutating: the recorded transcript stays canonical (that is what
+    the trace, the observation digests, the episode digest and train/eval parity
+    are all defined over), and only the bytes on the wire change. Assistant turns
+    carrying `tool_calls` get a deterministic `id` and a JSON-string `arguments`;
+    every other message is passed through unchanged.
+
+    Tool results are NOT given a `tool_call_id`. The request model accepts a tool
+    turn without one (verified against the real model), the chat template never
+    reads it, and adding a field the template ignores would be an unforced change
+    to what is posted for no gain. If a future engine requires it, the contract
+    test in tests/test_served_transport_shape.py fails loudly and this is the one
+    place that has to change.
+    """
+    out: list[dict] = []
+    ordinal = 0
+    for msg in messages:
+        calls = msg.get("tool_calls") if isinstance(msg, dict) else None
+        if msg.get("role") != "assistant" or not calls:
+            out.append(msg)
+            continue
+        wired = []
+        for call in calls:
+            fn = dict(call.get("function") or {})
+            name = fn.get("name", "")
+            args = fn.get("arguments", {})
+            fn["arguments"] = wire_arguments(args)
+            entry = dict(call)
+            entry["id"] = call.get("id") or tool_call_id(ordinal, name, args)
+            entry["type"] = call.get("type", "function")
+            entry["function"] = fn
+            wired.append(entry)
+            ordinal += 1
+        served = dict(msg)
+        served["tool_calls"] = wired
+        out.append(served)
+    return out
+
+
 def boxed_answer(text: str) -> str | None:
     """Return the last \\boxed{...} payload, normalised for numeric comparison."""
     hits = _BOXED_RE.findall(text)

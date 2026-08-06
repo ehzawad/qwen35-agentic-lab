@@ -42,6 +42,15 @@ no terminal at all (the bucket is now `no_committed_answer`): about 36% of the
 now-correct dev episodes commit in exactly that plain form, and the corpus
 silently dropped every one of them.
 
+THE ROW RANGE HAS TWO SIDES. `views.expected_rows` is [5,000, 6,000] and it is
+enforced, so an OVER-full corpus refuses exactly like a short one -- and the
+registered acceptance minima can reach it (>= 1,350 accepted trajectories at
+about 4-5 rows each). `plan_view_cap` is the registered answer: a deterministic,
+content-blind, seed-keyed per-stratum cap that keeps the first k trajectories of
+each stratum in `sha256("view-cap-v1|<stratum>|<task_id>")` order. It never reads
+a score, a reward, a length or any other outcome, and it is inert below the
+ceiling.
+
 COMPLETION IS A RECEIPT, NOT A PATH. The CLI validates the whole corpus BEFORE
 it writes anything -- the chain, the registered row range (views.expected_rows)
 naming the short stratum, and the terminal-weight floor -- then writes the three
@@ -116,6 +125,168 @@ def row_ids_digest(meta: list) -> str:
     from agentlab.suite.schema import digest_text
 
     return digest_text("|".join(str(m.get("row_id")) for m in meta))
+
+
+# --------------------------------------------------------------------------
+# THE VIEW CAP: the over-full half of the registered row range
+# --------------------------------------------------------------------------
+#
+# `views.expected_rows` is [5000, 6000] and it is enforced on BOTH sides, so an
+# OVER-full corpus is a hard stop exactly like an under-full one. That side is
+# reachable from the registered minima alone: `totals.min_accepted` admits >=
+# 1,350 accepted trajectories and the view grammar yields about 4-5 rows each
+# (terminal x2 + one or two pivots + recovery x2 when a fault fired), so
+# acceptance that overshoots its floors -- which nothing forbids, and which good
+# model behaviour makes likely -- lands above 6,000 and the corpus refuses.
+#
+# The cap is written BEFORE any corpus exists (zero accepted trajectories, zero
+# rows, zero study GPU-hours), so it is OUTCOME-BLIND by construction: there is
+# no result it could be tuned against.
+#
+# It is DETERMINISTIC, CONTENT-BLIND and SEED-KEYED. Trajectories are ordered
+# within their stratum by `sha256("view-cap-v1|<stratum>|<task_id>")` and the
+# first k are kept. The key reads the committed task identity and nothing else:
+# not the score, not the reward, not the length, not the fault class, not the
+# transcript, not the verdict. Keeping "the best" trajectories would make the
+# training corpus a function of the outcomes it is supposed to be blind to, and
+# keeping "the shortest" would silently re-weight the horizon mixture.
+
+VIEW_CAP_KEY_VERSION = "view-cap-v1"
+
+
+def view_cap_key(stratum: str, task_id: str) -> str:
+    """The seed-keyed sort key for one trajectory inside its stratum."""
+    from agentlab.suite.schema import digest_text
+
+    return digest_text(f"{VIEW_CAP_KEY_VERSION}|{stratum}|{task_id}")
+
+
+def plan_view_cap(trajectories: list, cfg: dict | None = None) -> dict:
+    """Which built trajectories survive the registered row ceiling.
+
+    `trajectories` is `[{"stratum", "task_id", "rows"}]` in build order, where
+    `rows` is how many training rows that trajectory's view plan produced. The
+    plan returned says nothing about which rows: whole trajectories are kept or
+    dropped, because splitting one (keeping its terminal view and dropping its
+    recovery view, say) would change the view mixture the terminal-weight floor
+    is defined over.
+
+    THE RULE, in order:
+
+    1. INERT below the ceiling. If the full build already fits `expected_rows`,
+       nothing is dropped -- including a build that is too SMALL, which is the
+       existing shortfall refusal and is never padded or rescued from here.
+    2. Every non-empty stratum keeps at least its first trajectory. A cell that
+       vanished would break stratum balance far worse than a few rows of
+       imbalance, and the fragile cells are exactly the measured-only H14/H20
+       ones a proportional share can round to nothing.
+    3. The remaining budget (ceiling minus those reserved rows) is split over the
+       strata in PROPORTION to their remaining rows, by largest remainder with
+       ties broken by ascending stratum name. Every stratum's share of the capped
+       corpus therefore equals its share of the full corpus to within one row --
+       that is what "stratum balance is preserved" means here.
+    4. Each stratum keeps the longest PREFIX of its cap-key order whose rows fit
+       its share. The prefix stops at the first trajectory that does not fit; the
+       scan does NOT continue looking for a smaller one, because that would rank
+       trajectories by length.
+    5. The result is measured against the UNCHANGED registered range. The cap
+       never widens the range, never lowers the floor and never rescues a corpus
+       that cannot reach 5,000 rows.
+    """
+    cfg = cfg or load_config()
+    lo, hi = (int(x) for x in cfg["views"]["expected_rows"])
+    entries = [{"index": i, "stratum": str(t["stratum"]),
+                "task_id": str(t["task_id"]), "rows": int(t["rows"])}
+               for i, t in enumerate(trajectories)]
+    full_rows = sum(e["rows"] for e in entries)
+
+    by: dict[str, list] = {}
+    for e in entries:
+        by.setdefault(e["stratum"], []).append(e)
+    for name, items in by.items():
+        items.sort(key=lambda e: (view_cap_key(name, e["task_id"]), e["task_id"],
+                                  e["index"]))
+    names = sorted(by)
+
+    def summary(kept: list, capped: list) -> dict:
+        from agentlab.suite.schema import digest_text
+
+        kept_by = {}
+        for e in kept:
+            cell = kept_by.setdefault(e["stratum"], {"rows": 0, "trajectories": 0})
+            cell["rows"] += e["rows"]
+            cell["trajectories"] += 1
+        per = {}
+        for name in names:
+            cell = kept_by.get(name, {"rows": 0, "trajectories": 0})
+            per[name] = {
+                "full_rows": sum(e["rows"] for e in by[name]),
+                "full_trajectories": len(by[name]),
+                "rows": cell["rows"], "trajectories": cell["trajectories"],
+                "trajectories_capped": len(by[name]) - cell["trajectories"]}
+        return {
+            "key_version": VIEW_CAP_KEY_VERSION,
+            "expected_rows": [lo, hi],
+            "outcome_blind": True,
+            "ranked_by": "sha256(view-cap-v1|stratum|task_id) -- never score, "
+                         "reward, length or any outcome",
+            "full_rows": full_rows, "full_trajectories": len(entries),
+            "target_rows": hi,
+            "applied": full_rows > hi,
+            "rows": sum(e["rows"] for e in kept),
+            "trajectories": len(kept),
+            "trajectories_capped": len(capped),
+            "kept_indexes": sorted(e["index"] for e in kept),
+            "kept_task_ids_sha256": digest_text(
+                "|".join(f"{e['stratum']}|{e['task_id']}"
+                         for e in sorted(kept, key=lambda e: (e["stratum"],
+                                                              view_cap_key(e["stratum"],
+                                                                           e["task_id"]))))),
+            "per_stratum": per}
+
+    if full_rows <= hi:
+        return summary(entries, [])
+
+    reserved = {name: by[name][0] for name in names}
+    reserved_rows = sum(e["rows"] for e in reserved.values())
+    if reserved_rows > hi:
+        raise SystemExit(
+            f"REFUSED: one trajectory per stratum is already {reserved_rows} rows, "
+            f"above the registered ceiling {hi}. This is not a cap decision: the "
+            f"view plan itself is too large for the registered range, and the range "
+            f"is preregistered. Do not widen it.")
+    rest_rows = {name: sum(e["rows"] for e in by[name][1:]) for name in names}
+    budget = hi - reserved_rows
+    total_rest = sum(rest_rows.values())
+    share = {name: 0 for name in names}
+    if total_rest > 0 and budget > 0:
+        exact = {name: budget * rest_rows[name] / total_rest for name in names}
+        share = {name: int(exact[name]) for name in names}
+        leftover = budget - sum(share.values())
+        for name in sorted(names, key=lambda n: (-(exact[n] - share[n]), n))[:leftover]:
+            share[name] += 1
+
+    kept, capped = [], []
+    for name in names:
+        kept.append(reserved[name])
+        used, stop = 0, False
+        for e in by[name][1:]:
+            if stop or used + e["rows"] > share[name]:
+                stop = True
+                capped.append(e)
+                continue
+            used += e["rows"]
+            kept.append(e)
+    plan = summary(kept, capped)
+    if not lo <= plan["rows"] <= hi:
+        raise SystemExit(
+            f"REFUSED: the seed-keyed view cap landed on {plan['rows']} rows, "
+            f"outside the registered range {lo}-{hi} (full build {full_rows} rows "
+            f"in {len(names)} strata). Whole trajectories are indivisible, so this "
+            f"means the per-trajectory row counts cannot tile the range -- a "
+            f"generator or acceptance problem to fix upstream. The registered range "
+            f"does not move.")
+    return plan
 
 
 def require_view_chain(meta_row: dict, what: str = "an SFT view") -> dict:
@@ -327,6 +498,12 @@ def require_expected_rows(report: dict, cfg: dict | None = None) -> dict:
         lines.append("  No stratum lost a trajectory, so the accepted corpus "
                      "itself is too small: the quotas it passed cannot fill the "
                      "registered row range.")
+    if rows > hi:
+        lines.append(f"  Rows ABOVE the ceiling means the registered seed-keyed cap "
+                     f"({VIEW_CAP_KEY_VERSION}) did not run: `build_views` applies it "
+                     f"before it emits a row, so a corpus over {hi} was built by some "
+                     f"other path. Rebuild it with `python -m agentlab.suite.datasets`. "
+                     f"Do not raise the ceiling and do not hand-trim the rows.")
     lines.append("  The range and the floor are preregistered. Roll out and accept "
                  "more trajectories in the named strata (`python -m "
                  "agentlab.multidistill run` then `finalize`); do not widen the "
@@ -545,6 +722,12 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
     every trajectory dropped with its reason, per family/horizon cell). It is
     what `require_expected_rows` reads to name which stratum is short instead of
     reporting only that the corpus total is small.
+
+    OVER-FULL is also a refusal, so the registered seed-keyed cap
+    (`plan_view_cap`) runs over the built trajectories before any row is emitted.
+    It is inert below the ceiling, which is every in-process build and every test
+    corpus here. Rows are counted first and capped second because the cap is
+    defined on rows: the view plan does not produce a fixed number per trajectory.
     """
     from agentlab.multidistill import (provenance_gaps, require_one_producer,
                                        row_digest)
@@ -552,7 +735,7 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
     cfg = cfg or load_config()
     max_tokens = cfg["acceptance"]["max_view_tokens"]
     schema_cache: dict[str, list] = {}
-    rows, meta = [], []
+    rows, meta, built = [], [], []
     counts = {"terminal": 0, "pivot": 0, "recovery": 0}
     rejected = {"over_token_budget": 0, "no_committed_answer": 0,
                 "trajectory_over_budget": 0, "stale_environment_contract": 0,
@@ -560,8 +743,13 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
     strata: dict[str, dict] = {}
 
     def stratum(name: str) -> dict:
+        # `trajectories_capped` is deliberately NOT `trajectories_dropped`: a
+        # capped trajectory was eligible and complete, and counting it as a drop
+        # would feed `stratum_shortfall`'s lost-row estimate with rows that were
+        # removed on purpose.
         return strata.setdefault(name, {"rows": 0, "trajectories": 0,
                                         "trajectories_dropped": 0,
+                                        "trajectories_capped": 0,
                                         "dropped_reasons": {},
                                         "view_counts": {"terminal": 0, "pivot": 0,
                                                         "recovery": 0}})
@@ -639,17 +827,35 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
         if not candidate_rows:
             drop(cell, "trajectory_over_budget")
             continue
+        built.append({"stratum": cell, "task_id": rec["task_id"], "family": family,
+                      "horizon": rec["horizon"],
+                      "fault_types": list(rec.get("fault_types") or []),
+                      "source_sha": source_sha, "provenance": rec_prov,
+                      "rows": candidate_rows})
+
+    # THE REGISTERED CEILING. Every trajectory above is eligible and complete;
+    # the cap decides how many of them the registered range admits, using only
+    # stratum and task id. Nothing below this line reads a score or a verdict.
+    cap = plan_view_cap([{"stratum": b["stratum"], "task_id": b["task_id"],
+                          "rows": len(b["rows"])} for b in built], cfg)
+    keep = set(cap["kept_indexes"])
+    for index, b in enumerate(built):
+        cell = b["stratum"]
+        if index not in keep:
+            stratum(cell)["trajectories_capped"] += 1
+            continue
+        family = b["family"]
         stratum(cell)["trajectories"] += 1
-        for view, row, n_tok, msg_index, copy_index in candidate_rows:
+        for view, row, n_tok, msg_index, copy_index in b["rows"]:
             rows.append(row)
             counts[view] += 1
             stratum(cell)["rows"] += 1
             stratum(cell)["view_counts"][view] += 1
-            meta.append({"row_id": view_row_id(rec["task_id"], view, msg_index,
+            meta.append({"row_id": view_row_id(b["task_id"], view, msg_index,
                                                copy_index),
-                         "task_id": rec["task_id"], "family": family,
-                         "horizon": rec["horizon"],
-                         "fault_types": list(rec.get("fault_types") or []),
+                         "task_id": b["task_id"], "family": family,
+                         "horizon": b["horizon"],
+                         "fault_types": list(b["fault_types"]),
                          "view": view, "msg_index": msg_index,
                          "copy_index": copy_index, "tokens": n_tok,
                          # Which model-visible environment these prompt bytes
@@ -664,12 +870,12 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
                          # checkpoint lock read these three fields, so the
                          # locked checkpoint can name the card, engine and
                          # session behind every row it was trained on.
-                         "source_row_sha256": source_sha,
-                         "source_provenance": rec_prov,
+                         "source_row_sha256": b["source_sha"],
+                         "source_provenance": b["provenance"],
                          "runtime_manifest_sha256":
-                             rec_prov.get("runtime_manifest_sha256"),
-                         "session_id": rec_prov.get("session_id"),
-                         "gpu_execution": bool(rec_prov.get("gpu_execution"))})
+                             b["provenance"].get("runtime_manifest_sha256"),
+                         "session_id": b["provenance"].get("session_id"),
+                         "gpu_execution": bool(b["provenance"].get("gpu_execution"))})
 
     total = len(rows)
     terminal_weight = counts["terminal"] / total if total else 0.0
@@ -687,6 +893,11 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
         "terminal_weight_ok": terminal_weight >= cfg["views"]["terminal_weight_min"],
         "expected_rows": cfg["views"]["expected_rows"],
         "rows_in_expected_range": lo <= total <= hi,
+        # The over-full side of that range, and its receipt: what the full build
+        # was, what the seed-keyed cap kept per stratum, and the digest of the
+        # kept identities so the decision replays. `applied: false` is the normal
+        # case and says the cap did nothing.
+        "view_cap": {k: v for k, v in cap.items() if k != "kept_indexes"},
         # The receipt half of the report: what a reader must be able to check
         # against the rows and metadata it actually loaded (count and identity),
         # so a truncated corpus cannot pass as this build.
@@ -787,6 +998,24 @@ def main() -> None:
     print(f"[views] {report['rows']} rows built from {report['source_trajectories']} "
           f"accepted trajectories")
     print(f"[views] counts {report['view_counts']}  rejected {report['rejected']}")
+    capinfo = report["view_cap"]
+    if capinfo["applied"]:
+        print(f"[views] view cap {capinfo['key_version']} APPLIED: the full build was "
+              f"{capinfo['full_rows']} rows from {capinfo['full_trajectories']} "
+              f"trajectories, above the registered ceiling "
+              f"{capinfo['expected_rows'][1]}; {capinfo['trajectories_capped']} "
+              f"trajectories were capped out by seed-keyed order (never by score, "
+              f"reward or length), leaving {capinfo['rows']} rows")
+        for name in sorted(capinfo["per_stratum"]):
+            cell = capinfo["per_stratum"][name]
+            if cell["trajectories_capped"]:
+                print(f"[views]   {name}: kept {cell['trajectories']}/"
+                      f"{cell['full_trajectories']} trajectories, "
+                      f"{cell['rows']}/{cell['full_rows']} rows")
+    else:
+        print(f"[views] view cap {capinfo['key_version']} inert: "
+              f"{capinfo['full_rows']} rows is within the registered ceiling "
+              f"{capinfo['expected_rows'][1]}")
     print(f"[views] provenance: {len(report['source_sessions'])} producer "
           f"session(s), gpu_execution={report['gpu_execution']}")
     print(f"[views] terminal weight {report['terminal_weight']:.3f} "

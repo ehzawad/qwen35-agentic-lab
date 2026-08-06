@@ -193,16 +193,43 @@ def make_http_chat(server: str, model: str, decode: dict, timeout_s: float = 300
     committed an answer" -- a failure mode this repo has already been burned by.
     The server is started with the same default; the request states it as well,
     because a per-request field cannot be forgotten by a restarted server.
+
+    THE POSTED MESSAGES ARE THE WIRE FORM, not the canonical transcript. Since the
+    evaluator started preserving the assistant tool-call object (dropping it was
+    the D2 transcript drift), it was posting a shape the OpenAI-compatible request
+    model rejects: `tool_calls[].id` is required and `function.arguments` must be a
+    JSON string, while the canonical object has no id and a MAPPING for arguments
+    (the chat template does `arguments|items`, so the mapping is what a local
+    render needs). Every episode died with HTTP 400 on its second decision against
+    a healthy server. `chat.served_messages` performs exactly that conversion --
+    deterministic id, JSON-encoded arguments, nothing else -- so the transcript we
+    record, digest and compare against training stays canonical and only the bytes
+    on the wire change. vLLM parses `arguments` back into the same mapping before
+    rendering, so the served prefix tokenizes identically to the offline one.
     """
     import requests
 
+    from agentlab.chat import served_messages
     from agentlab.suite import configio
 
     url = server.rstrip("/") + "/v1/chat/completions"
 
     def chat_fn(messages: list[dict], tools: list[dict]) -> dict:
         configio.reject_multimodal(messages)
-        payload = {"model": model, "messages": messages, "tools": tools,
+        try:
+            wire = served_messages(messages)
+        except (TypeError, ValueError) as exc:
+            # A transcript this harness cannot even encode is a HARNESS fault, and
+            # it goes out through the fail-closed channel for the same reason a
+            # dead engine does: the alternative is `parser_budget`, which would
+            # score a harness bug as a model failure and put it in a denominator.
+            raise TransportFailure(
+                f"the assistant tool-call arguments cannot be serialised for the "
+                f"OpenAI wire format ({type(exc).__name__}: {exc}). Nothing was "
+                f"posted and no row is written.",
+                kind="unservable_request") from exc
+        payload = {"model": model, "messages": wire,
+                   "tools": tools,
                    "temperature": decode["temperature"], "top_p": decode["top_p"],
                    "seed": decode["seed"], "max_tokens": decode["max_tokens"],
                    "chat_template_kwargs": {

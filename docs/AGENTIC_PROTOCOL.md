@@ -985,3 +985,135 @@ why `eval_bsz` stays 1 with `prediction_loss_only`.
 `tests/test_size_ceilings.py` binds every cap to the committed census — including
 its environment-contract digest, so a census taken under a different environment
 is rejected — and fails if a cap ever drops below what was measured.
+
+## 12. AMENDMENT 2026-08-06 — the served request shape, and the over-full view corpus
+
+> **State of the study at this amendment: zero registered study GPU-hours, zero
+> optimizer steps, zero accepted trajectories, zero SFT views, zero held-out
+> results, no frozen prompt winner, no trained checkpoint, and the
+> preregistration finalization marker is absent.** The preregistration is still
+> an unfinalized **DRAFT**, so both items below are **specification repair**,
+> stated as such. **No threshold, margin, sample size, estimand, cluster rule or
+> launch floor moved**, and the second item is registered **before any corpus
+> exists**, so it is outcome-blind by construction.
+
+### 12.1 The served request shape (instrument repair, not a treatment change)
+
+Probe 3 of the dev preflight stopped the chain: all six clean episodes died on
+their **second** decision with HTTP 400 while the vLLM server stayed live, and
+the shard aborted as infrastructure with **zero scored rows**. The transport
+guard behaved exactly as registered — no episode entered a denominator, the card
+returned to its 9 MiB baseline, and resume would re-run precisely those task ids.
+
+The defect was the harness, and it was a direct consequence of the D2
+unification. Evaluation now **preserves** the assistant tool-call object
+(dropping it was the transcript drift §11 closed), and that object is the
+**template** form:
+
+```json
+{"type": "function", "function": {"name": "kb_lookup", "arguments": {"key": "…"}}}
+```
+
+The OpenAI-compatible request model requires `tool_calls[].id` and a JSON
+**string** for `function.arguments`:
+
+| loc | error |
+|---|---|
+| `('body', 0, 'ChatCompletionMessageFunctionToolCallParam', 'id')` | Field required |
+| `('body', 0, …, 'function', 'arguments')` | Input should be a string |
+
+**The canonical shape does not change.** The Qwen3.5 chat template evaluates
+`tool_call.arguments|items`, which raises on a string, while vLLM's
+`_postprocess_messages` parses the string back into that same mapping *before*
+applying the template. So the repair is a **serialisation step at the HTTP
+boundary only** (`chat.served_messages`, called by `evaluate.make_http_chat`):
+
+* the recorded transcript, the observation digests, the episode digest, the
+  event ledger and every train/eval parity surface stay **canonical**;
+* `id` is **deterministic** — `sha256("served-tool-call-v1|<call ordinal>|<tool
+  name>|<canonical arguments>")`, never a uuid and never a clock — so a replay of
+  an episode posts **byte-identical** requests and an earlier decision's calls
+  keep the ids they were already given;
+* `arguments` is serialised with fixed separators and **without key sorting**,
+  because the server parses it back and the template prints the pairs in
+  iteration order: sorting would re-order the arguments the served model sees
+  relative to the offline render;
+* nothing is coerced. An argument object JSON cannot represent raises, and the
+  backend turns that into the same fail-closed refusal a dead engine gets
+  (`kind: unservable_request`) rather than a scored `parser_budget` row.
+
+**No model-visible surface moved, and that is asserted, not argued.**
+`tests/test_served_transport_shape.py` runs the served payload through vLLM's own
+`_postprocess_messages` and requires the rendered **token ids** to equal the
+canonical render, over all three families plus a faulted (recovery-token-bearing)
+transcript; it pins the two validation errors against the real request model so
+the defect cannot silently return; it asserts the wire form is **not** locally
+renderable (the template raises), which is why the canonical form must stay; and
+it drives a full multi-decision episode through the HTTP backend with a transport
+that validates **every** payload — the case every previous transport test missed,
+because they all posted a single user turn and never echoed a tool call.
+
+The eight-surface training/evaluation parity assertion is unaffected: it is
+defined over the canonical transcript, which this repair does not touch.
+
+### 12.2 The SFT view cap: the over-full side of `views.expected_rows`
+
+`views.expected_rows` is **[5,000, 6,000]** and it is enforced on **both** sides,
+so an **over-full** corpus is a hard stop exactly like a short one. That side is
+reachable from the registered minima alone: `totals.min_accepted` admits **≥
+1,350** accepted trajectories and the view grammar yields about **4–5 rows each**
+(terminal ×2, one or two pivots, recovery ×2 when a fault fired), so acceptance
+that overshoots its floors — which nothing forbids, and which good model
+behaviour makes likely — exceeds 6,000 rows and the corpus refuses. Measured on
+the registered floor itself: 1,350 trajectories at 4–5 rows is **6,075 rows**.
+
+**Registered rule — a deterministic, content-blind, seed-keyed per-stratum cap**
+(`suite.datasets.plan_view_cap`, key version `view-cap-v1`):
+
+1. **Inert below the ceiling.** If the full build already fits, nothing is
+   dropped. The cap never pads, never rescues a short corpus, and has no effect
+   on the under-full refusal or on which stratum that refusal names.
+2. **Order** each stratum's trajectories by
+   `sha256("view-cap-v1|<stratum>|<task_id>")` (ties by task id) and **keep the
+   first k**.
+3. **k has a floor of one** for every non-empty stratum. A vanished cell breaks
+   stratum balance far worse than a row of imbalance, and the fragile cells are
+   exactly the measured-only `fulfillment-h14` / `fulfillment-h20` ones that a
+   pure proportional share can round to nothing.
+4. **k is otherwise proportional.** The budget left after those reserved rows is
+   split across strata in proportion to their remaining rows, by largest
+   remainder with ties broken by ascending stratum name; each stratum then keeps
+   the longest **prefix** of its seed-keyed order that fits its share. The prefix
+   stops at the first trajectory that does not fit — the scan does **not** keep
+   looking for a smaller one, because that would be selection by length.
+5. **Whole trajectories only.** Splitting one (keeping its terminal view,
+   dropping its recovery view) would change the view mixture the
+   `terminal_weight_min` floor is defined over.
+
+**It may never rank trajectories by score, reward, length, verdict, fault class
+or any other outcome.** The key reads the committed task identity and the stratum
+name, and nothing else. A corpus trimmed by outcome would make the training set a
+function of the results the study is blind to.
+
+**The gate is unchanged.** The cap is a mechanism that runs *before* a row is
+emitted; `require_expected_rows` still enforces the identical registered range
+afterwards, and a report above the ceiling still refuses — with a message saying
+the cap did not run, not offering to raise the ceiling.
+
+**Receipt.** Every view report carries a `view_cap` block: key version, the full
+build's rows and trajectories, the ceiling, whether it applied, the kept rows and
+trajectories, the per-stratum kept/capped census, and the digest of the kept
+identities in cap order, so the decision replays. Capped trajectories are counted
+as `trajectories_capped`, deliberately **not** as `trajectories_dropped`, so the
+shortfall estimator never attributes intentional removals to a cell as loss.
+
+**Measured on synthetic over-full builds** (`tests/test_view_cap.py`, 2,000
+trajectories across all twelve cells): **6,800 rows → 5,986 rows**, 234
+trajectories capped, every stratum's share of the corpus preserved to within
+**2.5 × 10⁻⁴**, terminal weight 0.59 (floor 0.5), and the same kept-identity
+digest under a shuffled input order. On the registered-minimum case: **6,075 →
+5,967**, 24 trajectories capped.
+
+**Written before any corpus exists.** Zero accepted trajectories and zero view
+rows exist at this commit, so there is no realized row count, no stratum census
+and no acceptance outcome this rule could have been fitted to.
