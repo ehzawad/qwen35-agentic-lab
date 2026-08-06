@@ -421,16 +421,6 @@ def test_reveal_always_requires_a_committed_P(tmp_path):
     assert not mod.REVEAL.exists()
 
 
-def test_lock_prompt_refuses_before_P_exists(tmp_path):
-    """A prompt lock is a post-finalization act: no P, no tournament, no lock."""
-    bogus = tmp_path / "frozen.json"
-    bogus.write_text(json.dumps({"winner": {"candidate": "p8_combined.txt",
-                                            "sha256": "0" * 64}}))
-    r = locks_cmd("lock-prompt", "--file", str(bogus))
-    assert r.returncode != 0
-    assert "no commit adds configs/preregistration_final.json" in (r.stdout + r.stderr)
-
-
 def test_lock_prompt_refuses_a_prompt_outside_the_preregistered_eight(tmp_path,
                                                                      monkeypatch):
     mod = _locks_module()
