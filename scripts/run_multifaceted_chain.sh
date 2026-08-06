@@ -8,17 +8,34 @@
 # them and a driver is exactly where they get quietly broken:
 #
 #   RESUMABLE      Every stage is idempotent and decides for itself whether it
-#                  is already done, from artifacts on disk. Re-running the whole
-#                  chain after a kill re-does no completed work.
-#   ONE ENGINE PER STAGE
-#                  Engine startup measured 289.7 s on the registered A5000, so a
-#                  per-shard engine is a budget line, not an implementation
-#                  detail: 50 rejection-sampling shards cost 4.02 GPU-hours of
-#                  pure model loading and 10 tournament processes another 0.80 h.
-#                  Each stage now builds ONE long-lived engine (or server) and
-#                  feeds it every pending work unit; the units still checkpoint
-#                  and resume, they just no longer pay for an engine. 85 cold
-#                  starts become 6: 6.840 h -> 0.483 h, saving 6.357 GPU-hours.
+#                  is already done, from a validated RECEIPT on disk -- not from
+#                  the mere existence of a path. An empty file, a truncated
+#                  JSONL tail and a quota-missing corpus all satisfy `-e`, and
+#                  each of them used to read as "this stage is finished".
+#                  Re-running the whole chain after a kill re-does no completed
+#                  work and never accepts unfinished work as complete.
+#   ONE ENGINE PER PROCESS BUDGET
+#                  Engine startup measured 289.7 s (4.83 min) on the registered
+#                  A5000, so a per-shard engine is a budget line rather than an
+#                  implementation detail. Each stage's work units are served
+#                  from ONE engine per PROCESS INVOCATION -- not one engine for
+#                  the whole stage: the engine lives inside the process, and the
+#                  process ends when its budget expires. The units checkpoint
+#                  and resume, so the only cost of a boundary is one cold start.
+#                  Raising the invocation budgets is what makes that cost small:
+#                  4.83 min of loading per 55 min of served work is an 8.8%
+#                  tax, per 120 min 4.0%, per 240 min 2.0%, per 360 min 1.3%.
+#                  The registered budgets are therefore 120 min (prompt
+#                  tournament), 240 min (rejection sampling) and a 360-min
+#                  server session for the paired evaluation, with 360-second
+#                  client launch windows inside it.
+#   A BUDGET STOPS LAUNCHING, IT NEVER KILLS
+#                  Every time budget in this chain closes the gate on NEW work
+#                  and lets running work finish: an in-flight episode is drained
+#                  and written, an optimizer step completes, a shard is never
+#                  interrupted mid-write. A budget that killed active work would
+#                  throw away GPU seconds the ledger has already charged, and a
+#                  server session is rotated only BETWEEN units.
 #   NO GPU ON A LOOK
 #                  --help, --dry-run and --list touch nothing: no CUDA import, no
 #                  server, no nvidia-smi allocation. --dry-run prints the exact
@@ -42,13 +59,23 @@
 #                  sources of truth -- if they disagree with the producer, the
 #                  stage aborts as a hardware-integrity failure rather than
 #                  preferring one of them.
-#   LEDGER CEILING The GPU ledger is read before any GPU stage and the projected
-#                  cost is refused against the hard ceiling. Every row is a
-#                  receipt: timestamps, GPU identity, driver, engine fingerprint,
-#                  git SHA and work counts. A served stage is charged ONCE for the
-#                  whole server-resident interval INCLUDING startup and idle gaps
-#                  -- the startup used to happen before the timer began -- and no
+#   LEDGER CEILING The GPU ledger is read before any GPU stage and the COMPLETE
+#                  REMAINING STAGE -- not this invocation's nominal budget -- is
+#                  refused against the hard ceiling. Every row is a receipt:
+#                  timestamps, GPU identity, driver, engine fingerprint, git SHA
+#                  and work counts. A served stage is charged ONCE for the whole
+#                  server-resident interval INCLUDING startup and idle gaps --
+#                  the startup used to happen before the timer began -- and no
 #                  per-arm row overlaps that charge.
+#   INTERRUPTED TIME IS STILL CHARGED
+#                  Every GPU stage opens a SESSION JOURNAL, heartbeats while it
+#                  holds the card, and closes it. A close charges only the
+#                  uncharged remainder, so a stage whose own receipts covered its
+#                  whole interval adds nothing and a stage killed mid-shard,
+#                  mid-tournament-unit or mid-epoch charges exactly the part its
+#                  receipts never got to write. A session whose process is gone
+#                  is reconciled by the next stage's ledger guard, so SIGKILL and
+#                  power loss are covered, not only clean shutdowns.
 #   BLIND UNTIL LOCKED
 #                  The held-out eval split is not touched until locks.json
 #                  carries BOTH the prompt winner and the trained checkpoint and
@@ -59,6 +86,13 @@
 #   scripts/run_multifaceted_chain.sh [--dry-run] [--list] [--from STAGE]
 #                                     [--only STAGE[,STAGE...]] [--to STAGE]
 #                                     [--force STAGE[,STAGE...]] [--yes]
+#   scripts/run_multifaceted_chain.sh --check-gpu       # can a GPU stage start?
+#   scripts/run_multifaceted_chain.sh --print-census    # the registered episode
+#                                                      # arithmetic (CPU only)
+#   scripts/run_multifaceted_chain.sh --print-units     # the interleaved block
+#                                                      # schedule, in order
+#   scripts/run_multifaceted_chain.sh --verify-census   # what was WRITTEN, per
+#                                                      # registered manifest
 #
 # Environment:
 #   CUDA_VISIBLE_DEVICES  which card (PCI order). Required for GPU stages; the
@@ -71,6 +105,13 @@
 #   MODEL                 base model id (default Qwen/Qwen3.5-4B).
 #   PORT                  vLLM serve port (default 8000).
 #   AGENTIC_RUN_ID        S19 run_id stamped on every trace and ledger row.
+#   EVAL_BLOCK_TASKS      tasks per immutable evaluation BLOCK (default 100).
+#                         Scheduling only: the paired arms run the same block
+#                         back to back and no estimand depends on the size.
+#   SERVER_SESSION_CAP_MIN
+#                         minutes one vLLM server session may hold the card
+#                         before a controlled checkpointed restart between units
+#                         (default 360).
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -103,6 +144,20 @@ FROZEN_PROMPT="configs/frozen_prompt.json"
 NEUTRAL_PROMPT="prompts/agentic/p1_minimal.txt"
 VERDICT_TXT="results/agentic/verdict.txt"
 VERDICT_JSON="results/agentic/verdict.json"
+
+# Receipts published by the modules that OWN each corpus. The driver reads them;
+# it never re-derives what "complete" means for someone else's artifact.
+# (agentlab.multidistill.accepted_receipt_path / suite.datasets.write_view_corpus)
+ACCEPTED="data/multiface/accepted.jsonl"
+ACCEPTED_RECEIPT="data/multiface/accepted.receipt.json"
+VIEWS="data/multiface/sft_views.jsonl"
+VIEWS_REPORT="data/multiface/sft_views.report.json"
+
+# Immutable evaluation blocks, and the server-session cap. Both are SCHEDULING
+# knobs: they change the order and the process boundaries of the registered work,
+# never which episodes run. No estimand, sample size, margin or floor reads them.
+EVAL_BLOCK_TASKS="${EVAL_BLOCK_TASKS:-100}"
+SERVER_SESSION_CAP_MIN="${SERVER_SESSION_CAP_MIN:-360}"
 
 STAGES=(suite prompt baselock distill views sft probe grpo lock eval verdict ship)
 
@@ -148,25 +203,72 @@ contains() { [[ ",$1," == *",$2,"* ]]; }
 # fatal: the point of a dry run is to show the whole plan, and a chain started
 # from scratch legitimately has none of the later stages' inputs yet.
 need() {  # path, explanation
-  [[ -e "$1" ]] && return 0
+  # `-s`, not `-e`: an EMPTY artifact is not a prerequisite. A zero-byte
+  # accepted.jsonl or a truncated views file satisfies "exists" and then fails
+  # deep inside the next stage, or worse, succeeds vacuously.
+  [[ -s "$1" ]] && return 0
   if (( DRY_RUN )); then
     info "[dry-run] prerequisite not present yet: $1"
     info "          ($2)"
     return 1
   fi
+  [[ -e "$1" ]] && die "$2 (present but EMPTY: $1 -- an empty artifact is not a \
+result; delete it and re-run the stage that produces it)"
   die "$2 (missing: $1)"
 }
 
 forced()  { [[ -n "$FORCE" ]] && contains "$FORCE" "$1"; }
 
-# A stage is skipped when its completion marker exists and it was not forced.
+# A stage is skipped only when every artifact it names is NON-EMPTY and its
+# receipt validates. `-e` was the old test, and file existence is exactly the
+# "stage complete" signal that lets a partial, zero-row or quota-missing artifact
+# be inherited for ever: the next invocation skips the stage, the stage after it
+# consumes the partial corpus, and nothing ever says so.
 done_already() {
   local stage="$1"; shift
   forced "$stage" && return 1
   for artifact in "$@"; do
-    [[ -e "$artifact" ]] || return 1
+    [[ -s "$artifact" ]] || return 1
   done
+  stage_receipt "$stage" || return 1
   return 0
+}
+
+# The per-stage completion RECEIPT check. Each case either consumes the receipt
+# the owning module publishes or re-verifies a self-describing artifact; a stage
+# with nothing further to check says so explicitly rather than by omission.
+stage_receipt() {  # stage -> 0 complete, 1 not complete
+  (( DRY_RUN )) && return 0
+  case "$1" in
+    suite)     return 0 ;;   # validate_suite.py runs unconditionally below
+    prompt)    return 0 ;;   # lock-prompt re-hashes the winner in the next stage
+    baselock)  return 0 ;;   # CPU-only prompt lock; the lock file IS the receipt
+    distill)
+      # multidistill owns the accepted-corpus receipt (quotas, counts, digest).
+      [[ -s "$ACCEPTED_RECEIPT" ]] || {
+        info "no accepted-corpus receipt at $ACCEPTED_RECEIPT: the corpus is not"
+        info "complete regardless of $ACCEPTED existing"
+        return 1; }
+      return 0 ;;
+    views)
+      # suite.datasets writes the rows LAST, after the report, so a corpus with
+      # rows but no report is a build that died mid-publish.
+      [[ -s "$VIEWS_REPORT" ]] || { info "no view-corpus report at $VIEWS_REPORT"
+                                    return 1; }
+      return 0 ;;
+    sft)
+      [[ -s "$RSSFT/adapter_config.json" ]] || {
+        info "adapter weights without adapter_config.json is a half-written tree"
+        return 1; }
+      return 0 ;;
+    probe)     return 0 ;;
+    grpo)
+      # the receipt script is the authority on its own payload
+      try "$PY" scripts/agentic_locks.py grpo-disposition --verify >/dev/null \
+        || { info "the GRPO disposition receipt does not verify"; return 1; }
+      return 0 ;;
+    *)         return 0 ;;
+  esac
 }
 
 # The registered hardware block, read once. CPU only: it parses YAML, never a card.
@@ -270,6 +372,76 @@ print(f"    ledger: {stage} ({kind}) +{minutes:.1f} min -> "
 PYEOF
 }
 
+# ---- GPU session journal (interrupted occupancy) ---------------------------
+# Opened by every GPU stage, closed when it ends, and closed by the EXIT trap
+# when it is killed. The close charges only the UNCHARGED REMAINDER of the
+# interval, so this cannot double-charge a stage whose own module already wrote
+# per-unit receipts -- and it cannot lose the minutes an interruption prevented
+# those receipts from covering. A session whose process is gone is reconciled by
+# the next stage's ledger guard (configio.reconcile_open_sessions).
+JOURNAL_ID=""
+JOURNAL_HB_PID=""
+
+gpu_session_open() {  # stage
+  (( DRY_RUN )) && { info "[dry-run] would open the GPU session journal for $1"
+                     return 0; }
+  # $$ is THIS driver's pid, and it is the session's owner. Recording the helper
+  # python's pid would make the session look dead the moment it was opened, and the
+  # next ledger guard would close and charge a stage that is still running.
+  JOURNAL_ID="$("$PY" - "$1" "$AGENTIC_RUN_ID" "$$" <<'PYEOF'
+import sys
+from agentlab.suite.configio import journal_open
+print(journal_open(sys.argv[1], run_id=sys.argv[2],
+                   pid=int(sys.argv[3]))["journal_id"])
+PYEOF
+)" || die "cannot open the GPU session journal for $1"
+  info "gpu session journal: $JOURNAL_ID"
+  # One long-lived heartbeat process, not one python start per beat. It exits by
+  # itself once the session is closed, so a missed kill cannot leave it running.
+  "$PY" - "$JOURNAL_ID" <<'PYEOF' &
+import sys
+import time
+
+from agentlab.suite.configio import journal_heartbeat
+
+jid = sys.argv[1]
+while True:
+    time.sleep(20)
+    try:
+        if not journal_heartbeat(jid):
+            break
+    except Exception:
+        break
+PYEOF
+  JOURNAL_HB_PID=$!
+}
+
+# No runtime manifest is passed to the close on purpose. The remainder row takes
+# its GPU identity from the run's BINDING (results/agentic/hardware.json, written
+# by pin_gpu), which is the card this run owns by construction; reading a producer
+# manifest here would make the charge conditional on that manifest being complete,
+# and the one case this row exists for is a session that died -- possibly before
+# its manifest was countersigned. Losing the charge to protect its provenance
+# would be the wrong trade: the ledger's job here is not to under-report.
+gpu_session_close() {  # normal | interrupted
+  [[ -n "$JOURNAL_ID" ]] || return 0
+  local jid="$JOURNAL_ID" reason="${1:-normal}"
+  JOURNAL_ID=""                     # cleared FIRST: the trap may not double-close
+  if [[ -n "$JOURNAL_HB_PID" ]]; then
+    kill "$JOURNAL_HB_PID" 2>/dev/null || true
+    wait "$JOURNAL_HB_PID" 2>/dev/null || true
+    JOURNAL_HB_PID=""
+  fi
+  "$PY" - "$jid" "$reason" <<'PYEOF'
+import sys
+from agentlab.suite.configio import journal_close
+rec = journal_close(sys.argv[1], reason=sys.argv[2])
+print(f"    gpu session {sys.argv[2]}: observed {rec['observed_s']:.0f} s, "
+      f"already charged {rec['already_charged_s']:.0f} s, "
+      f"charged now {rec['charged_s']:.0f} s")
+PYEOF
+}
+
 # ---- server-session accounting ---------------------------------------------
 # A served stage is charged ONCE, for the whole interval the server owned the
 # card: startup, every client shard, and the idle gaps between them. The previous
@@ -337,8 +509,15 @@ stop_server() {
 }
 # On a kill the server session must still be charged: the card really was busy,
 # and an unrecorded interval is a ledger that understates the run. session_end
-# clears its own timer, so a normal stage exit cannot be charged twice.
-on_exit() { stop_server; session_end "interrupted_session"; }
+# clears its own timer, so a normal stage exit cannot be charged twice. The
+# journal closes LAST, because it charges only what the receipts above did not:
+# session_end's row is already in the ledger by the time the remainder is
+# computed.
+on_exit() {
+  stop_server
+  session_end "interrupted_session"
+  gpu_session_close interrupted
+}
 trap on_exit EXIT INT TERM
 
 start_server() {  # extra serve flags in "$@"
@@ -391,11 +570,14 @@ unattested server may not produce claim-bearing episodes (S19/D1)."; }
 }
 
 # ---- resumable shard loop --------------------------------------------------
-# One arm/condition/control over one spec manifest, looped until the shard
-# reports complete. Each invocation self-limits with --time-budget-s, so no
-# single call approaches the 8-minute ceiling.
-eval_arm() {  # arm condition control specs adapter
+# One arm/condition/control over ONE IMMUTABLE BLOCK of one spec manifest, looped
+# until that block reports complete. Each invocation self-limits with
+# --time-budget-s, which is a 360-second LAUNCH WINDOW: it stops starting new
+# episodes and drains the ones already running, so no episode is ever killed by
+# the clock and no GPU second is spent on work that is then thrown away.
+eval_arm() {  # arm condition control specs adapter [block] [nblocks]
   local arm="$1" condition="$2" control="$3" specs="$4" adapter="${5:-}"
+  local block="${6:-0}" nblocks="${7:-1}"
   local prompt="$NEUTRAL_PROMPT"
   case "$arm" in
     BP|TP|RP) prompt="$(prompt_winner_file)" ;;
@@ -410,6 +592,7 @@ serving process writes the manifest (see start_server)."
     --control "$control" --specs "$specs" --prompt "$prompt"
     --out "$TRACES" --secret-file "$SECRET_FILE" --run-id "$AGENTIC_RUN_ID"
     --server "http://127.0.0.1:$PORT" --time-budget-s 360
+    --shard "$block" --num-shards "$nblocks"
     --runtime-manifest "${RUNTIME_MANIFEST:-<session manifest>}")
   # A trained arm REQUESTS the LoRA alias the server registered. Passing the
   # adapter for provenance while sending the base model id would evaluate the
@@ -424,13 +607,40 @@ serving process writes the manifest (see start_server)."
       printf '    $ %s   (looped until complete)\n' "${cmd[*]}"
       return 0
     fi
-    out="$("${cmd[@]}")" || die "eval shard failed: $arm/$condition/$control"
+    # A nonzero exit here is DELIBERATELY fatal, and the evaluator's own message
+    # (on stderr, above) says which kind it was. A dead or unreachable engine
+    # aborts the shard as INFRASTRUCTURE and writes no episode row, so the chain
+    # must stop rather than loop against a corpse -- and re-invoking after the
+    # server is fixed re-runs exactly the task ids that have no row.
+    out="$("${cmd[@]}")" \
+      || die "eval shard failed: $arm/$condition/$control block $block/$nblocks \
+(if this was an infrastructure abort, no episode row was written and nothing \
+entered a denominator; fix the server and re-run this stage)"
     printf '    %s\n' "$out"
     echo "$out" | grep -q '"complete": *true' && break
   done
   # No per-arm ledger row: the whole server session is charged once, so an arm's
   # wall clock must not also charge the same seconds (see session_end).
-  session_add "$arm.$condition.$control"
+  session_add "$arm.$condition.$control.b$block"
+}
+
+# A server session holds the card for at most SERVER_SESSION_CAP_MIN minutes and
+# is then restarted BETWEEN units -- never inside one. The restart is an
+# operational event: the same card, the same engine contract, a new producer
+# session manifest, and the same registered episodes. Resume makes it free.
+rotate_server_if_capped() {  # stage-name, then the serve flags to restart with
+  (( DRY_RUN )) && return 0
+  local stage="$1"; shift
+  [[ -n "$SESSION_T0" ]] || return 0
+  local mins
+  mins="$(awk "BEGIN{print ($(date +%s) - $SESSION_T0)/60}")"
+  awk "BEGIN{exit !($mins >= $SERVER_SESSION_CAP_MIN)}" || return 0
+  info "server session held the card for ${mins} min (cap \
+$SERVER_SESSION_CAP_MIN): controlled checkpointed restart between units"
+  stop_server
+  session_end "$stage"
+  session_begin
+  start_server "$@"
 }
 
 # The tournament records the winner as a candidate FILE NAME; the directory is
@@ -491,21 +701,24 @@ stage_prompt() {  # GPU
   require_gpu
   pin_gpu
   ledger_status
-  # ONE engine per round, not one per candidate. Each (round, candidate) unit
-  # still writes its own file, so re-invoking replays only what is missing --
-  # but ten cold starts (0.80 GPU-hours of pure startup) become two.
+  gpu_session_open prompt_tournament
+  # ONE engine per PROCESS INVOCATION, not one per candidate. Each (round,
+  # candidate) unit writes its own file, so re-invoking replays only what is
+  # missing, and the 120-minute budget means one 4.83-minute cold start covers up
+  # to two hours of served units (a 4.0% tax instead of the 8.8% a 55-minute
+  # budget charged). The budget stops LAUNCHING units; a running unit finishes.
   local pass=0
   while : ; do
     pass=$((pass + 1))
     (( pass > 20 )) && die "tournament round 1 did not converge in 20 passes"
     if (( DRY_RUN )); then
-      printf '    $ %s   (one engine, every pending candidate)\n' \
+      printf '    $ %s   (one engine per invocation, every pending candidate)\n' \
         "$PY -m agentlab.prompt_control run --round 1 --model $MODEL"
       break
     fi
     local out
     out="$("$PY" -m agentlab.prompt_control run --round 1 --model "$MODEL" \
-           --budget-minutes 55)" || die "tournament round 1 failed"
+           --budget-minutes 120)" || die "tournament round 1 failed"
     printf '    %s\n' "$out"
     echo "$out" | grep -q '"complete": *true' && break
     echo "$out" | grep -q "already done" && break
@@ -517,44 +730,50 @@ stage_prompt() {  # GPU
     pass=$((pass + 1))
     (( pass > 20 )) && die "tournament round 2 did not converge in 20 passes"
     if (( DRY_RUN )); then
-      printf '    $ %s   (one engine, the preregistered top two)\n' \
+      printf '    $ %s   (one engine per invocation, the preregistered top two)\n' \
         "$PY -m agentlab.prompt_control run --round 2 --model $MODEL"
       break
     fi
     local out2
     out2="$("$PY" -m agentlab.prompt_control run --round 2 --model "$MODEL" \
-            --budget-minutes 55)" || die "tournament round 2 failed"
+            --budget-minutes 120)" || die "tournament round 2 failed"
     printf '    %s\n' "$out2"
     echo "$out2" | grep -q '"complete": *true' && break
     echo "$out2" | grep -q "already done" && break
   done
   run "$PY" -m agentlab.prompt_control finalize
+  gpu_session_close normal
 }
 
-stage_baselock() {  # CPU + GPU (dev only; the held-out split stays untouched)
-  say "baselock: lock the prompt winner, then measure the base arms on DEV"
+stage_baselock() {  # CPU ONLY -- the prompt lock, and nothing else
+  say "baselock: lock the prompt winner (PROMPT LOCK ONLY -- no dev measurement)"
+  # WHAT THIS STAGE NO LONGER DOES, and why.
+  #
+  # It used to run B0 clean, BP clean and BP faulted over ALL 3,600 dev tasks:
+  # 10,800 episodes that were neither the prompt tournament nor the registered
+  # calibration, and that no gate, floor, claim or winner condition reads. The
+  # registered dev measurement has exactly two homes -- the eight-candidate
+  # tournament (which selects the prompt on dev, 3,600 episodes) and the
+  # calibration stage (which times dev-only IDs on the exact production engine
+  # before the held-out reveal). A third, unregistered dev census would have spent
+  # A5000 hours under a hard 120-hour ceiling to produce numbers nothing consumes,
+  # and -- worse -- it would have produced dev base-arm outcomes BEFORE the
+  # checkpoint lock, which is exactly the kind of look this protocol keeps out of
+  # the selection path.
+  #
+  # So this stage is now CPU-only and does one thing: it locks the tournament
+  # winner. `agentic_locks.py lock-prompt` re-reads the frozen file, re-hashes the
+  # named prompt, refuses anything outside the eight preregistered candidates and
+  # refuses to run after the seed reveal -- which is why there is no separate
+  # receipt check here: the lock IS the receipt.
   need "$FROZEN_PROMPT" "the prompt winner must be frozen before it can be locked" \
     && run "$PY" scripts/agentic_locks.py lock-prompt --file "$FROZEN_PROMPT"
-  if done_already baselock "$TRACES/BP.clean.none.jsonl" "$TRACES/BP.faulted.none.jsonl"; then
-    info "dev base arms already traced"; return 0
-  fi
-  require_gpu
-  pin_gpu
-  ledger_status
-  session_begin
-  start_server
-  local specs="$CERTSPECS/dev.jsonl"
-  eval_arm B0 clean   none "$specs"
-  eval_arm BP clean   none "$specs"
-  eval_arm BP faulted none "$specs"
-  stop_server
-  session_end baselock
 }
 
 stage_distill() {  # GPU
   say "distill: rejection-sample verified trajectories from the base model"
-  if done_already distill "data/multiface/accepted.jsonl"; then
-    info "accepted corpus already built"; return 0
+  if done_already distill "$ACCEPTED"; then
+    info "accepted corpus already built and its receipt validates"; return 0
   fi
   # This refusal is deliberate: sampling before the elicitation control is
   # frozen is the mistake the previous headline made.
@@ -564,40 +783,58 @@ prompt stage first" || return 0
   require_gpu
   pin_gpu
   ledger_status
+  gpu_session_open multidistill
   run "$PY" -m agentlab.multidistill plan
-  # ONE engine serves every pending shard; each shard is still an atomic file, so
-  # a kill costs one shard and re-invoking resumes. 50 shards each paying the
-  # measured 289.7 s startup was 4.02 GPU-hours of pure model loading.
+  # ONE engine per process invocation serves every pending shard; each shard is
+  # still an atomic file with its own receipt, so a kill costs one shard and
+  # re-invoking resumes. 60 shards each paying the measured 289.7 s startup would
+  # be 4.83 GPU-hours of pure model loading; at a 240-minute budget the loading is
+  # 2.0% of the served time. The budget stops LAUNCHING shards -- a shard that has
+  # started finishes and is written.
   local pass=0
   while : ; do
     pass=$((pass + 1))
     (( pass > 40 )) && die "distill did not converge in 40 engine passes"
     if (( DRY_RUN )); then
-      printf '    $ %s   (one engine, every pending shard)\n' \
-        "$PY -m agentlab.multidistill run --model $MODEL --budget-minutes 55"
+      printf '    $ %s   (one engine per invocation, every pending shard)\n' \
+        "$PY -m agentlab.multidistill run --model $MODEL --budget-minutes 240"
       break
     fi
     local out
     out="$("$PY" -m agentlab.multidistill run --model "$MODEL" \
-           --budget-minutes 55)" || die "distill pass failed"
+           --budget-minutes 240)" || die "distill pass failed"
     printf '    %s\n' "$out"
     echo "$out" | grep -q '"complete": *true' && break
     echo "$out" | grep -q "all shards done" && break
   done
+  # finalize decides quotas and publishes the corpus receipt. A nonzero exit is
+  # fatal here on purpose: a quota-missing corpus must not become an adapter.
   run "$PY" -m agentlab.multidistill finalize
+  gpu_session_close normal
+  stage_receipt distill || die "the accepted corpus has no valid receipt at \
+$ACCEPTED_RECEIPT, so the distill stage is NOT complete. Do not proceed to views \
+or SFT on an uncertified corpus."
 }
 
 stage_views() {  # CPU
   say "views: build the completion-only SFT views from accepted trajectories"
-  if done_already views "data/multiface/sft_views.jsonl"; then
-    info "views already built"; return 0
+  if done_already views "$VIEWS"; then
+    info "views already built and the corpus report is present"; return 0
   fi
-  need "data/multiface/accepted.jsonl" \
+  need "$ACCEPTED" \
     "view building consumes the accepted corpus; run the distill stage first" \
     || return 0
+  need "$ACCEPTED_RECEIPT" \
+    "view building consumes a CERTIFIED accepted corpus; the distill stage \
+publishes the receipt (quotas, counts, digest)" || return 0
   run "$PY" -m agentlab.suite.datasets \
-    --accepted data/multiface/accepted.jsonl \
-    --out data/multiface/sft_views.jsonl
+    --accepted "$ACCEPTED" \
+    --out "$VIEWS"
+  # suite.datasets owns the registered row range and the terminal-weight gate and
+  # publishes the report; the driver only refuses to call a build complete without
+  # one, because a rows file with no report is a build that died mid-publish.
+  stage_receipt views || die "the view corpus published no report at \
+$VIEWS_REPORT, so the views stage is NOT complete."
 }
 
 stage_sft() {  # GPU
@@ -605,18 +842,22 @@ stage_sft() {  # GPU
   if done_already sft "$RSSFT/adapter_model.safetensors"; then
     info "adapter already trained: $RSSFT"; return 0
   fi
-  need "data/multiface/sft_views.jsonl" \
+  need "$VIEWS" \
     "RS-SFT trains on the verified views; run the views stage first" || return 0
   require_gpu
   pin_gpu
   ledger_status
+  # The journal is what charges an interrupted epoch. `ledger_note rs_sft` below
+  # runs only if training RETURNS; a run killed at optimizer step 900 of 1,000 used
+  # to charge zero minutes for hours of real occupancy.
+  gpu_session_open rs_sft
   local t0; t0=$(date +%s)
   # Every hyperparameter -- including lora_alpha, lora_dropout and the evaluation
   # batch settings -- is now a real flag whose DEFAULT is the config value, so a
   # config edit reaches the trainer whether or not this driver passes it. They are
   # still passed explicitly, so the command line records what ran.
   run "$PY" -m agentlab.sft --model "$MODEL" \
-    --distill-path data/multiface/sft_views.jsonl \
+    --distill-path "$VIEWS" \
     --out "$RSSFT" \
     --rank "$(cfg_get sft.lora_rank)" \
     --lora-alpha "$(cfg_get sft.lora_alpha)" \
@@ -633,6 +874,9 @@ stage_sft() {  # GPU
     --max-length "$(cfg_get sft.max_length)"
   ledger_note rs_sft "$(awk "BEGIN{print ($(date +%s) - $t0)/60}")" stage \
     "{\"unit\":\"epochs\",\"count\":$(cfg_get sft.epochs)}"
+  gpu_session_close normal
+  stage_receipt sft || die "training returned but $RSSFT is not a complete \
+adapter tree; the sft stage is NOT complete."
 }
 
 stage_probe() {  # CPU in v1: the probe is NOT EVALUATED on this card
@@ -651,7 +895,8 @@ stage_probe() {  # CPU in v1: the probe is NOT EVALUATED on this card
     run "$PY" -m agentlab.variance report
     return 0
   fi
-  # The RUN path (a future registered study): one engine, every pending cell, and
+  # The RUN path (a future registered study): one engine per invocation, every
+  # pending cell, and
   # the RS-SFT ADAPTER -- probing the base model would measure the wrong policy.
   need "$RSSFT/adapter_model.safetensors" \
     "the probe measures the RS-SFT policy's group variance; run the sft stage first" \
@@ -659,24 +904,26 @@ stage_probe() {  # CPU in v1: the probe is NOT EVALUATED on this card
   require_gpu
   pin_gpu
   ledger_status
+  gpu_session_open variance_probe
   run "$PY" -m agentlab.variance plan
   local pass=0
   while : ; do
     pass=$((pass + 1))
     (( pass > 20 )) && die "variance probe did not converge in 20 engine passes"
     if (( DRY_RUN )); then
-      printf '    $ %s   (one engine, every pending cell)\n' \
+      printf '    $ %s   (one engine per invocation, every pending cell)\n' \
         "$PY -m agentlab.variance run --model $MODEL --adapter $RSSFT"
       break
     fi
     local out
     out="$("$PY" -m agentlab.variance run --model "$MODEL" --adapter "$RSSFT" \
-           --budget-minutes 55)" || die "variance probe pass failed"
+           --budget-minutes 120)" || die "variance probe pass failed"
     printf '    %s\n' "$out"
     echo "$out" | grep -q '"complete": *true' && break
     echo "$out" | grep -q "all cells done" && break
   done
   run "$PY" -m agentlab.variance report
+  gpu_session_close normal
 }
 
 stage_grpo() {  # CPU: record the stage DISPOSITION, which is not a gate state
@@ -685,7 +932,7 @@ stage_grpo() {  # CPU: record the stage DISPOSITION, which is not a gate state
   if done_already grpo "$artifact"; then
     info "disposition already recorded: $artifact"; return 0
   fi
-  if [[ -e "$RSGRPO/adapter_model.safetensors" ]]; then
+  if [[ -s "$RSGRPO/adapter_model.safetensors" ]]; then
     die "a GRPO adapter exists at $RSGRPO, but this run's registered disposition \
 is $(cfg_get grpo.stage_disposition). A checkpoint from an unregistered branch \
 may not enter this run: it is a separate registered study."
@@ -706,7 +953,7 @@ stage_lock() {  # CPU
   # nobody wrote down" is indistinguishable from "GRPO ran and lost", and only one
   # of those is reportable -- so a missing GRPO checkpoint with no disposition
   # artifact is an error here rather than a silent fallback to RS-SFT.
-  if [[ ! -e "$RSGRPO/adapter_model.safetensors" ]]; then
+  if [[ ! -s "$RSGRPO/adapter_model.safetensors" ]]; then
     need "$artifact" \
       "the GRPO disposition artifact must exist before a trained candidate can be \
 selected without a GRPO checkpoint; run the grpo stage" || return 0
@@ -716,7 +963,7 @@ selected without a GRPO checkpoint; run the grpo stage" || return 0
   # to exist. There is no RS-SFT-versus-GRPO dev comparison to run, because the
   # GRPO branch produced no second candidate -- and saying so is the point.
   local candidate="$RSSFT" stage_name="rs_sft"
-  if [[ ! -e "$RSSFT/adapter_model.safetensors" ]] && ! (( DRY_RUN )); then
+  if [[ ! -s "$RSSFT/adapter_model.safetensors" ]] && ! (( DRY_RUN )); then
     die "no RS-SFT adapter to lock; run the sft stage first"
   fi
   info "trained candidate: $candidate (stage $stage_name, the SOLE candidate:"
@@ -738,7 +985,7 @@ Commit configs/preregistration_final.json, then re-run --only lock."
 }
 
 stage_eval() {  # GPU -- the first and only stage that touches the held-out split
-  say "eval: paired held-out evaluation, all arms, identical specs and decoding"
+  say "eval: paired held-out evaluation, INTERLEAVED by immutable task block"
   if ! (( DRY_RUN )); then
     [[ -f results/agentic/locks.json && -f results/agentic/seed_reveal.json ]] \
       || die "REFUSED: the held-out split stays blind until locks.json and \
@@ -751,63 +998,169 @@ print(json.loads(p.read_text())['checkpoint']['path'] if p.exists() else '$RSSFT
   require_gpu
   pin_gpu
   ledger_status
+  info "registered census: $(eval_census)"
+  gpu_session_open eval
   session_begin
-  # One server for the WHOLE stage, LoRA enabled, so base and trained arms face
-  # the identical server, parser, schemas and decoding -- the S8 pairing
-  # requirement -- and the 289.7 s startup is paid once.
-  start_server --enable-lora --lora-modules "trained=$adapter" --max-lora-rank 32
+  # LoRA enabled, so base and trained arms face the identical server, parser,
+  # schemas and decoding -- the S8 pairing requirement. One session holds the card
+  # for at most SERVER_SESSION_CAP_MIN minutes and is then restarted BETWEEN
+  # units: a six-hour cap costs one 289.7 s cold start per rotation (1.3% of the
+  # session) and buys a bounded, checkpointed failure domain instead of a
+  # multi-day process nobody can restart without losing its place.
+  local -a serve_flags=(--enable-lora --lora-modules "trained=$adapter"
+                        --max-lora-rank 32)
+  start_server "${serve_flags[@]}"
   # The work table comes from configs/multifaceted.yaml `eval.manifests`, so a
   # registered manifest cannot be preregistered and then never invoked. MT and H8
   # used to be exactly that; the redacted/permuted controls used to run against
   # the core manifest instead of their own registered ones.
   #
   # MANDATORY first (BP/TP over core clean+faulted, MT, H8, absent, permutation =
-  # 7,800 episodes), then the OPTIONAL descriptive arms and the stress set, so a
-  # budget stop can never consume mandatory episodes. R0/RP are never scheduled:
-  # they are ABSENT BY DESIGN, not missing.
-  local arm name specs condition control mandatory
-  while read -r arm name specs condition control mandatory; do
+  # 7,800 episodes), then the OPTIONAL stress set (cut rank 4) and the descriptive
+  # B0/T0 arms (cut rank 3, cut FIRST therefore scheduled LAST), so a budget stop
+  # can never consume mandatory episodes. R0/RP are never scheduled: they are
+  # ABSENT BY DESIGN, not missing.
+  local arm name specs condition control mandatory block nblocks
+  while read -r arm name specs condition control mandatory block nblocks; do
     [[ -z "$arm" ]] && continue
+    rotate_server_if_capped eval "${serve_flags[@]}"
     local ad=""
     case "$arm" in T0|TP|RP) ad="$adapter" ;; esac
-    info "unit: $arm $name $condition/$control ($([[ "$mandatory" == "True" ]] \
-      && echo MANDATORY || echo optional))"
-    eval_arm "$arm" "$condition" "$control" "$CERTSPECS/$specs" "$ad"
+    info "unit: $arm $name $condition/$control block $((block + 1))/$nblocks \
+($([[ "$mandatory" == "True" ]] && echo MANDATORY || echo optional))"
+    eval_arm "$arm" "$condition" "$control" "$CERTSPECS/$specs" "$ad" \
+      "$block" "$nblocks"
   done < <(eval_units)
   stop_server
   session_end eval
+  verify_eval_census
+  gpu_session_close normal
 }
 
-# The registered evaluation work table, mandatory units first.
-eval_units() {
-  "$PY" - <<'PYEOF'
+# The registered evaluation work table. ONE definition, two views: `units` is the
+# schedule the driver executes, `census` is the episode arithmetic the
+# preregistration is checked against, so the two can never disagree.
+eval_table() {  # units | census
+  "$PY" - "${1:-units}" "$EVAL_BLOCK_TASKS" <<'PYEOF'
+import json
+import math
+import sys
+
 from agentlab.suite.configio import load_config
 
+mode = sys.argv[1]
+block_tasks = max(1, int(sys.argv[2] or 100))
 cfg = load_config()
 ev = cfg["eval"]
 rows = []
 
 
-def emit(arms, manifests, mandatory):
+def emit(arms, manifests, mandatory, tag):
     for man in manifests:
-        for arm in arms:
-            for condition in man["conditions"]:
-                rows.append((arm, man["name"], man["specs"], condition,
-                             man["control"], mandatory))
+        for condition in man["conditions"]:
+            nblocks = max(1, math.ceil(int(man["tasks"]) / block_tasks))
+            for block in range(nblocks):
+                # INTERLEAVING. The paired arms run the SAME immutable block back
+                # to back, and the arm order flips on alternating blocks. Running
+                # every BP episode days before every TP episode would confound the
+                # paired contrast with thermal and host-load drift; a block is a
+                # deterministic function of the committed manifest order, so this
+                # changes the ORDER of the registered work and no estimand.
+                order = list(arms) if block % 2 == 0 else list(reversed(arms))
+                for arm in order:
+                    rows.append({"arm": arm, "name": man["name"],
+                                 "specs": man["specs"], "condition": condition,
+                                 "control": man["control"],
+                                 "mandatory": bool(mandatory), "block": block,
+                                 "nblocks": nblocks, "tasks": int(man["tasks"]),
+                                 "tag": tag})
 
 
 core = [m for m in ev["manifests"] if m["mandatory"]]
 extra = [m for m in ev["manifests"] if not m["mandatory"]]
-# 1. the MANDATORY census: BP/TP over core clean+faulted, MT, H8, absent, perm.
-emit(ev["mandatory_arms"], core, True)
-# 2. cut rank 4: the two-fault stress set on the mandatory arms.
-emit(ev["mandatory_arms"], extra, False)
-# 3. cut rank 3: the descriptive B0/T0 arms, over everything. Cut FIRST, so
-#    scheduled LAST -- a budget stop then lands on the cheapest thing to lose.
-emit(ev["descriptive_arms"], core + extra, False)
-for arm, name, specs, condition, control, mandatory in rows:
-    print(arm, name, specs, condition, control, mandatory)
+# THE CENSUS RECONCILIATION. The descriptive arms run over the ORDINARY
+# (control `none`) manifests only. The absent-information and counterfactual
+# permutation CONTROLS are registered per MANDATORY arm -- 600 x 2 and 100 x 2 in
+# budget.mandatory_episode_census -- and scheduling B0/T0 against them added 1,400
+# episodes (8,360 instead of 6,960) that the registered 15,320 total never
+# contained. B0/T0 are NOT dropped: they stay budget-conditional at cut rank 3 and
+# the registered calibration projection decides whether they run.
+ordinary = [m for m in core + extra if m["control"] == "none"]
+
+emit(ev["mandatory_arms"], core, True, "mandatory")                 # 7,800
+emit(ev["mandatory_arms"], extra, False, "stress_rank4")            #   560
+emit(ev["descriptive_arms"], ordinary, False, "descriptive_rank3")  # 6,960
+
+if mode == "census":
+    seen, census = set(), {}
+    for r in rows:
+        key = (r["arm"], r["name"], r["condition"], r["control"])
+        if key in seen:
+            continue                      # blocks partition a unit, not add to it
+        seen.add(key)
+        census[r["tag"]] = census.get(r["tag"], 0) + r["tasks"]
+    census["total"] = sum(census.get(t, 0) for t in
+                          ("mandatory", "stress_rank4", "descriptive_rank3"))
+    census["units"] = len(rows)
+    census["block_tasks"] = block_tasks
+    print(json.dumps(census, sort_keys=True))
+else:
+    for r in rows:
+        print(r["arm"], r["name"], r["specs"], r["condition"], r["control"],
+              r["mandatory"], r["block"], r["nblocks"])
 PYEOF
+}
+
+eval_units()  { eval_table units; }
+eval_census() { eval_table census; }
+
+# COMPLETION IS A CENSUS, NOT A FILE. Traces for several manifests share one
+# arm/condition/control file, so "the file exists" says nothing about whether a
+# registered manifest ran at all -- MT and H8 were preregistered and never invoked
+# once already. This attributes rows to manifests by TASK ID (the manifests are
+# disjoint) and refuses if a MANDATORY unit is short. The analyzer's own S-check
+# census is separate and still authoritative for the verdict.
+verify_eval_census() {
+  (( DRY_RUN )) && { info "[dry-run] would verify the written episode census"
+                     return 0; }
+  say "eval census: what was actually written, per registered manifest"
+  # The census arithmetic itself lives in suite.evaluate (unit_census /
+  # require_mandatory_census) so it has ONE definition and is unit-testable on
+  # CPU; the driver supplies the schedule and reports the refusal. The schedule
+  # arrives on STDIN, so the program is passed with -c rather than as a heredoc --
+  # a heredoc would BE stdin and the pipe would be lost.
+  local prog
+  prog="$(cat <<'PYEOF'
+import sys
+
+from agentlab.suite import evaluate
+
+certspecs, traces = sys.argv[1], sys.argv[2]
+units, seen = [], set()
+for line in sys.stdin:
+    parts = line.split()
+    if len(parts) != 8:
+        continue
+    arm, name, specs, condition, control, mandatory, _block, _nblocks = parts
+    key = (arm, name, condition, control)
+    if key in seen:
+        continue          # the blocks of a unit are a partition, not extra units
+    seen.add(key)
+    units.append((arm, name, specs, condition, control, mandatory == "True"))
+
+rows = evaluate.unit_census(units, certspecs, traces)
+print(evaluate.format_census(rows))
+incomplete = evaluate.require_mandatory_census(rows)
+if incomplete:
+    print(f"    {len(incomplete)} OPTIONAL unit(s) incomplete "
+          f"(budget-conditional, cut ranks 3-4); "
+          f"{len(rows) - len(incomplete)} complete")
+else:
+    print(f"    every scheduled unit is complete ({len(rows)} units)")
+PYEOF
+)"
+  eval_units | "$PY" -c "$prog" "$CERTSPECS" "$TRACES" \
+    || die "the written episode census does not match the registered one"
 }
 
 stage_verdict() {  # CPU
@@ -861,6 +1214,7 @@ import json; print(json.load(open('results/agentic/locks.json'))['checkpoint']['
   require_gpu
   pin_gpu
   ledger_status
+  gpu_session_open ship_smoke
   session_begin
   if [[ -n "$adapter" ]]; then
     start_server --enable-lora --lora-modules "trained=$adapter" --max-lora-rank 32
@@ -879,6 +1233,7 @@ import json; print(json.load(open('results/agentic/locks.json'))['checkpoint']['
   session_add "ship_smoke"
   stop_server
   session_end ship_smoke
+  gpu_session_close normal
   info "shipped configuration answered an 8-episode dev smoke"
 }
 
@@ -914,6 +1269,16 @@ while (( $# )); do
     # runnable on its own. Useful on a shared box: it answers before a stage has
     # spent anything, and it never allocates.
     --check-gpu) require_gpu; ledger_status; exit 0 ;;
+    # The registered evaluation schedule and its episode arithmetic, printed
+    # without touching a card. `--print-census` is the number the preregistration
+    # is compared against; `--print-units` is the interleaved block schedule the
+    # eval stage executes, in order.
+    --print-census) eval_census; exit 0 ;;
+    --print-units)  eval_units;  exit 0 ;;
+    # "is the written census the registered one?" -- runnable on its own, after a
+    # kill or before the verdict, and CPU-only: it reads the trace rows and the
+    # committed manifests and refuses if a MANDATORY unit is short.
+    --verify-census) verify_eval_census; exit 0 ;;
     --from)     FROM="$2"; shift ;;
     --to)       TO="$2"; shift ;;
     --only)     ONLY="$2"; shift ;;

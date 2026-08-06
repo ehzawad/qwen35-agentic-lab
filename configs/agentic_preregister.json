@@ -684,9 +684,24 @@
       "absent_information_600_x_2_arms_clean_only": 1200,
       "permutation_100_x_2_arms": 200,
       "mandatory_total": 7800,
-      "optional_not_in_the_mandatory_total": {"stress_280_x_2_arms": 560, "b0_t0_descriptive_arms": "cut rank 3", "r0_rp": "ABSENT BY DESIGN (grpo.stage_disposition)"}
+      "optional_not_in_the_mandatory_total": {
+        "stress_280_x_2_arms": 560,
+        "b0_t0_descriptive_arms": "cut rank 3",
+        "b0_t0_descriptive_arms_episodes": 6960,
+        "b0_t0_composition": {"core_1200_clean_x_2_arms": 2400, "core_1200_faulted_x_2_arms": 2400, "mt_600_x_2_arms": 1200, "h8_200_additional_x_2_arms": 400, "stress_280_x_2_arms": 560},
+        "b0_t0_controls_rule": "The descriptive arms run over the ORDINARY (control `none`) manifests only. The absent-information and counterfactual-permutation controls are registered PER MANDATORY ARM (600 x 2 and 100 x 2 above); they are not registered for B0/T0, and B0/T0 appear in no gate, floor, claim, launch condition or winner truth table that a control could inform.",
+        "r0_rp": "ABSENT BY DESIGN (grpo.stage_disposition)"
+      },
+      "amendment_2026_08_06_descriptive_census_reconciliation": {
+        "status": "PRE-FINALIZATION AMENDMENT to an unfinalized DRAFT. Recorded while configs/preregistration_final.json does not exist, the GPU ledger is EMPTY (zero study GPU-hours), no checkpoint is locked, no seed is revealed and no held-out artifact exists. Specification repair is legitimate in this state; it will not be after finalization.",
+        "defect": "The DRIVER and this file disagreed by 1,400 episodes. scripts/run_multifaceted_chain.sh scheduled the descriptive B0/T0 arms over every manifest INCLUDING the two registered controls (redacted 600 x 2 = 1,200 and permuted 100 x 2 = 200), which is 8,360 descriptive episodes, while the 15,320 total in episode_projection implies 6,960. Nothing in the repository compared the two numbers, so the driver would have run a census this preregistration never described.",
+        "resolution": "The DRIVER was corrected, not the registration: the descriptive arms are scheduled over the ordinary (control `none`) manifests only -- core clean, core faulted, MT, H8 and the stress set -- which is exactly 6,960 episodes. The arithmetic that was always implied is now written down here (b0_t0_descriptive_arms_episodes and b0_t0_composition) and a test compares the driver's computed census against these numbers, so the same silent drift cannot recur.",
+        "what_did_not_change": "No registered cardinality, sample size, threshold, margin, estimand, cluster rule or launch floor moved. mandatory_total stays 7,800; bp_tp_with_optional_stress stays 8,360; with_b0_t0 stays 15,320; eval_core 1,200, fault groups 400 each, MT 600, H8 400, absent_information 200 per family per arm and permutation 100 per arm are all untouched. This corrects an arithmetic census, exactly as the earlier 7,800 mandatory correction did.",
+        "b0_t0_retained": "B0/T0 are NOT dropped. The production-run planner recommended dropping them by amendment on the strength of a 12-episode dev observation (its dominant B0 failure mode looked like missing commitment syntax). The trace-provenance role WITHDREW that rationale once the answer extractor was fixed -- the observation was partly an extraction artefact, so it cannot support a drop. B0/T0 therefore remain scheduled as budget-conditional descriptive arms at cut rank 3, third in the unchanged frozen cut order, and only the registered calibration projection may remove them -- before the held-out reveal, never after seeing a result.",
+        "outcome_blind": "This amendment reads no held-out result and no arm's capability outcome. It is an episode-count reconciliation between a shell script and a JSON file."
+      }
     },
-    "episode_projection": {"bp_tp_mandatory": 7800, "bp_tp_with_optional_stress": 8360, "with_b0_t0": 15320, "with_r0_rp": "not applicable: R0/RP are absent by design"},
+    "episode_projection": {"bp_tp_mandatory": 7800, "bp_tp_with_optional_stress": 8360, "b0_t0_descriptive": 6960, "with_b0_t0": 15320, "with_r0_rp": "not applicable: R0/RP are absent by design", "driver_census_source": "scripts/run_multifaceted_chain.sh eval_table census; tests/test_transport_and_budget_integrity.py compares it against these fields"},
 
     "mandatory": {
       "arms": ["BP", "TP"],

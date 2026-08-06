@@ -27,7 +27,9 @@ import os
 import pathlib
 import socket
 import subprocess
+import sys
 import tempfile
+import time
 import urllib.parse
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -723,6 +725,12 @@ def checkpoint_tree_sha256(path: str | pathlib.Path | None) -> str | None:
     h = hashlib.sha256()
     files = [p] if p.is_file() else sorted(
         q for q in p.rglob("*") if q.is_file())
+    if not files:
+        # An EMPTY (or zero-file) tree used to hash to sha256("") -- a perfectly
+        # stable digest that pins nothing. A lock recording it would claim to have
+        # committed a checkpoint that does not exist, which is the same defect as
+        # treating a path's existence as a completed stage. No files, no digest.
+        return None
     for q in files:
         rel = q.name if p.is_file() else str(q.relative_to(p))
         h.update(rel.encode("utf-8") + b"\0")
@@ -751,9 +759,26 @@ def ledger_rows(cfg: dict | None = None) -> list[dict]:
     return rows
 
 
+def ledger_elapsed_s(cfg: dict | None = None) -> float:
+    """Cumulative measured GPU SECONDS so far (0.0 when no ledger exists yet).
+
+    The registered accounting rule enforces the ceiling against the sum of
+    MEASURED ELAPSED SECONDS, so the reducer is over `elapsed_s`. `minutes` is
+    rounded to two decimals for the receipt's readability and is only a fallback
+    for a row written before `elapsed_s` existed.
+    """
+    total = 0.0
+    for row in ledger_rows(cfg):
+        if row.get("elapsed_s") is not None:
+            total += float(row["elapsed_s"])
+        else:
+            total += float(row.get("minutes", 0.0)) * 60.0
+    return total
+
+
 def ledger_hours(cfg: dict | None = None) -> float:
     """Cumulative measured GPU hours so far (0.0 when no ledger exists yet)."""
-    return sum(float(r.get("minutes", 0.0)) for r in ledger_rows(cfg)) / 60.0
+    return ledger_elapsed_s(cfg) / 3600.0
 
 
 def ledger_bound_uuid(cfg: dict | None = None) -> str | None:
@@ -828,12 +853,334 @@ def ledger_append(stage: str, minutes: float, cfg: dict | None = None, *,
     return cumulative
 
 
-def ledger_guard(stage: str, projected_minutes: float, cfg: dict | None = None) -> None:
-    """Refuse to start GPU work whose projection would cross the hard ceiling."""
+# --------------------------------------------------------------------------
+# GPU session journal: interrupted occupancy is CHARGED, never lost
+# --------------------------------------------------------------------------
+#
+# The ledger's rows are receipts for COMPLETED work units: a rejection-sampling
+# shard, a tournament unit, a finished server session. That is exactly the time
+# an interruption does not produce. Kill a stage mid-shard and the card was busy
+# for real minutes that appear nowhere; the same is true for a whole SFT run,
+# which charges once, at the end, from the driver. Under a hard 120-hour ceiling
+# an unrecorded interval does not merely lose bookkeeping -- it makes the ceiling
+# claim false in the permissive direction.
+#
+# So every GPU stage OPENS a journal session, heartbeats while it holds the card,
+# and CLOSES it. A close charges only the UNCHARGED REMAINDER:
+#
+#   observed  = last heartbeat (or open) - open
+#   already   = ledger seconds appended since the session opened
+#   charged   = max(0, observed - already)
+#
+# which is what makes this safe to layer over modules that already write their
+# own per-unit receipts: a normal run charges ~0 extra, an interrupted run
+# charges exactly the part its own receipts never got to write. A session whose
+# process is gone is reconciled and closed by the NEXT stage's ledger guard, so
+# SIGKILL and power loss are covered too, not only clean shutdowns.
+
+JOURNAL_NAME = "gpu_sessions.jsonl"
+
+# Below this, a remainder is bookkeeping noise (a stage that closed cleanly), and
+# writing a receipt for it would clutter the ledger without changing any total.
+JOURNAL_MIN_CHARGE_S = 1.0
+
+
+def journal_path(cfg: dict | None = None) -> pathlib.Path:
+    """Beside the ledger, derived from the one configured path."""
+    return ledger_path(cfg).with_name(JOURNAL_NAME)
+
+
+def _journal_append(rec: dict, cfg: dict | None = None) -> dict:
+    p = journal_path(cfg)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, sort_keys=True) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    return rec
+
+
+def journal_rows(cfg: dict | None = None) -> list[dict]:
+    p = journal_path(cfg)
+    if not p.exists():
+        return []
+    rows = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue  # a torn tail line is not a reason to lose the whole journal
+    return rows
+
+
+def journal_open(stage: str, cfg: dict | None = None, *,
+                 run_id: str | None = None, work: dict | None = None,
+                 pid: int | None = None) -> dict:
+    """Declare that a process is about to hold the card. -> the open record.
+
+    `pid` is the OWNER of the session, and it matters: the shell driver opens the
+    journal through a short-lived python helper, so recording the helper's pid
+    would make the session look dead the instant it was created and the next
+    ledger guard would close and charge a stage that is still running. The driver
+    passes its own pid ($$).
+    """
     cfg = cfg or load_config()
+    rec = {"event": "open", "journal_id": new_session_id(f"gpu-{stage}"),
+           "stage": stage, "run_id": run_id or DEFAULT_RUN_ID,
+           "opened_at_utc": now_utc(), "opened_epoch": round(time.time(), 3),
+           "ledger_elapsed_s_at_open": round(ledger_elapsed_s(cfg), 1),
+           "work": work or {}}
+    rec.update(process_identity(pid))
+    return _journal_append(rec, cfg)
+
+
+def journal_heartbeat(journal_id: str, cfg: dict | None = None) -> bool:
+    """Extend the observed occupancy of an OPEN session. False if it is closed.
+
+    The heartbeat is what makes an interrupted charge honest: without it a killed
+    session could only be charged from its open timestamp to the moment someone
+    noticed, which would over-charge a stage that died early and under-charge
+    nothing. The charge is always bounded by the last heartbeat.
+    """
+    cfg = cfg or load_config()
+    state = journal_state(cfg).get(journal_id)
+    if not state or state["closed"]:
+        return False
+    _journal_append({"event": "heartbeat", "journal_id": journal_id,
+                     "at_utc": now_utc(), "at_epoch": round(time.time(), 3)}, cfg)
+    return True
+
+
+def journal_state(cfg: dict | None = None) -> dict:
+    """Reduce the journal to {journal_id: {open, last_epoch, closed}}."""
+    out: dict = {}
+    for row in journal_rows(cfg):
+        jid = row.get("journal_id")
+        if not jid:
+            continue
+        if row.get("event") == "open":
+            out[jid] = {"open": row, "last_epoch": float(row.get("opened_epoch") or 0.0),
+                        "closed": False, "close": None}
+        elif jid in out and row.get("event") == "heartbeat":
+            out[jid]["last_epoch"] = max(out[jid]["last_epoch"],
+                                         float(row.get("at_epoch") or 0.0))
+        elif jid in out and row.get("event") == "close":
+            out[jid]["last_epoch"] = max(out[jid]["last_epoch"],
+                                         float(row.get("at_epoch") or 0.0))
+            out[jid]["closed"] = True
+            out[jid]["close"] = row
+    return out
+
+
+def open_sessions(cfg: dict | None = None) -> list[dict]:
+    """Every journal session that was opened and never closed."""
+    return [st for st in journal_state(cfg).values() if not st["closed"]]
+
+
+def journal_close(journal_id: str, cfg: dict | None = None, *,
+                  reason: str = "normal", manifest: str | pathlib.Path | None = None
+                  ) -> dict:
+    """Close one session, charging the UNCHARGED remainder of its occupancy."""
+    cfg = cfg or load_config()
+    state = journal_state(cfg).get(journal_id)
+    if not state:
+        raise SystemExit(f"REFUSED: no GPU session journal entry for "
+                         f"{journal_id!r}; a close must name a session that was "
+                         f"opened, or the charge would be invented.")
+    if state["closed"]:
+        return dict(state["close"], already_closed=True)
+    rec = state["open"]
+    now = time.time()
+    last = max(float(state["last_epoch"] or 0.0), 0.0)
+    # A NORMAL close knows the process held the card until this instant, so the
+    # interval ends now. An INTERRUPTED one only knows it was alive at its last
+    # heartbeat: the card may have been busy for longer, but the journal cannot
+    # attest it, and inventing GPU seconds is not better than missing them.
+    end = max(last, now) if reason == "normal" else last
+    observed = max(0.0, end - float(rec.get("opened_epoch") or 0.0))
+    already = max(0.0, ledger_elapsed_s(cfg) - float(
+        rec.get("ledger_elapsed_s_at_open") or 0.0))
+    charge_s = max(0.0, observed - already)
+    charged = 0.0
+    if charge_s >= JOURNAL_MIN_CHARGE_S:
+        ledger_append(f"{rec['stage']}:uncharged_gpu_time", charge_s / 60.0, cfg,
+                      kind=("interrupted_session" if reason != "normal"
+                            else "session_remainder"),
+                      run_id=rec.get("run_id"),
+                      started_at=rec.get("opened_at_utc"),
+                      manifest=manifest,
+                      work={"unit": "seconds", "count": round(charge_s, 1),
+                            "journal_id": journal_id, "reason": reason,
+                            "observed_s": round(observed, 1),
+                            "already_charged_s": round(already, 1)})
+        charged = charge_s
+    return _journal_append(
+        {"event": "close", "journal_id": journal_id, "stage": rec["stage"],
+         "at_utc": now_utc(), "at_epoch": round(now, 3), "reason": reason,
+         "observed_s": round(observed, 1), "already_charged_s": round(already, 1),
+         "charged_s": round(charged, 1),
+         # Wall time this close could not attest and therefore did not charge
+         # (zero for a normal close). It is RECORDED rather than dropped, because
+         # an undercount is the permissive direction for a hard ceiling and must be
+         # visible to a reader rather than inferred.
+         "unobserved_s": round(max(0.0, now - end), 1)}, cfg)
+
+
+def reconcile_open_sessions(cfg: dict | None = None) -> list[dict]:
+    """Charge and close every open session whose process is gone. -> closes.
+
+    Called by `ledger_guard`, so the ledger total a stage checks itself against
+    already includes the time a killed predecessor really spent. A session whose
+    process is STILL LIVE is left alone: it is a stage in progress, and charging
+    it now would double-charge it at its own close.
+
+    Read-then-append is not atomic, so two processes reconciling the SAME dead
+    session concurrently could charge it twice. That is not a race the chain can
+    reach: it runs ONE GPU process at a time by design, and the only opener is the
+    driver itself. A future concurrent opener would need a lock here.
+    """
+    cfg = cfg or load_config()
+    closed = []
+    for state in open_sessions(cfg):
+        rec = state["open"]
+        live, _why = process_is_current(rec)
+        if live:
+            continue  # a stage in progress; it charges itself at its own close
+        closed.append(journal_close(rec["journal_id"], cfg, reason="interrupted"))
+    return closed
+
+
+# --------------------------------------------------------------------------
+# the committed budget projection (produced by the calibration stage)
+# --------------------------------------------------------------------------
+#
+# SEAM. This module READS the commitment artifact and never writes one: the
+# calibration stage owns its production, its timing strata, its concurrency rule
+# and its projection arithmetic. What lives here is the one thing the ledger
+# guard needs -- "how many minutes does the COMPLETE REMAINING STAGE cost" --
+# because the guard's old question ("does this one invocation's nominal budget
+# fit?") is answerable with a yes right up to the moment the ceiling is crossed
+# mid-stage.
+
+BUDGET_COMMITMENT_NAME = "budget_commitment.json"
+BUDGET_COMMITMENT_SCHEMA = "budget_commitment/v1"
+
+
+def budget_commitment_path(cfg: dict | None = None) -> pathlib.Path:
+    return ledger_path(cfg).with_name(BUDGET_COMMITMENT_NAME)
+
+
+def read_budget_commitment(cfg: dict | None = None, *,
+                           run_id: str | None = None) -> dict | None:
+    """The committed projection, or None when calibration has not run yet.
+
+    Absent is a legitimate PRE-calibration state and returns None. Present but
+    unreadable, wrongly schema'd or belonging to another run is fatal: a
+    commitment nobody can parse is worse than none, because a stage would silently
+    fall back to the weak per-invocation check while the operator believes the
+    calibrated one is in force.
+    """
+    cfg = cfg or load_config()
+    p = budget_commitment_path(cfg)
+    if not p.exists():
+        return None
+    try:
+        rec = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SystemExit(f"REFUSED: the budget commitment {p} is unreadable "
+                         f"({exc}). A GPU stage may not fall back to a nominal "
+                         f"per-invocation budget while a commitment exists.")
+    if not isinstance(rec, dict) or rec.get("schema") != BUDGET_COMMITMENT_SCHEMA:
+        raise SystemExit(f"REFUSED: {p} is not a {BUDGET_COMMITMENT_SCHEMA} "
+                         f"document (schema={rec.get('schema')!r} if any).")
+    table = rec.get("remaining_minutes_by_stage")
+    if not isinstance(table, dict) or not table:
+        raise SystemExit(f"REFUSED: {p} carries no remaining_minutes_by_stage "
+                         f"table, so it commits nothing a stage can be checked "
+                         f"against.")
+    want = run_id or DEFAULT_RUN_ID
+    if rec.get("run_id") and want and rec["run_id"] != want:
+        raise SystemExit(f"REFUSED: the budget commitment {p} belongs to run_id "
+                         f"{rec['run_id']!r} and this stage is {want!r}. A "
+                         f"projection made for another run commits nothing here.")
+    return rec
+
+
+def stage_remaining_minutes(stage: str, cfg: dict | None = None, *,
+                            run_id: str | None = None) -> tuple[float | None, str]:
+    """(minutes, source) for the COMPLETE remaining stage, from the commitment.
+
+    `stage` may be a unit-qualified name (`eval:BP.clean.none`); the lookup falls
+    back to the stage prefix, which is how a per-shard evaluator invocation ends
+    up checked against the whole remaining evaluation.
+    """
+    rec = read_budget_commitment(cfg, run_id=run_id)
+    if not rec:
+        return None, "no_commitment"
+    table = rec["remaining_minutes_by_stage"]
+    for key in (stage, stage.split(":")[0], stage.split(":")[0].split(".")[0]):
+        if key in table:
+            return float(table[key]), f"budget_commitment[{key}]"
+    return None, "commitment_has_no_row_for_this_stage"
+
+
+def ledger_guard(stage: str, projected_minutes: float, cfg: dict | None = None, *,
+                 remaining_minutes: float | None = None,
+                 run_id: str | None = None,
+                 reconcile: bool = True) -> dict:
+    """Refuse to START GPU work whose REMAINING STAGE would cross the ceiling.
+
+    Two defects closed here.
+
+    (1) The guard used to check only the CURRENT INVOCATION's nominal budget --
+        `--time-budget-s 360` is six minutes, so an evaluation with forty hours of
+        work left passed the guard forty hours in a row and crossed the ceiling
+        mid-stage. The projection is now the largest of: this invocation's nominal
+        budget, an explicit caller-supplied remaining-stage projection, and the
+        CALIBRATED remaining-stage minutes from the committed budget projection.
+        Taking the maximum can only ever refuse EARLIER, never later.
+
+    (2) Interrupted GPU time was invisible. Every guard call first reconciles the
+        session journal, so a killed predecessor's real occupancy is charged
+        before this stage's arithmetic runs.
+
+    Returns the arithmetic it used, so a caller (and a test) can see WHICH
+    projection governed rather than inferring it.
+    """
+    cfg = cfg or load_config()
+    if reconcile:
+        reconcile_open_sessions(cfg)
     ceiling = float(cfg["budget"]["gpu_hours_ceiling"])
-    projected = ledger_hours(cfg) + projected_minutes / 60.0
+    used_h = ledger_hours(cfg)
+    sources = [("invocation_nominal", float(projected_minutes))]
+    if remaining_minutes is not None:
+        sources.append(("caller_remaining_stage", float(remaining_minutes)))
+    committed, source = stage_remaining_minutes(stage, cfg, run_id=run_id)
+    if committed is not None:
+        sources.append((source, committed))
+    label, minutes = max(sources, key=lambda kv: kv[1])
+    projected = used_h + minutes / 60.0
+    decision = {"stage": stage, "used_h": round(used_h, 4),
+                "projection_minutes": round(minutes, 2),
+                "projection_source": label, "projected_h": round(projected, 4),
+                "ceiling_h": ceiling,
+                "calibrated": label.startswith("budget_commitment")}
     if projected > ceiling:
         raise SystemExit(
-            f"BUDGET: {stage} projects {projected:.1f} GPU-hours against the "
-            f"{ceiling:.0f}h ceiling; stopping before touching the card.")
+            f"BUDGET: {stage} projects {projected:.2f} GPU-hours "
+            f"({used_h:.2f} h already measured + {minutes:.1f} min from "
+            f"{label}) against the {ceiling:.0f}h ceiling; stopping before "
+            f"touching the card. Mandatory samples may not shrink: if the "
+            f"remaining mandatory work does not fit, the run reports INCOMPLETE "
+            f"/ INCONCLUSIVE.")
+    if not decision["calibrated"]:
+        # Said out loud, every time: this is the WEAK check. It is a per-
+        # invocation or caller-declared figure, not the registered calibrated
+        # projection, and it must never read as one in a log.
+        print(f"    ledger guard: {stage} -- {used_h:.2f} h used, "
+              f"{minutes:.1f} min projected from {label} (NOT a calibrated "
+              f"remaining-stage projection; {source})", file=sys.stderr)
+    return decision

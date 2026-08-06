@@ -235,6 +235,11 @@ def test_the_http_evaluator_disables_thinking_in_every_request(monkeypatch):
     seen = {}
 
     class _Resp:
+        # The backend now classifies the response itself instead of delegating to
+        # raise_for_status, because an HTTPError one frame up was indistinguishable
+        # from a parse failure and became a scored `parser_budget` episode.
+        status_code = 200
+
         def raise_for_status(self):
             return None
 
@@ -679,11 +684,16 @@ def test_one_engine_per_stage_not_one_per_shard():
 
 
 def test_the_eval_stage_runs_the_registered_mandatory_census():
-    """MT and H8 were registered and never invoked; the controls used core specs."""
-    r = subprocess.run(["bash", "-c",
-                        f'source <(sed -n "/^eval_units()/,/^}}/p" {CHAIN}); '
-                        f'PY={REPO}/.venv/bin/python; eval_units'],
-                       cwd=REPO, capture_output=True, text=True, timeout=120,
+    """MT and H8 were registered and never invoked; the controls used core specs.
+
+    The driver publishes its own schedule (`--print-units`) and its own episode
+    arithmetic (`--print-census`), so this reads the real table rather than a
+    reconstruction. Each unit is now (arm, manifest, specs, condition, control,
+    mandatory, BLOCK, NBLOCKS): the mandatory census is unchanged at 7,800 and the
+    blocks partition each manifest rather than adding to it.
+    """
+    r = subprocess.run(["bash", str(CHAIN), "--print-units"],
+                       cwd=REPO, capture_output=True, text=True, timeout=180,
                        env=dict(os.environ, PYTHONPATH="src",
                                 CUDA_VISIBLE_DEVICES=""))
     assert r.returncode == 0, r.stderr
@@ -691,9 +701,12 @@ def test_the_eval_stage_runs_the_registered_mandatory_census():
     cfg = configio.load_config()
     sizes = {m["name"]: m["tasks"] for m in cfg["eval"]["manifests"]}
     mandatory = [u for u in units if u[5] == "True"]
-    episodes = sum(sizes[u[1]] for u in mandatory)
+    # one entry per (arm, manifest, condition, control): the blocks of a unit are
+    # a partition of its tasks, so a per-block sum would count every task twice
+    seen = {(u[0], u[1], u[3], u[4]) for u in mandatory}
+    episodes = sum(sizes[name] for _arm, name, _c, _ct in seen)
     assert episodes == cfg["eval"]["mandatory_episodes"] == 7800
-    names = {(u[0], u[1], u[3], u[4]) for u in mandatory}
+    names = seen
     for arm in ("BP", "TP"):
         assert (arm, "core", "clean", "none") in names
         assert (arm, "core", "faulted", "none") in names
@@ -702,7 +715,7 @@ def test_the_eval_stage_runs_the_registered_mandatory_census():
         assert (arm, "absent", "clean", "redacted") in names
         assert (arm, "perm", "clean", "permuted") in names
     # the controls run against their OWN manifests, not the core one
-    for arm, name, specs, condition, control, _m in units:
+    for arm, name, specs, condition, control, _m, _b, _n in units:
         if control == "redacted":
             assert specs == "eval_absent.jsonl"
         if control == "permuted":
@@ -713,6 +726,16 @@ def test_the_eval_stage_runs_the_registered_mandatory_census():
     last_mandatory = max(i for i, u in enumerate(units) if u[5] == "True")
     first_descriptive = min(i for i, u in enumerate(units) if u[0] in ("B0", "T0"))
     assert first_descriptive > last_mandatory
+    # and the driver's own census is the registered one (the 1,400-episode
+    # descriptive drift; tests/test_transport_and_budget_integrity.py owns the
+    # full reconciliation against the preregistration)
+    c = subprocess.run(["bash", str(CHAIN), "--print-census"], cwd=REPO,
+                       capture_output=True, text=True, timeout=180,
+                       env=dict(os.environ, PYTHONPATH="src",
+                                CUDA_VISIBLE_DEVICES=""))
+    assert c.returncode == 0, c.stderr
+    census = json.loads(c.stdout.strip().splitlines()[-1])
+    assert census["mandatory"] == 7800 and census["total"] == 15320
 
 
 def test_the_lock_stage_requires_the_grpo_disposition_and_names_rs_sft():

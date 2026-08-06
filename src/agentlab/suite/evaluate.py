@@ -1,10 +1,21 @@
 """Paired agentic evaluation against a vLLM OpenAI server.
 
-One invocation runs ONE arm over a shard of the committed spec manifest and
-appends full JSONL traces; it is resumable (already-traced task IDs are
-skipped) and self-limiting (--time-budget-s, default 420 s, keeps every
-invocation under the 8-minute ceiling). Loop invocations until the shard
-reports complete.
+One invocation runs ONE arm over a shard (an immutable task BLOCK) of the
+committed spec manifest and appends full JSONL traces; it is resumable
+(already-traced task IDs are skipped) and self-limiting. Loop invocations until
+the shard reports complete.
+
+--time-budget-s IS A LAUNCH WINDOW, NOT A KILL SWITCH. It stops launching new
+episodes; every episode already in flight is drained and written. A budget that
+killed an active episode would discard GPU seconds the ledger has already
+charged, and would leave the shard's remaining count lying about what ran.
+
+TRANSPORT DEATH IS NOT AN EPISODE OUTCOME. A dead, unreachable or wrong-model
+server aborts the shard nonzero and writes NO row for the affected episodes; it
+is never committed as a scored `parser_budget` failure. See `TransportFailure`
+-- that conversion was the single most dangerous defect in this file, because it
+would have entered infrastructure failures into the arm's denominators and then
+marked them done for resume.
 
 Arms (identical specs, budgets, schemas, decoding, seeds across arms):
 
@@ -65,10 +76,63 @@ ARMS = ("B0", "BP", "T0", "TP", "R0", "RP")
 CONDITIONS = ("clean", "faulted", "stress")
 CONTROLS = ("none", "redacted", "permuted")
 
+# The registered control seeds, named once. The permutation seed decides WHICH
+# specs survive `apply_control` (permutation is only defined for eligible terminal
+# lookups), so a census validator that used a different one would compute a
+# different expected cardinality from the run it is checking.
+DEFAULT_PERMUTATION_SEED = 0xA61E0008
+DEFAULT_FAULT_SEED = 0xA61E0007
+
 
 def budgets_for(horizon: int, condition: str) -> dict:
     """The registered budgets. ONE definition, in `suite.contract`."""
     return contract.budgets_for(horizon, condition)
+
+
+# ---------------------------------------------------------------------------
+# transport integrity: the engine dying is not something the MODEL did
+# ---------------------------------------------------------------------------
+
+class TransportFailure(RuntimeError):
+    """The server/transport failed. This is NEVER an episode outcome.
+
+    THE DANGEROUS SEAM THIS CLOSES. Every exception out of the chat backend used
+    to be caught inside the episode loop and committed as
+    `termination_reason: "parser_budget"` -- a SCORED row, in the denominator,
+    counted against the arm, and (worse) marked done for resume. So if the vLLM
+    server died mid-shard, the shard did not stop: it kept going, wrote hundreds
+    of `parser_budget` rows attributed to the policy, exited 0, and a later resume
+    SKIPPED every one of those task ids because their ids were already present.
+    An unreachable engine would have been reported as a model that stopped
+    committing answers -- and F5 (loop/crash < 0.02) would have failed the arm for
+    the harness's own infrastructure.
+
+    The two classes are now distinguished at the source:
+
+      TransportFailure   the server is unreachable, dead, returned a non-2xx
+                         status, or answered something that is not an
+                         OpenAI-shaped completion. INFRASTRUCTURE. It aborts the
+                         shard loudly and writes NO row for the affected episode,
+                         so a resumed shard re-runs exactly those task ids.
+      anything else      a genuine client-side PARSE failure over a well-formed
+                         HTTP response. That is model-visible behaviour, it keeps
+                         its `parser_budget` termination, and it stays in the
+                         denominators exactly as registered.
+
+    `kind` records which signal fired, so the abort message can tell an operator
+    "the server is gone" apart from "the server answered 500".
+    """
+
+    def __init__(self, message: str, *, kind: str, status: int | None = None,
+                 task_id: str | None = None):
+        super().__init__(message)
+        self.kind = kind
+        self.status = status
+        self.task_id = task_id
+
+    def to_row(self) -> dict:
+        return {"kind": self.kind, "status": self.status,
+                "task_id": self.task_id, "detail": str(self)}
 
 
 # ---------------------------------------------------------------------------
@@ -143,9 +207,37 @@ def make_http_chat(server: str, model: str, decode: dict, timeout_s: float = 300
                    "seed": decode["seed"], "max_tokens": decode["max_tokens"],
                    "chat_template_kwargs": {
                        "enable_thinking": bool(decode["enable_thinking"])}}
-        resp = requests.post(url, json=payload, timeout=timeout_s)
-        resp.raise_for_status()
-        msg = resp.json()["choices"][0]["message"]
+        # Every failure below is the ENGINE's, not the policy's, so each one is
+        # raised as TransportFailure and none of them can become a scored row.
+        # `raise_for_status` used to be the only check and its HTTPError was
+        # indistinguishable, one frame up, from a parse failure.
+        try:
+            resp = requests.post(url, json=payload, timeout=timeout_s)
+        except Exception as exc:  # ConnectionError, Timeout, ChunkedEncoding...
+            raise TransportFailure(
+                f"the vLLM server at {server} did not answer "
+                f"({type(exc).__name__}: {exc})",
+                kind="unreachable") from exc
+        if resp.status_code != 200:
+            raise TransportFailure(
+                f"the vLLM server at {server} answered HTTP "
+                f"{resp.status_code}: {resp.text[:400]!r}",
+                kind="http_status", status=resp.status_code)
+        try:
+            body = resp.json()
+        except Exception as exc:
+            raise TransportFailure(
+                f"the vLLM server at {server} answered 200 with a body that is "
+                f"not JSON ({type(exc).__name__}): {resp.text[:400]!r}",
+                kind="malformed_response") from exc
+        try:
+            msg = body["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise TransportFailure(
+                f"the vLLM server at {server} answered 200 with no "
+                f"choices[0].message ({type(exc).__name__}): "
+                f"{json.dumps(body)[:400]}",
+                kind="malformed_response") from exc
         calls = []
         for tc in msg.get("tool_calls") or []:
             fn = tc.get("function", {})
@@ -161,6 +253,58 @@ def make_http_chat(server: str, model: str, decode: dict, timeout_s: float = 300
         return {"content": content, "tool_calls": calls}
 
     return chat_fn
+
+
+def probe_server(server: str, model: str | None = None,
+                 timeout_s: float = 30.0) -> dict:
+    """Is an engine actually serving `model` right now? Never raises.
+
+    A pure read of /v1/models. It is the cheapest possible way to tell "the
+    server is gone" from "the model stopped answering", and it runs BEFORE the
+    first episode and again at an abort, so the operator is told which one
+    happened rather than left to infer it from a wall of `parser_budget` rows.
+    """
+    import requests
+
+    url = server.rstrip("/") + "/v1/models"
+    try:
+        resp = requests.get(url, timeout=timeout_s)
+    except Exception as exc:
+        return {"ok": False, "kind": "unreachable", "served": [],
+                "reason": f"{url} did not answer ({type(exc).__name__}: {exc})"}
+    if resp.status_code != 200:
+        return {"ok": False, "kind": "http_status", "served": [],
+                "reason": f"{url} answered HTTP {resp.status_code}"}
+    try:
+        served = [str(m.get("id")) for m in (resp.json().get("data") or [])]
+    except Exception as exc:
+        return {"ok": False, "kind": "malformed_response", "served": [],
+                "reason": f"{url} answered 200 with an unreadable body ({exc})"}
+    if model is not None and served and model not in served:
+        return {"ok": False, "kind": "model_absent", "served": served,
+                "reason": (f"{url} is up but serves {served!r}; this shard "
+                           f"requests {model!r}")}
+    return {"ok": True, "kind": "live", "served": served, "reason": "live"}
+
+
+def require_live_server(server: str, model: str, what: str) -> dict:
+    """No live engine, no episodes. Refuses BEFORE the trace file is opened.
+
+    A dead server used to be discovered one episode at a time, and each discovery
+    wrote a scored failure. Discovering it once, before anything is written, is
+    the whole difference between an aborted shard and a corrupted arm.
+    """
+    probe = probe_server(server, model)
+    if not probe["ok"]:
+        raise SystemExit(
+            f"REFUSED: no live engine for {what}.\n"
+            f"  {probe['reason']}\n"
+            f"  This is INFRASTRUCTURE, not model behaviour: an unreachable or "
+            f"wrongly-loaded server may not produce a single scored episode. "
+            f"Start the server through scripts/serve.sh (the chain does this) and "
+            f"re-run the shard -- resume re-runs exactly the task ids that have "
+            f"no row.")
+    return probe
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +364,14 @@ def run_episode(spec: dict, *, arm: str, condition: str, control: str,
             break
         try:
             out = chat_fn(messages, schemas)
-        except Exception as exc:  # server/parse failure stays in denominators
+        except TransportFailure as exc:
+            # THE ENGINE, NOT THE POLICY. No row is written for this episode at
+            # all: it is not a `parser_budget` failure, it is not in any
+            # denominator, and resume must re-run this exact task id. run_shard
+            # turns this into a loud shard abort.
+            exc.task_id = spec.get("task_id")
+            raise
+        except Exception as exc:  # a real PARSE failure stays in denominators
             termination = "parser_budget"
             messages.append({"role": "assistant", "content": f"[harness error: {exc}]"})
             break
@@ -402,6 +553,93 @@ def done_task_ids(out_path: pathlib.Path) -> set:
             if contract.is_current(r)}
 
 
+def unit_census(units, certspecs_dir, traces_dir) -> list[dict]:
+    """Expected versus WRITTEN episodes for each scheduled evaluation unit.
+
+    COMPLETION IS A CENSUS, NOT A FILE. Several registered manifests share one
+    `{arm}.{condition}.{control}.jsonl` trace file -- core, MT and H8 are all
+    clean/none -- so the existence of that file says nothing about whether a
+    manifest ran at all. MT and H8 were preregistered and never invoked once
+    already, and a shared file is exactly what hid it.
+
+    Attribution is by TASK ID, because the manifests are disjoint sets of task ids
+    and a row names its own task. The expected set is the CONTROLLED set: the
+    redacted control drops specs whose hidden value cannot be withheld, so the raw
+    manifest size would be the wrong denominator.
+
+    `units` is (arm, manifest_name, specs_file, condition, control, mandatory).
+    """
+    certspecs_dir = pathlib.Path(certspecs_dir)
+    traces_dir = pathlib.Path(traces_dir)
+    rows = []
+    for arm, name, specs, condition, control, mandatory in units:
+        path = traces_dir / f"{arm}.{condition}.{control}.jsonl"
+        row = {"arm": arm, "manifest": name, "specs": specs,
+               "condition": condition, "control": control,
+               "mandatory": bool(mandatory), "trace": str(path),
+               "expected": 0, "written": 0, "missing": 0,
+               "dropped_by_control": 0, "status": "complete"}
+        manifest = certspecs_dir / specs
+        if not manifest.exists():
+            row.update(status="no_manifest")
+            rows.append(row)
+            continue
+        raw = load_specs(manifest)
+        wanted = apply_control(raw, control, DEFAULT_PERMUTATION_SEED)
+        want_ids = {s["task_id"] for s in wanted}
+        have = {r.get("task_id") for r in existing_rows(path)
+                if contract.is_current(r)}
+        missing = want_ids - have
+        row.update(expected=len(want_ids), written=len(want_ids) - len(missing),
+                   missing=len(missing),
+                   # How many committed specs the CONTROL removed. Zero for the
+                   # ordinary manifests and for the absent-information control
+                   # (a committed redacted row is redactable by construction). A
+                   # non-zero count on a registered control means the control's
+                   # registered cardinality is not reachable from the committed
+                   # specs -- reported, because it is the suite generator's
+                   # contract and not something an evaluator may quietly absorb.
+                   dropped_by_control=max(0, len(raw) - len(want_ids)),
+                   status="complete" if not missing else "short")
+        rows.append(row)
+    return rows
+
+
+def format_census(rows: list[dict]) -> str:
+    out = []
+    for r in rows:
+        drop = (f"  ({r['dropped_by_control']} dropped by the control)"
+                if r["dropped_by_control"] else "")
+        out.append(f"    {r['arm']:<3} {r['manifest']:<7} {r['condition']:<8} "
+                   f"{r['control']:<9} {r['written']:>5}/{r['expected']:<5} "
+                   f"{'MANDATORY' if r['mandatory'] else 'optional':<9} "
+                   f"{r['status']}{drop}")
+    return "\n".join(out)
+
+
+def require_mandatory_census(rows: list[dict]) -> list[dict]:
+    """No partial MANDATORY census may pass as the registered evaluation.
+
+    Optional units (cut ranks 3 and 4) may legitimately be absent or incomplete --
+    they are budget-conditional by registration. A short mandatory unit is a
+    different thing entirely: mandatory samples may never shrink, so the run
+    reports INCOMPLETE / INCONCLUSIVE rather than presenting what it has.
+    """
+    bad = [r for r in rows if r["mandatory"] and r["status"] != "complete"]
+    if bad:
+        lines = "\n".join(
+            f"    {r['arm']} {r['manifest']} {r['condition']}/{r['control']}: "
+            f"{r['status']} ({r['written']}/{r['expected']} written)" for r in bad)
+        raise SystemExit(
+            "REFUSED: the MANDATORY census is incomplete, so this is not the "
+            "registered evaluation:\n" + lines + "\n"
+            "  Mandatory samples may never shrink and a partial mandatory census "
+            "may never be reported as the registered one. Re-invoke the eval stage "
+            "(it resumes exactly the missing task ids); if it cannot finish inside "
+            "the ceiling, report INCOMPLETE / INCONCLUSIVE.")
+    return [r for r in rows if r["status"] != "complete"]
+
+
 def refuse_stale_environment_rows(out_path: pathlib.Path) -> None:
     """A run may not APPEND to a trace file produced under another environment.
 
@@ -555,11 +793,19 @@ def run_shard(args, chat_fn=None, cfg: dict | None = None) -> dict:
     # which directory to quarantine.
     refuse_stale_environment_rows(out_path)
     # The evaluator READS the ledger and refuses to start work that would cross the
-    # ceiling. It does not APPEND: the driver charges the whole server-resident
-    # interval -- startup, every client shard and the idle gaps -- exactly once, and
-    # a per-shard row would double-charge the same seconds.
+    # ceiling. It does not charge ITSELF: the driver charges the whole
+    # server-resident interval -- startup, every client shard and the idle gaps --
+    # exactly once, and a per-shard row would double-charge the same seconds. (The
+    # guard may still charge a DEAD predecessor's abandoned session journal; that is
+    # time already spent by another process, and the alternative is losing it.)
+    #
+    # The stage name is `eval:<unit>` on purpose: `ledger_guard` resolves the
+    # COMPLETE REMAINING STAGE from the committed budget projection under the
+    # `eval` key, so this call is no longer a check on one 360-second launch
+    # window pretending to be a budget check.
     configio.ledger_guard(f"eval:{args.arm}.{args.condition}.{args.control}",
-                          float(args.time_budget_s) / 60.0, cfg)
+                          float(args.time_budget_s) / 60.0, cfg,
+                          run_id=args.run_id)
     # -------------------------------------------------------------------------
 
     specs = load_specs(args.specs)
@@ -583,6 +829,11 @@ def run_shard(args, chat_fn=None, cfg: dict | None = None) -> dict:
 
     done = done_task_ids(out_path)
     todo = [s for s in specs if s["task_id"] not in done]
+    # --limit is a SMOKE-TEST knob (the shipping smoke runs eight dev episodes), and
+    # it must not be able to say "complete". `remaining` was computed against the
+    # LIMITED list, so a limited invocation reported complete:true with the rest of
+    # the shard untouched -- and the driver's loop would have believed it.
+    pending_in_shard = len(todo)
     if args.limit:
         todo = todo[: args.limit]
 
@@ -603,12 +854,20 @@ def run_shard(args, chat_fn=None, cfg: dict | None = None) -> dict:
                     producer_stage=manifest["stage"],
                     adapter_sha256=manifest.get("adapter_sha256"),
                     client_git_sha=configio.git_sha())
+    unit = f"{args.arm}/{args.condition}/{args.control} shard {args.shard}"
     if chat_fn is None:
+        # A dead engine is discovered ONCE, here, before the trace file is opened
+        # -- not one scored `parser_budget` row at a time.
+        require_live_server(args.server, served_model, unit)
         chat_fn = make_http_chat(args.server, served_model, decode)
 
     t0 = time.monotonic()
     lock = threading.Lock()
     written = 0
+    # Infrastructure failures collected during this shard. The FIRST one stops
+    # new launches; the shard then drains what is already in flight and aborts
+    # nonzero without writing a row for any affected episode.
+    transport: list[TransportFailure] = []
 
     def work(spec):
         return run_episode(spec, arm=args.arm, condition=args.condition,
@@ -617,13 +876,22 @@ def run_shard(args, chat_fn=None, cfg: dict | None = None) -> dict:
                            prompt_meta=prompt_meta, chat_fn=chat_fn, decode=decode,
                            run_meta=run_meta, wall_limit_s=args.episode_wall_s)
 
+    # Whether this invocation is the one that CREATES the trace file decides
+    # whether it may remove it again: an aborted or empty invocation must leave
+    # nothing behind that looks like "this arm ran and produced no successes".
+    created_trace_file = not out_path.exists()
     with out_path.open("a", encoding="utf-8") as fh, \
             concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         pending = {}
         it = iter(todo)
         exhausted = False
         while pending or not exhausted:
-            while (not exhausted and len(pending) < args.concurrency
+            # --time-budget-s is a LAUNCH WINDOW. It closes the gate on new
+            # episodes and never touches one that is already running: everything
+            # in flight is drained below and written. A budget that killed an
+            # active shard would throw away GPU seconds the ledger has charged.
+            while (not exhausted and not transport
+                   and len(pending) < args.concurrency
                    and time.monotonic() - t0 < args.time_budget_s):
                 spec = next(it, None)
                 if spec is None:
@@ -631,7 +899,7 @@ def run_shard(args, chat_fn=None, cfg: dict | None = None) -> dict:
                     break
                 fut = pool.submit(work, spec)
                 pending[fut] = spec["task_id"]
-            if time.monotonic() - t0 >= args.time_budget_s:
+            if transport or time.monotonic() - t0 >= args.time_budget_s:
                 exhausted = True
             if not pending:
                 break
@@ -639,8 +907,16 @@ def run_shard(args, chat_fn=None, cfg: dict | None = None) -> dict:
                 list(pending), timeout=5.0,
                 return_when=concurrent.futures.FIRST_COMPLETED)
             for fut in done_futs:
-                pending.pop(fut)
-                trace = fut.result()
+                task_id = pending.pop(fut)
+                try:
+                    trace = fut.result()
+                except TransportFailure as exc:
+                    # NO ROW. Not a scored failure, not in a denominator, not
+                    # marked done for resume. The shard stops launching and
+                    # aborts below.
+                    exc.task_id = exc.task_id or task_id
+                    transport.append(exc)
+                    continue
                 # The last line of defence, at the write itself: a row whose
                 # provenance is not whole is not serialized at all. The gate above
                 # already refused an unattested run, so reaching this is a bug --
@@ -653,10 +929,53 @@ def run_shard(args, chat_fn=None, cfg: dict | None = None) -> dict:
                     fh.flush()
                     written += 1
 
-    remaining = len(todo) - written
+    if created_trace_file and out_path.exists() and not out_path.stat().st_size:
+        out_path.unlink()          # an empty trace file is not evidence of an arm
+
+    if transport:
+        health = probe_server(args.server, served_model)
+        # The infrastructure failure is EVIDENCE and is recorded -- but never as an
+        # episode. It goes to a `.transport.log` (not `.jsonl`), because every
+        # consumer of this directory globs `*.jsonl`, and an infrastructure record
+        # inside the trace corpus is exactly the confusion this whole change
+        # removes.
+        log_path = out_dir / f"{args.arm}.{args.condition}.{args.control}.transport.log"
+        with log_path.open("a", encoding="utf-8") as lf:
+            for exc in transport:
+                lf.write(json.dumps(
+                    dict(exc.to_row(), kind_of_record="transport_failure",
+                         at_utc=configio.now_utc(), shard=args.shard,
+                         num_shards=args.num_shards, server=args.server,
+                         served_model=served_model,
+                         session_id=manifest["session_id"],
+                         server_health_at_abort=health["kind"]),
+                    ensure_ascii=False) + "\n")
+        raise SystemExit(
+            f"ABORTED (infrastructure): {unit} hit "
+            f"{len(transport)} transport failure(s) against "
+            f"{args.server}.\n"
+            f"  first: [{transport[0].kind}] {transport[0]}\n"
+            f"  server now: {health['kind']} -- {health['reason']}\n"
+            f"  affected task ids (NO row written for any of them): "
+            f"{', '.join(sorted(t.task_id or '?' for t in transport)[:12])}"
+            f"{' ...' if len(transport) > 12 else ''}\n"
+            f"  {written} episode(s) completed against a healthy engine and were "
+            f"written to {out_path}; they keep their rows.\n"
+            f"  the infrastructure failures are recorded as evidence in "
+            f"{log_path} -- NOT as episodes\n"
+            f"  A dead or unreachable engine is NOT model behaviour. It is never "
+            f"committed as a `parser_budget` episode, so nothing here is in any "
+            f"denominator and resume will re-run exactly the affected ids. Fix "
+            f"the server (see the serve log), confirm the card is still bound to "
+            f"this run, and re-invoke the shard.")
+
+    # The remainder of the SHARD, not of the limited slice: `complete` means the
+    # block this invocation was given has no untraced task left.
+    remaining = pending_in_shard - written
     status = {"arm": args.arm, "condition": args.condition, "control": args.control,
               "shard": args.shard, "num_shards": args.num_shards,
               "written": written, "remaining_in_shard": max(0, remaining),
+              "limit": int(args.limit or 0),
               "complete": remaining <= 0, "out": str(out_path),
               "served_model": served_model,
               "enable_thinking_effective": decode["enable_thinking"],
@@ -714,8 +1033,9 @@ def main() -> None:
                     default=int(_dec.get("max_tokens_per_decision", 1024)))
     ap.add_argument("--decode-seed", type=int,
                     default=int(_dec.get("seed", 0xA61E0009)))
-    ap.add_argument("--fault-seed", type=int, default=0xA61E0007)
-    ap.add_argument("--permutation-seed", type=int, default=0xA61E0008)
+    ap.add_argument("--fault-seed", type=int, default=DEFAULT_FAULT_SEED)
+    ap.add_argument("--permutation-seed", type=int,
+                    default=DEFAULT_PERMUTATION_SEED)
     args = ap.parse_args()
     run_shard(args)
 
