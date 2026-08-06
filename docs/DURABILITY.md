@@ -88,15 +88,26 @@ anything on a running stage's import path.
 ### Stage boundaries
 
 Groups that are not yet complete are declared but **not** swept by a bare
-`upload`. Run them at the boundary named in the group table:
+`upload`. `scripts/hf_artifacts.py plan --all-groups` prints the whole group
+table with the run scope and boundary each one names. Run them at that boundary:
 
     scripts/hf_artifacts.py upload --group rs_raw --group accepted_corpus   # after distill
     scripts/hf_artifacts.py upload --group sft_views                        # after views
     scripts/hf_artifacts.py upload --group adapter                          # after SFT, before L
+    scripts/hf_artifacts.py upload --group grpo_adapter                     # if that leg is admitted
     scripts/hf_artifacts.py upload --group traces                           # after eval
+    scripts/hf_artifacts.py upload --group ship_smoke                       # after ship
 
-A re-run at the same boundary transfers nothing and leaves `ARTIFACTS.json`
-byte-identical, so the file is evidence rather than churn.
+The `adapter` group is the one that matters most: the `L` commit's checkpoint
+hash is taken over those bytes, and a reviewer without this disk cannot
+re-derive them. Its patterns — and every other group's — are pinned by a test
+that parses the chain's own path variables, because the first version of the
+table guessed three of them wrong and would have protected nothing while
+reporting success.
+
+A re-run at the same boundary transfers nothing and leaves the `files` array
+byte-identical, so the file is evidence rather than churn. The `skipped` array
+does move while a producer is live, which is the point of it.
 
 ### What it refuses, always
 
