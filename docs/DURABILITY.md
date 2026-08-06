@@ -1,0 +1,159 @@
+# Surviving host or disk loss
+
+Council round 6 rated three things P0 that this document answers (Auditor,
+"Outright blockers" 6 and 7; Architect, section 1):
+
+> Expensive raw shards, accepted corpus, SFT views, adapters, and manifests
+> under `out/` or `data/` are ignored. Git commits do not protect most GPU work.
+> Process crashes are handled, but host/disk loss is not.
+
+> The shared run secret is generated with `os.urandom(32)` and stored only under
+> ignored `out/`. A disk loss makes the run impossible to resume or
+> authenticate. A fresh clone gets different recovery tokens and receipts.
+
+Both are Evidence, not projection: `.gitignore` excludes `out/` and `data/*`,
+and `src/agentlab/suite/contract.py` writes the secret to
+`out/agentic/run_secret.hex` and nowhere else.
+
+## What git protects, and what it does not
+
+`git push` protects the code, the configuration, the preregistration, the suite
+seeds and manifests, the probe verdicts, the GPU ledger and the receipts under
+`results/`. It protects none of the following, all of which cost GPU hours:
+
+| Artifact | Where it lives | Ignored by |
+|---|---|---|
+| preflight evidence tree, canary LoRA | `out/preflight/**` | `out/` |
+| prompt-tournament rollouts | `out/multiface/prompt_tournament/**` | `out/` |
+| token census (original) | `out/agentic/token_census.json` | `out/` |
+| rejection-sampling shards | `data/multiface/raw/**` | `data/*` |
+| accepted corpus | `data/multiface/accepted.jsonl` | `data/*` |
+| SFT views | `out/multiface/views/**` | `out/` |
+| **the locked adapter** | `out/qwen35-4b-rssft-lora/**` | `out/` |
+| the run secret | `out/agentic/run_secret.hex` | `out/` |
+
+Atomic writes plus sealed shard receipts already make a *process* crash
+survivable. They do nothing about the loss of this disk.
+
+## The remote
+
+    hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1
+
+A **private** Hugging Face dataset repository, one per run. `ARTIFACTS.json` at
+the repository root is the committed index: per file, the repo-relative source
+path, the `hf://` URI, a second URI pinned to the dataset-repo commit that added
+the bytes, the byte size, the SHA-256, the producer receipt fields the artifact
+itself carries (`session_id`, `runtime_manifest_sha256`, `gpu_uuid`), and the
+run scope the artifact declares. A mutable URL is not a durable reference, which
+is why every entry also carries `remote_uri_pinned`.
+
+    scripts/hf_artifacts.py plan            # what would go, no network
+    scripts/hf_artifacts.py upload          # upload + index what exists now
+    scripts/hf_artifacts.py verify          # re-digest what the index claims
+
+The tool is deliberately not on any stage's import path and imports no
+`agentlab` module.
+
+### Running it while a producer is writing
+
+A digest of a file that is still being appended to is a lie, and an index entry
+built from one is worse than no entry: it points at bytes that have moved. So
+every candidate is digested twice before upload, uploaded, then digested a third
+time. A file whose digest moved at any point is **not recorded** — it goes to
+`skipped` with both digests and the reason, and the next run picks it up. The
+GPU ledger and session journal are appended to continuously during rejection
+sampling, so they are expected to land in `skipped` until the stage closes.
+
+Consequence: `hf_artifacts.py upload` is safe to run at any time, including
+while rejection sampling holds the A5000. It never starts a GPU process, never
+writes into an adapter tree (whose digest is a lock input), and never edits
+anything on a running stage's import path.
+
+### Stage boundaries
+
+Groups that are not yet complete are declared but **not** swept by a bare
+`upload`. Run them at the boundary named in the group table:
+
+    scripts/hf_artifacts.py upload --group rs_raw --group accepted_corpus   # after distill
+    scripts/hf_artifacts.py upload --group sft_views                        # after views
+    scripts/hf_artifacts.py upload --group adapter                          # after SFT, before L
+    scripts/hf_artifacts.py upload --group traces                           # after eval
+
+A re-run at the same boundary transfers nothing and leaves `ARTIFACTS.json`
+byte-identical, so the file is evidence rather than churn.
+
+### What it refuses, always
+
+- **The held-out release.** Refused on path shape (`heldout`, `held_out`,
+  `held-out`), not on a file list, so a future held-out artifact nobody thought
+  to enumerate is refused too. It does not exist before `R` and must never be
+  published by a bulk sweep.
+- **`results/agentic/locks.json` and `results/agentic/seed_reveal.json`.** The
+  S18 receipts. Each needs its own dedicated commit and its own deliberate
+  publication step; `P < L < R` is proved by git ancestry and a bulk artifact
+  sweep would destroy the point of it.
+- **The plaintext run secret.** See below.
+
+## The run secret: commitment now, reveal after the verdict
+
+The secret is 32 bytes from `os.urandom`, created once per run, and every
+recovery token the model sees and every receipt token is derived from it. Lose
+it and the receipts are unverifiable and the run unresumable. Silently
+substitute a new one and the model-visible environment has changed without a
+record.
+
+The ordering is fixed and each step is checkable by someone who does not trust
+us:
+
+1. **Commitment, before `L`.** `results/agentic/run_secret_commitment.json`
+   records `sha256(secret)`, `sha256(secret.hex file)` and a run-bound
+   commitment `sha256(domain ‖ 0 ‖ run_id ‖ 0 ‖ secret)` — **never the secret**.
+   It is written once and the tool refuses to overwrite it with a different
+   digest. Its git ancestry is the proof that the digest was fixed before any
+   result existed.
+
+       scripts/hf_artifacts.py commit-secret
+
+2. **Encrypted off-host backup, now.** `out/artifacts/run_secret.enc.json` is
+   an AES-256-GCM envelope (scrypt n=2^15, r=8, p=1; AAD binds the run id) and
+   is uploaded to the private repo like any other artifact and indexed in
+   `ARTIFACTS.json`. The envelope round-trips from disk before the tool claims a
+   backup exists.
+
+       scripts/hf_artifacts.py backup-secret
+       scripts/hf_artifacts.py upload --group run_secret_backup
+
+   The passphrase comes from `--passphrase-file`, from
+   `$AGENTLAB_ARTIFACT_PASSPHRASE`, or is generated and written mode-0600 to
+   `~/.config/agentlab/<run_id>.artifact-passphrase`. **A passphrase that lives
+   only on this disk does not survive the disk loss the backup exists to
+   survive** — it has to be copied to a password manager or another host. The
+   tool says so loudly; it cannot do it for you.
+
+3. **Reveal, after the verdict.** The plaintext secret is published as
+   `results/agentic/run_secret_reveal.json` once evaluation is complete, and
+   anyone recomputes the three digests in step 1 to confirm it is the secret the
+   pre-result commitment names. This is **not** the S18 held-out seed reveal
+   (`results/agentic/seed_reveal.json`), which is a different receipt with its
+   own dedicated commit.
+
+Publishing the secret before evaluation would let the model's recovery tokens be
+anticipated; committing only after evaluation would let the secret be chosen to
+fit the result. The commitment/reveal split is what removes both.
+
+## What this does not fix
+
+Deliberately out of scope here, and open in council round 6:
+
+- The base model is still named `Qwen/Qwen3.5-4B` with no Hub revision or weight
+  digest (Architect P0). Pinning it touches files a running stage imports.
+- `results/agentic/hardware.json` declares `run_id: dev-preflight-v1` while the
+  live run is `agentic-v1`; the index records what the file says rather than
+  papering over it.
+- The prompt-tournament rollout rows carry no provenance block at all, so their
+  producing GPU session cannot be established from the files themselves. The
+  index reports `"source": "unresolved"` rather than guessing from mtimes,
+  because attributing an artifact to whichever session happened to be open would
+  be an inference dressed up as a receipt.
+- The environment is not hash-locked (`uv.lock`, pinned Python patch), so these
+  bytes are reproducible-by-reference, not reproducible-by-rebuild.

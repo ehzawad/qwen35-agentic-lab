@@ -227,6 +227,27 @@ Three gotchas that will bite you, all found by running this stack:
 vLLM startup can sit for minutes at a few hundred MB of VRAM compiling CUDA
 graphs before allocating the KV cache. That is not a hang.
 
+## Durability: what git does not protect
+
+`.gitignore` excludes `out/` and `data/*`, which is where every GPU-hour of work
+lands — the preflight evidence tree, the prompt-tournament rollouts, the
+rejection-sampling shards, the accepted corpus, the SFT views, the adapter and
+the run secret. Atomic writes and sealed shard receipts already make a *process*
+crash survivable; they do nothing about losing this disk.
+
+[`scripts/hf_artifacts.py`](scripts/hf_artifacts.py) copies those bytes to a
+private, run-scoped Hugging Face dataset repository and commits `ARTIFACTS.json`
+as the in-tree index — per file, the source path, a commit-pinned `hf://` URI,
+the size, the SHA-256, and the producer receipt fields the artifact itself
+carries. It digests, uploads, then re-digests, and refuses to record a file whose
+digest moved, which is what makes it safe to run while a producer is appending.
+
+The 32-byte run secret gets a **hash commitment committed before `L`** and an
+encrypted off-host backup now; the plaintext is published only after the verdict
+and checked against that commitment. Ordering, refusals (the held-out release is
+never publishable) and what remains open are in
+[docs/DURABILITY.md](docs/DURABILITY.md).
+
 ## Provenance
 
 This repository previously hosted a single-family GSM8K tool-loop study,
