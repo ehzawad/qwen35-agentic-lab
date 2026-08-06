@@ -1,0 +1,153 @@
+{
+  "checks": [
+    {
+      "check": "evaluation_and_training_face_the_identical_environment",
+      "detail": "18 episode pairs, 8 surfaces each (envelope bytes, full event ledger, token arguments, verdict, budgets, progress, episode digest, rendered prefix token ids)",
+      "pass": true
+    },
+    {
+      "check": "no_spec_errors_on_the_evaluation_path",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "the_certifier_agrees_with_the_verdict_everywhere",
+      "detail": "",
+      "pass": false
+    },
+    {
+      "check": "one_success_predicate",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "clean_episodes_schedule_no_fault",
+      "detail": "6 episodes",
+      "pass": true
+    },
+    {
+      "check": "every_scheduled_fault_fires_exactly_once",
+      "detail": "12 faulted episodes",
+      "pass": true
+    },
+    {
+      "check": "registered_remediation_is_certified",
+      "detail": "6 episodes, classes ['malformed', 'rate_limit', 'transient', 'wrong_unit']",
+      "pass": true
+    },
+    {
+      "check": "BARE_RETRIES_ARE_NEVER_CERTIFIED",
+      "detail": "{\"malformed\": [\"blind_retry\", \"blind_retry\"], \"rate_limit\": [\"blind_retry\", \"blind_retry\"], \"transient\": [\"blind_retry\", \"blind_retry\"], \"wrong_unit\": [\"no_remediation\", \"hallucinated\"]}",
+      "pass": true
+    },
+    {
+      "check": "all_four_fault_classes_exercised",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "the_derived_specs_carry_this_build_s_contract",
+      "detail": "['a904665020ee3ff1']",
+      "pass": true
+    },
+    {
+      "check": "S17_accepts_the_registered_oracle_episodes",
+      "detail": "OK: independent recomputation agrees with every recorded score; 12 verdicts reproduced field-for-field by canonical replay",
+      "pass": true
+    },
+    {
+      "check": "S17_DOES_NOT_READ_A_LEGITIMATE_NON_CERTIFIED_EPISODE_AS_A_BUG",
+      "detail": "bare_retry -> BUG, clean same-decision batch -> BUG; B0/faulted/dev-lookup_chain-h2-0000: the recorded canonical verdict disagrees with the ledger recomputation; B0/faulted/dev-lookup_chain-h12-0102: the recorded canonical verdict disagrees with the led",
+      "pass": false
+    }
+  ],
+  "config_hash": "f65975dc42d41f1fee06f407c475c195e198c7b33c7a19af7ec0e39f1d69491e",
+  "elapsed_s": 9.1,
+  "environment_contract_sha256": "a904665020ee3ff178d90bc887b36c22493bb468b6ee626802c5138739ec3c95",
+  "finished_at_utc": "2026-08-06T03:31:54Z",
+  "git_sha": "d20be7551d7b7b663eb23991f52afffeeec4f463",
+  "notes": [
+    "falsifies: the D2 reconciliation -- one runtime, one fault contract, one success predicate across evaluation and training"
+  ],
+  "numbers": {
+    "bare_retry_reasons": {
+      "malformed:dev-fulfillment-h4-0102": "blind_retry",
+      "malformed:dev-lookup_chain-h12-0102": "blind_retry",
+      "rate_limit:dev-fulfillment-h20-0225": "blind_retry",
+      "rate_limit:dev-typed_relay-h12-0225": "blind_retry",
+      "transient:dev-lookup_chain-h2-0000": "blind_retry",
+      "wrong_unit:dev-typed_relay-h2-0150": "no_remediation"
+    },
+    "episode_pairs": 18,
+    "fault_classes": [
+      "malformed",
+      "rate_limit",
+      "transient",
+      "wrong_unit"
+    ],
+    "recovery_precedence_labels": [
+      "not_assigned",
+      "not_exposed",
+      "hallucinated",
+      "runaway",
+      "remediation",
+      "no_post_fault_result",
+      "wrong_final",
+      "unvalidated_answer",
+      "pre_fault_answer",
+      "uncertified_episode"
+    ],
+    "remediation_reasons": {
+      "malformed:dev-fulfillment-h4-0102": "ok",
+      "malformed:dev-lookup_chain-h12-0102": "ok",
+      "rate_limit:dev-fulfillment-h20-0225": "ok",
+      "rate_limit:dev-typed_relay-h12-0225": "ok",
+      "transient:dev-lookup_chain-h2-0000": "ok",
+      "wrong_unit:dev-typed_relay-h2-0150": "ok"
+    },
+    "s17_over_these_episodes": {
+      "bare_retry": {
+        "detail": "B0/faulted/dev-lookup_chain-h2-0000: the recorded canonical verdict disagrees with the ledger recomputation; B0/faulted/dev-lookup_chain-h12-0102: the recorded canonical verdict disagrees with the ledger recomputation; B0/faulted/dev-typed_relay-h12-0225: the recorded canonical verdict disagrees wit",
+        "numbers": {
+          "disagreements": 5,
+          "replayed": 6
+        },
+        "status": "BUG"
+      },
+      "clean_batched_decision": {
+        "detail": "B0/clean/dev-lookup_chain-h2-0000: the recorded canonical verdict disagrees with the ledger recomputation",
+        "numbers": {
+          "disagreements": 1,
+          "replayed": 1
+        },
+        "status": "BUG"
+      },
+      "oracle": {
+        "detail": "independent recomputation agrees with every recorded score; 12 verdicts reproduced field-for-field by canonical replay",
+        "numbers": {
+          "replayed": 12
+        },
+        "status": "OK"
+      }
+    },
+    "verdict_agrees_disagreements": [
+      "dev-lookup_chain-h2-0000:faulted:bare_retry",
+      "dev-lookup_chain-h12-0102:faulted:bare_retry",
+      "dev-typed_relay-h12-0225:faulted:bare_retry",
+      "dev-fulfillment-h4-0102:faulted:bare_retry",
+      "dev-fulfillment-h20-0225:faulted:bare_retry"
+    ]
+  },
+  "pass": false,
+  "probe": "probe2",
+  "run_id": "dev-preflight-v1",
+  "tasks": [
+    "dev-lookup_chain-h2-0000",
+    "dev-lookup_chain-h12-0102",
+    "dev-typed_relay-h2-0150",
+    "dev-typed_relay-h12-0225",
+    "dev-fulfillment-h4-0102",
+    "dev-fulfillment-h20-0225"
+  ],
+  "title": "oracle-driven fault parity matrix (CPU only)"
+}

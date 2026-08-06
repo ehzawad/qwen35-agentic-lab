@@ -1,0 +1,122 @@
+{
+  "checks": [
+    {
+      "check": "recorded_run_is_twelve_episodes",
+      "detail": "12 rows",
+      "pass": true
+    },
+    {
+      "check": "committed_fixture_matches_the_recorded_bytes",
+      "detail": "12 inlined rows",
+      "pass": true
+    },
+    {
+      "check": "the_before_tally_is_the_recorded_one",
+      "detail": "recorded raw_success == the defective grammar's reading",
+      "pass": true
+    },
+    {
+      "check": "before_4_of_12",
+      "detail": "4/12 ['dev-lookup_chain-h2-0003', 'dev-lookup_chain-h2-0007', 'dev-lookup_chain-h2-0010', 'dev-lookup_chain-h2-0011']",
+      "pass": true
+    },
+    {
+      "check": "after_11_of_12",
+      "detail": "11/12",
+      "pass": true
+    },
+    {
+      "check": "exactly_the_seven_named_rows_change",
+      "detail": "['dev-lookup_chain-h2-0001', 'dev-lookup_chain-h2-0002', 'dev-lookup_chain-h2-0004', 'dev-lookup_chain-h2-0005', 'dev-lookup_chain-h2-0006', 'dev-lookup_chain-h2-0008', 'dev-lookup_chain-h2-0009']",
+      "pass": true
+    },
+    {
+      "check": "the_one_genuine_failure_stays_a_failure",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "no_row_regresses",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "seven_false_hallucination_labels_clear",
+      "detail": "7 rows: the literal '\\boxed{x}' appears in no validated observation, the inner token does",
+      "pass": true
+    },
+    {
+      "check": "already_correct_rows_were_never_labelled",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "certification_layer_reads_the_same_commitment",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "strict_verifier_reads_the_same_commitment",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "oracle_certifies_all_twelve_derived_episodes",
+      "detail": "12/12",
+      "pass": true
+    },
+    {
+      "check": "every_correct_grammar_scores_identically",
+      "detail": "4 forms x 12 episodes",
+      "pass": true
+    },
+    {
+      "check": "a_later_wrong_commitment_is_not_rescued",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "a_wrong_commitment_fails",
+      "detail": "",
+      "pass": true
+    }
+  ],
+  "config_hash": "f65975dc42d41f1fee06f407c475c195e198c7b33c7a19af7ec0e39f1d69491e",
+  "elapsed_s": 3.4,
+  "environment_contract_sha256": "a904665020ee3ff178d90bc887b36c22493bb468b6ee626802c5138739ec3c95",
+  "finished_at_utc": "2026-08-06T03:24:25Z",
+  "git_sha": "d20be7551d7b7b663eb23991f52afffeeec4f463",
+  "notes": [
+    "falsifies: answer grammar, scorer consistency, false hallucination labelling"
+  ],
+  "numbers": {
+    "d1_trace_sha256": "cdeff6bff94c40b2e3401fb31c4c7084e2a81273df5b476d6bf7632100b7ba27",
+    "false_hallucination_labels_before": 7,
+    "hallucination_labels_after_over_rescued_rows": 0,
+    "live_episodes": 12,
+    "live_grammar_replays": 72,
+    "raw_success_after": 11,
+    "raw_success_before": 4,
+    "rescued_task_ids": [
+      "dev-lookup_chain-h2-0001",
+      "dev-lookup_chain-h2-0002",
+      "dev-lookup_chain-h2-0004",
+      "dev-lookup_chain-h2-0005",
+      "dev-lookup_chain-h2-0006",
+      "dev-lookup_chain-h2-0008",
+      "dev-lookup_chain-h2-0009"
+    ]
+  },
+  "pass": true,
+  "probe": "probe1",
+  "run_id": "dev-preflight-v1",
+  "tasks": [
+    "dev-lookup_chain-h2-0000",
+    "dev-lookup_chain-h12-0102",
+    "dev-typed_relay-h2-0150",
+    "dev-typed_relay-h12-0225",
+    "dev-fulfillment-h4-0102",
+    "dev-fulfillment-h20-0225"
+  ],
+  "title": "exact 12-row extractor replay (CPU only)"
+}

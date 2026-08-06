@@ -1,0 +1,88 @@
+{
+  "checks": [
+    {
+      "check": "committed_dev_specs_unmodified",
+      "detail": "dev.jsonl sha256 35322fae925a755c vs SHA256SUMS 35322fae925a755c",
+      "pass": true
+    },
+    {
+      "check": "derived_manifest_is_the_six_tasks",
+      "detail": "6 rows -> /mnt/sdb/arafat/ehz/llm/qwen35-agentic-lab/out/preflight/dev6.jsonl",
+      "pass": true
+    },
+    {
+      "check": "derived_rows_are_byte_copies",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "registered_fault_classes",
+      "detail": "{\"dev-fulfillment-h20-0225\": [\"rate_limit\"], \"dev-fulfillment-h4-0102\": [\"malformed\"], \"dev-lookup_chain-h12-0102\": [\"malformed\"], \"dev-lookup_chain-h2-0000\": [\"transient\"], \"dev-typed_relay-h12-0225\": [\"rate_limit\"], \"dev-typed_relay-h2-0150\": [\"wrong_unit\"]}",
+      "pass": true
+    },
+    {
+      "check": "certspec_rows_equal_the_bundles_they_came_from",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "committed_budget_equals_the_registered_faulted_budget",
+      "detail": "",
+      "pass": true
+    }
+  ],
+  "config_hash": "f65975dc42d41f1fee06f407c475c195e198c7b33c7a19af7ec0e39f1d69491e",
+  "elapsed_s": 3.8,
+  "environment_contract_sha256": "a904665020ee3ff178d90bc887b36c22493bb468b6ee626802c5138739ec3c95",
+  "finished_at_utc": "2026-08-06T03:24:13Z",
+  "git_sha": "d20be7551d7b7b663eb23991f52afffeeec4f463",
+  "notes": [],
+  "numbers": {
+    "episodes": 12,
+    "manifest_sha256": "9992b68b5fef2f2c6647d0db7380bdf7adce3d25e033de0e1592af8c59c08f7e",
+    "tasks": {
+      "dev-fulfillment-h20-0225": {
+        "family": "fulfillment",
+        "fault": "rate_limit",
+        "horizon": 20
+      },
+      "dev-fulfillment-h4-0102": {
+        "family": "fulfillment",
+        "fault": "malformed",
+        "horizon": 4
+      },
+      "dev-lookup_chain-h12-0102": {
+        "family": "lookup_chain",
+        "fault": "malformed",
+        "horizon": 12
+      },
+      "dev-lookup_chain-h2-0000": {
+        "family": "lookup_chain",
+        "fault": "transient",
+        "horizon": 2
+      },
+      "dev-typed_relay-h12-0225": {
+        "family": "typed_relay",
+        "fault": "rate_limit",
+        "horizon": 12
+      },
+      "dev-typed_relay-h2-0150": {
+        "family": "typed_relay",
+        "fault": "wrong_unit",
+        "horizon": 2
+      }
+    }
+  },
+  "pass": true,
+  "probe": "manifest",
+  "run_id": "dev-preflight-v1",
+  "tasks": [
+    "dev-lookup_chain-h2-0000",
+    "dev-lookup_chain-h12-0102",
+    "dev-typed_relay-h2-0150",
+    "dev-typed_relay-h12-0225",
+    "dev-fulfillment-h4-0102",
+    "dev-fulfillment-h20-0225"
+  ],
+  "title": "the derived dev-only manifest (six committed tasks)"
+}

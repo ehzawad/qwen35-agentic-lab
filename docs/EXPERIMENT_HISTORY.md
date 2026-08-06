@@ -160,3 +160,79 @@ This is a measurement, not a result: it says how large the registered wire forma
 is, and the caps follow it. `tests/test_size_ceilings.py` fails if a cap ever
 drops below what was measured, or if the census was taken under a different
 environment contract.
+
+## 2026-08-05 — dev-only preflight: probes 1-2 run, probe 2 STOPS the chain
+
+The council's smallest credible pre-production check (round 5) was built as
+`scripts/preflight_dev.py` over the six committed dev tasks it names — three
+families × clean/faulted × low/high family horizon, each once clean and once
+faulted, 12 episodes — collected into a derived manifest whose rows are byte
+copies of `data/suite/v1/certspecs/dev.jsonl` (verified against the committed
+`SHA256SUMS` first; the committed dev data is not edited).
+
+**Probe 1, exact 12-row extractor replay, CPU only: PASS.** The recorded
+`verify-a5000` trace rescores from **4/12 to 11/12** raw and certified answers;
+exactly the seven named episodes change and no others; the one genuine failure
+(`dev-lookup_chain-h2-0000`, which committed `12345`) stays a failure. The
+before-tally is *measured*, not recalled: the defective grammar's reading equals
+each row's recorded `raw_success`. The **seven false hallucination labels clear**,
+with their mechanism shown — the literal `\boxed{x}` appears in no validated
+observation, the inner token does. Three readers (`schema`, `provenance`,
+`verify`) agree on the whole battery, and 12 live oracle episodes over the six
+tasks certify identically under four correct commitment grammars (72 grammar
+replays), while a later wrong commitment is never rescued.
+
+**Probe 2, oracle-driven fault parity matrix, CPU only: FAIL.** 18 episode pairs
+(six tasks × clean / faulted / faulted-with-a-bare-retry) were run through the
+claim-bearing evaluation path and the canonical training path. The environment
+itself reconciles: all 8 surfaces are equal on all 18 pairs — envelope bytes, the
+whole hidden event ledger, token arguments, budgets, credited progress, episode
+digest, verdict row, and the **rendered prefix token ids per decision**. Every
+scheduled fault fires **exactly once**; the registered remediation is certified in
+all four fault classes; and **bare retries are never certified** (`blind_retry`
+for transient / rate_limit / malformed, and for the wrong-unit trap the frozen
+precedence reports `hallucinated`, because accepting the trapped value leaves the
+committed answer with no validated source).
+
+What failed is the seam between that verdict and the analyzer.
+`provenance.certify_episode` sets
+
+    verdict_agrees = (verdict.certified_success == ledger_ok)
+
+an EQUALITY between the canonical verdict and a strictly weaker transcript-only
+predicate, and `analyze.veto_s17_trace_summary` turns any inequality into a
+harness **BUG**, which vetoes every gate, every claim and the winner. So an
+episode the strict verifier is *supposed* to refuse, whose transcript has nothing
+to object to, reads as a broken harness. Two mechanisms were reproduced:
+
+* **fault arm** — 5 of 6 bare-retry episodes: right answer, valid receipt chain,
+  validated source, no runaway, no fabrication (`ledger_ok` true) while the
+  verdict correctly refuses certification because recovery was a blind retry.
+  S17 → BUG.
+* **clean arm** — one episode that batches both lookup hops into a single
+  decision: the registered "dependency edges need a LATER decision" rule refuses
+  the second node, the answer is still correct and sourced. S17 → BUG. The defect
+  is therefore not fault-specific.
+
+The positive control passes in the same run: over the 12 clean and remediated
+episodes S17 is **OK** with all 12 verdicts reproduced field-for-field by
+canonical replay, so the BUG is not an artifact of how the probe builds the
+analyzer's input.
+
+Both behaviours are legitimate and near-certain in a production run, so the
+preflight stopped there: **probes 3, 4 and 5 (the live 12-episode HTTP matrix,
+the tiny offline-RS batch and the one-step SFT canary) were not run**, no GPU
+process was started, and no GPU minutes were charged to the ledger. The council's
+required ordering puts "pass the oracle parity matrix" before those three, and
+spending calibration hours on an apparatus that cannot issue a verdict is exactly
+what a preflight exists to prevent.
+
+Results: `results/agentic/preflight/{manifest,probe1,probe2}.json` (every check
+with its numbers). `tests/test_dev_preflight.py` keeps both CPU probes runnable
+and pins the open defect as a `strict` xfail, so repairing the seam turns that
+test into an unexpected pass and forces it to be flipped into a positive
+assertion. The repair is a design decision for the certification/analysis owner:
+the cross-check wants to be one-directional (a verdict claiming success the
+ledger side refuses is tampering; a verdict refusing what the ledger side cannot
+see is normal), and `certified_success` already ANDs the two, so no gate needs to
+move.
