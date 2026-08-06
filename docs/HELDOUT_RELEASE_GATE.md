@@ -133,11 +133,13 @@ does not print the verified-release line.
 * **Evidence.** Run against this tree today the gate refuses, with
   `results/agentic/seed_reveal.json does not exist: nothing is revealed`. There
   is no R yet; `locks.json` itself is not yet committed, so there is no L either.
-* **Evidence.** `tests/test_verify_heldout_release.py` builds thirty-three
-  synthetic studies — each with its own P, L, R and held-out release — and
-  asserts the accept and every refusal above, including one release produced by
-  the real `generate_phase` / `export_eval_specs.py` / `seal_phase` so the gate
-  cannot drift from the shape the generator writes.
+* **Evidence.** `tests/test_verify_heldout_release.py` is 33 tests, 31 of which
+  build a whole synthetic study — its own P, its own L, its own R, its own
+  held-out release — and assert the accept and every refusal above. The other two
+  check that the gate imports no GPU or network stack, and that a directory which
+  is not a repository is refused. One of the 31 releases is produced by the real
+  `generate_phase` / `export_eval_specs.py` / `seal_phase`, so the gate cannot
+  drift from the shape the generator writes.
 * **Projection.** When the lock and reveal stages run, the gate is what turns
   their output into a claim. It has never been run against a real R, because none
   exists.
