@@ -84,8 +84,8 @@
   "config_hash": "f65975dc42d41f1fee06f407c475c195e198c7b33c7a19af7ec0e39f1d69491e",
   "elapsed_s": 3.4,
   "environment_contract_sha256": "a904665020ee3ff178d90bc887b36c22493bb468b6ee626802c5138739ec3c95",
-  "finished_at_utc": "2026-08-06T03:24:25Z",
-  "git_sha": "d20be7551d7b7b663eb23991f52afffeeec4f463",
+  "finished_at_utc": "2026-08-06T05:12:16Z",
+  "git_sha": "19ca1e0480e578079b9ea5ed8eba8aa6a24cd6fa",
   "notes": [
     "falsifies: answer grammar, scorer consistency, false hallucination labelling"
   ],

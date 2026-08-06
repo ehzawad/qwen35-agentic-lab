@@ -1,0 +1,13 @@
+{
+  "compute_capability": "8.6",
+  "cuda_device_order": "PCI_BUS_ID",
+  "cuda_visible_bytes": 25282805760,
+  "cuda_visible_devices": "0",
+  "driver_version": "610.43.02",
+  "gpu_name": "NVIDIA RTX A5000",
+  "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+  "locked_at_utc": "2026-08-06T05:13:27Z",
+  "pci_bus_id": "00000000:3B:00.0",
+  "run_id": "dev-preflight-v1",
+  "visible_ordinal": 0
+}

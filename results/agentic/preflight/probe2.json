@@ -13,7 +13,7 @@
     {
       "check": "the_certifier_agrees_with_the_verdict_everywhere",
       "detail": "",
-      "pass": false
+      "pass": true
     },
     {
       "check": "one_success_predicate",
@@ -52,20 +52,20 @@
     },
     {
       "check": "S17_accepts_the_registered_oracle_episodes",
-      "detail": "OK: independent recomputation agrees with every recorded score; 12 verdicts reproduced field-for-field by canonical replay",
+      "detail": "OK: independent recomputation agrees with every recorded score; 12 verdicts reproduced field-for-field by canonical replay; 0 episodes were refused certification for a registered reason the transcript alo",
       "pass": true
     },
     {
       "check": "S17_DOES_NOT_READ_A_LEGITIMATE_NON_CERTIFIED_EPISODE_AS_A_BUG",
-      "detail": "bare_retry -> BUG, clean same-decision batch -> BUG; B0/faulted/dev-lookup_chain-h2-0000: the recorded canonical verdict disagrees with the ledger recomputation; B0/faulted/dev-lookup_chain-h12-0102: the recorded canonical verdict disagrees with the led",
-      "pass": false
+      "detail": "bare_retry -> OK, clean same-decision batch -> OK; independent recomputation agrees with every recorded score; 6 verdicts reproduced field-for-field by canonical replay; 5 episodes were refused certification for a registered reason the transcript alon",
+      "pass": true
     }
   ],
   "config_hash": "f65975dc42d41f1fee06f407c475c195e198c7b33c7a19af7ec0e39f1d69491e",
-  "elapsed_s": 9.1,
+  "elapsed_s": 9.0,
   "environment_contract_sha256": "a904665020ee3ff178d90bc887b36c22493bb468b6ee626802c5138739ec3c95",
-  "finished_at_utc": "2026-08-06T03:31:54Z",
-  "git_sha": "d20be7551d7b7b663eb23991f52afffeeec4f463",
+  "finished_at_utc": "2026-08-06T05:12:33Z",
+  "git_sha": "19ca1e0480e578079b9ea5ed8eba8aa6a24cd6fa",
   "notes": [
     "falsifies: the D2 reconciliation -- one runtime, one fault contract, one success predicate across evaluation and training"
   ],
@@ -107,38 +107,33 @@
     },
     "s17_over_these_episodes": {
       "bare_retry": {
-        "detail": "B0/faulted/dev-lookup_chain-h2-0000: the recorded canonical verdict disagrees with the ledger recomputation; B0/faulted/dev-lookup_chain-h12-0102: the recorded canonical verdict disagrees with the ledger recomputation; B0/faulted/dev-typed_relay-h12-0225: the recorded canonical verdict disagrees wit",
+        "detail": "independent recomputation agrees with every recorded score; 6 verdicts reproduced field-for-field by canonical replay; 5 episodes were refused certification for a registered reason the transcript alone cannot show, which is the strict verifier working, not a harness defect",
         "numbers": {
-          "disagreements": 5,
-          "replayed": 6
+          "replayed": 6,
+          "strict_refusals": 5
         },
-        "status": "BUG"
+        "status": "OK"
       },
       "clean_batched_decision": {
-        "detail": "B0/clean/dev-lookup_chain-h2-0000: the recorded canonical verdict disagrees with the ledger recomputation",
+        "detail": "independent recomputation agrees with every recorded score; 1 verdicts reproduced field-for-field by canonical replay; 1 episodes were refused certification for a registered reason the transcript alone cannot show, which is the strict verifier working, not a harness defect",
         "numbers": {
-          "disagreements": 1,
-          "replayed": 1
+          "replayed": 1,
+          "strict_refusals": 1
         },
-        "status": "BUG"
+        "status": "OK"
       },
       "oracle": {
-        "detail": "independent recomputation agrees with every recorded score; 12 verdicts reproduced field-for-field by canonical replay",
+        "detail": "independent recomputation agrees with every recorded score; 12 verdicts reproduced field-for-field by canonical replay; 0 episodes were refused certification for a registered reason the transcript alone cannot show, which is the strict verifier working, not a harness defect",
         "numbers": {
-          "replayed": 12
+          "replayed": 12,
+          "strict_refusals": 0
         },
         "status": "OK"
       }
     },
-    "verdict_agrees_disagreements": [
-      "dev-lookup_chain-h2-0000:faulted:bare_retry",
-      "dev-lookup_chain-h12-0102:faulted:bare_retry",
-      "dev-typed_relay-h12-0225:faulted:bare_retry",
-      "dev-fulfillment-h4-0102:faulted:bare_retry",
-      "dev-fulfillment-h20-0225:faulted:bare_retry"
-    ]
+    "verdict_agrees_disagreements": []
   },
-  "pass": false,
+  "pass": true,
   "probe": "probe2",
   "run_id": "dev-preflight-v1",
   "tasks": [

@@ -1,0 +1,102 @@
+{
+  "checks": [
+    {
+      "check": "server_answered_v1_models",
+      "detail": "session serve-20260806T052510Z-3974671-3da337c1",
+      "pass": true
+    },
+    {
+      "check": "producer_manifest_is_whole_and_ready",
+      "detail": "gaps []",
+      "pass": true
+    },
+    {
+      "check": "probe3_card_returned_to_baseline",
+      "detail": "baseline 9 MiB, now 9 MiB",
+      "pass": true
+    },
+    {
+      "check": "NO_EVALUATOR_SHARD_ABORTED",
+      "detail": "1 shard abort(s); transport evidence {\"clean\": {\"failures\": 6, \"kinds\": [\"http_status\"], \"task_ids\": [\"dev-fulfillment-h20-0225\", \"dev-fulfillment-h4-0102\", \"dev-lookup_chain-h12-0102\", \"dev-lookup_chain-h2-0000\", \"dev-typed_relay-h12-0225\", \"dev-typed_relay-h2-0150\"], \"server_health_at_abort\": [\"live\"], \"first_detail\": \"the vLLM server at http://127.0.0.1:8000 answered HTTP 400: '{\\\"error\\\":{\\\"message\\\":\\\"5 validation errors:\\\\\\\\n  {\\\\'type\\\\': \\\\'missing\\\\', \\\\'loc\\\\': (\\\\'body\\\\', 0, \\\\'ChatCompletionMessageFunctionToolCallParam\\\\', \\\\'id\\\\'), \\\\'msg\\\\': \\\\'Field required\\\\', \\\\'input\\\\': {\\\\'type\\\\': \\\\'function\\\\', \\\\'function\\\\': {\\\\'name\\\\': \\\\'kb_lookup\\\\', \\\\'arguments\\\\': {\\\\'key\\\\': \\\\'KD6FJTKOG2CBCSFIV\\\\'}}}}\\\\\\\\n  {\\\\'type\\\\': \\\\'string_type\\\\', \\\\'loc\\\\': (\\\\'body\\\\', 0, \\\\'ChatCompletionMessageFunctionToolCallParam\\\\', \\\\'function\\\\', \\\\'arguments\\\\'), \\\\'msg\\\\': \\\\'Inp'\"}}",
+      "pass": false
+    }
+  ],
+  "config_hash": "f65975dc42d41f1fee06f407c475c195e198c7b33c7a19af7ec0e39f1d69491e",
+  "elapsed_s": 82.0,
+  "environment_contract_sha256": "a904665020ee3ff178d90bc887b36c22493bb468b6ee626802c5138739ec3c95",
+  "finished_at_utc": "2026-08-06T05:26:30Z",
+  "git_sha": "19ca1e0480e578079b9ea5ed8eba8aa6a24cd6fa",
+  "notes": [
+    "falsifies: producer attestation, fail-closed transport, clean/fault routing, request-contract equality, replay consistency. Capability success is DIAGNOSTIC here.",
+    "prompt p8_combined.txt is a tournament CANDIDATE, not the frozen winner: these dev episodes are apparatus evidence under run_id dev-preflight-v1 and are not a BP/TP arm",
+    "the evaluator fail-closed correctly: it wrote NO episode row for any affected task, so nothing entered a denominator and resume would re-run exactly those ids"
+  ],
+  "numbers": {
+    "episodes_written": 0,
+    "evaluator_aborts": [
+      {
+        "attempt": 1,
+        "condition": "clean",
+        "output_tail": "ledger guard: eval:B0.clean.none -- 0.06 h used, 6.0 min projected from invocation_nominal (NOT a calibrated remaining-stage projection; no_commitment)\nABORTED (infrastructure): B0/clean/none shard 0 hit 6 transport failure(s) against http://127.0.0.1:8000.\n  first: [http_status] the vLLM server at http://127.0.0.1:8000 answered HTTP 400: '{\"error\":{\"message\":\"5 validation errors:\\\\n  {\\'type\\': \\'missing\\', \\'loc\\': (\\'body\\', 0, \\'ChatCompletionMessageFunctionToolCallParam\\', \\'id\\'), \\'msg\\': \\'Field required\\', \\'input\\': {\\'type\\': \\'function\\', \\'function\\': {\\'name\\': \\'kb_lookup\\', \\'arguments\\': {\\'key\\': \\'KD6FJTKOG2CBCSFIV\\'}}}}\\\\n  {\\'type\\': \\'string_type\\', \\'loc\\': (\\'body\\', 0, \\'ChatCompletionMessageFunctionToolCallParam\\', \\'function\\', \\'arguments\\'), \\'msg\\': \\'Inp'\n  server now: live -- live\n  affected task ids (NO row written for any of them): dev-fulfillment-h20-0225, dev-fulfillment-h4-0102, dev-lookup_chain-h12-0102, dev-lookup_chain-h2-0000, dev-typed_relay-h12-0225, dev-typed_relay-h2-0150\n  0 episode(s) completed against a healthy engine and were written to /mnt/sdb/arafat/ehz/llm/qwen35-agentic-lab/out/preflight/traces/B0.clean.none.jsonl; they keep their rows.\n  the infrastructure failures are recorded as evidence in /mnt/sdb/arafat/ehz/llm/qwen35-agentic-lab/out/preflight/traces/B0.clean.none.transport.log -- NOT as episodes\n  A dead or unreachable engine is NOT model behaviour. It is never committed as a `parser_budget` episode, so nothing here is in any denominator and resume will re-run exactly the affected ids. Fix the server (see the serve log), confirm the card is still bound to this run, and re-invoke the shard.",
+        "returncode": 1
+      }
+    ],
+    "gpu_used_mib_before": 9,
+    "ledger_cumulative_h_after": 0.0843,
+    "probe3_gpu_used_mib_after": 9,
+    "producer_manifest": {
+      "cuda_visible_bytes": 25282805760,
+      "driver_version": "610.43.02",
+      "enable_thinking_effective": false,
+      "gpu_name": "NVIDIA RTX A5000",
+      "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+      "manifest_sha256": "564c8843ae24f4f998c6246b55b4900f6126f161385ca606fb44546f86db80bf",
+      "pci_bus_id": "00000000:3B:00.0",
+      "pid": 3974720,
+      "port": 8000,
+      "run_id": "dev-preflight-v1",
+      "session_id": "serve-20260806T052510Z-3974671-3da337c1",
+      "stage": "serve"
+    },
+    "run_binding": {
+      "cuda_visible_bytes": 25282805760,
+      "driver_version": "610.43.02",
+      "gpu_name": "NVIDIA RTX A5000",
+      "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+      "pci_bus_id": "00000000:3B:00.0"
+    },
+    "server_session_minutes": 1.26,
+    "transport_failures": {
+      "clean": {
+        "failures": 6,
+        "first_detail": "the vLLM server at http://127.0.0.1:8000 answered HTTP 400: '{\"error\":{\"message\":\"5 validation errors:\\\\n  {\\'type\\': \\'missing\\', \\'loc\\': (\\'body\\', 0, \\'ChatCompletionMessageFunctionToolCallParam\\', \\'id\\'), \\'msg\\': \\'Field required\\', \\'input\\': {\\'type\\': \\'function\\', \\'function\\': {\\'name\\': \\'kb_lookup\\', \\'arguments\\': {\\'key\\': \\'KD6FJTKOG2CBCSFIV\\'}}}}\\\\n  {\\'type\\': \\'string_type\\', \\'loc\\': (\\'body\\', 0, \\'ChatCompletionMessageFunctionToolCallParam\\', \\'function\\', \\'arguments\\'), \\'msg\\': \\'Inp'",
+        "kinds": [
+          "http_status"
+        ],
+        "server_health_at_abort": [
+          "live"
+        ],
+        "task_ids": [
+          "dev-fulfillment-h20-0225",
+          "dev-fulfillment-h4-0102",
+          "dev-lookup_chain-h12-0102",
+          "dev-lookup_chain-h2-0000",
+          "dev-typed_relay-h12-0225",
+          "dev-typed_relay-h2-0150"
+        ]
+      }
+    }
+  },
+  "pass": false,
+  "probe": "probe3",
+  "run_id": "dev-preflight-v1",
+  "tasks": [
+    "dev-lookup_chain-h2-0000",
+    "dev-lookup_chain-h12-0102",
+    "dev-typed_relay-h2-0150",
+    "dev-typed_relay-h12-0225",
+    "dev-fulfillment-h4-0102",
+    "dev-fulfillment-h20-0225"
+  ],
+  "title": "live 12-episode HTTP matrix, one server startup"
+}

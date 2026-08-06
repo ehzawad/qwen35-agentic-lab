@@ -1114,6 +1114,24 @@ def run_cmd(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return proc
 
 
+def run_soft(cmd: list[str]) -> subprocess.CompletedProcess:
+    """Run a stage command WITHOUT raising on a non-zero exit.
+
+    `run_cmd` aborts the interpreter, which is right for a setup step whose
+    failure means the probe cannot be defined at all (the pin, the countersign).
+    It is WRONG for a stage that has already spent GPU minutes: a SystemExit out
+    of the `with ServerSession()` body stops the server correctly but skips both
+    the ledger append and `probe.finish()`, so a failing GPU probe left NO result
+    file and charged NOTHING for the card time it really burned. A preflight's
+    whole product is the evidence from the run that failed, so the caller records
+    the failure as a check instead of losing it.
+    """
+    env = dict(os.environ, PYTHONPATH="src", AGENTIC_RUN_ID=RUN_ID,
+               TOKENIZERS_PARALLELISM="false")
+    return subprocess.run(cmd, cwd=str(ROOT), env=env, text=True,
+                          capture_output=True)
+
+
 # ---------------------------------------------------------------------------
 # PROBE 3 -- live 12-episode HTTP matrix, ONE server startup
 # ---------------------------------------------------------------------------
@@ -1168,9 +1186,10 @@ def cmd_probe3(args) -> int:
              "cuda_visible_bytes", "driver_version", "pci_bus_id", "pid", "port",
              "enable_thinking_effective", configio.MANIFEST_HASH_FIELD)})
         completed = {}
+        aborts = []
         for cond in CONDITIONS:
             for attempt in range(1, 21):
-                proc = run_cmd([
+                proc = run_soft([
                     PY, "-m", "agentlab.suite.evaluate",
                     "--model", MODEL, "--base-id", MODEL, "--arm", "B0",
                     "--condition", cond, "--control", "none",
@@ -1180,6 +1199,21 @@ def cmd_probe3(args) -> int:
                     "--server", f"http://127.0.0.1:{server.port}",
                     "--time-budget-s", "360",
                     "--runtime-manifest", str(server.manifest)])
+                if proc.returncode != 0:
+                    # The evaluator refused to write episodes (a transport abort,
+                    # a spec refusal, ...). That refusal IS the finding: record it
+                    # with the reproducible detail and stop asking the card for
+                    # more, but still charge the minutes and write the result.
+                    blob = ((proc.stdout or "") + (proc.stderr or "")).strip()
+                    aborts.append({
+                        "condition": cond, "attempt": attempt,
+                        "returncode": proc.returncode,
+                        "output_tail": "\n".join(blob.splitlines()[-40:]),
+                    })
+                    completed[cond] = False
+                    print(f"  [eval] {cond} pass {attempt}: ABORTED rc="
+                          f"{proc.returncode}", flush=True)
+                    break
                 status = json.loads(proc.stdout.strip().splitlines()[-1])
                 print(f"  [eval] {cond} pass {attempt}: "
                       f"{json.dumps(status)}", flush=True)
@@ -1187,16 +1221,62 @@ def cmd_probe3(args) -> int:
                 completed[cond] = bool(status["complete"])
                 if status["complete"]:
                     break
+            if aborts:
+                break
         minutes = server.minutes
     probe.number("server_session_minutes", round(minutes, 2))
+    # The work count is COUNTED, never assumed to be the 12 this probe intended.
+    # A ledger row is the receipt calibration divides minutes by: charging 1.26
+    # min for "12 episodes" when a transport abort wrote none would overstate
+    # measured throughput without bound, and by exactly the factor that makes the
+    # projection look affordable.
+    written_now = 0
+    for _cond in CONDITIONS:
+        _p = traces_dir / f"B0.{_cond}.none.jsonl"
+        if _p.exists():
+            written_now += len(read_jsonl(_p))
+    probe.number("episodes_written", written_now)
     cumulative = ledger_note("preflight_eval_http", minutes,
                              kind="server_session",
-                             work={"unit": "episodes", "count": 12,
-                                   "probe": "probe3"},
+                             work={"unit": "episodes", "count": written_now,
+                                   "intended": 12, "probe": "probe3"},
                              started_at=server.started_at,
                              manifest=server.manifest)
     probe.number("ledger_cumulative_h_after", round(cumulative, 4))
     wait_for_baseline(probe, baseline, "probe3")
+
+    # ---- an evaluator refusal is a finding, not a lost run ------------------
+    if aborts:
+        transport = {}
+        for cond in CONDITIONS:
+            tlog = traces_dir / f"B0.{cond}.none.transport.log"
+            if tlog.exists():
+                # The transport log is APPENDED across sessions on purpose -- it
+                # is standing infrastructure evidence, not a per-run scratch file.
+                # So this session's finding is the rows THIS session wrote; a
+                # count over the whole file would report a previous run's
+                # failures as if this server had produced them.
+                rows = [r for r in read_jsonl(tlog)
+                        if r.get("session_id") == manifest["session_id"]]
+                if not rows:
+                    continue
+                transport[cond] = {
+                    "failures": len(rows),
+                    "kinds": sorted({r.get("kind") for r in rows}),
+                    "task_ids": sorted({r.get("task_id") for r in rows}),
+                    "server_health_at_abort":
+                        sorted({r.get("server_health_at_abort") for r in rows}),
+                    "first_detail": rows[0].get("detail") if rows else None,
+                }
+        probe.number("evaluator_aborts", aborts)
+        probe.number("transport_failures", transport)
+        probe.check("NO_EVALUATOR_SHARD_ABORTED", False,
+                    f"{len(aborts)} shard abort(s); transport evidence "
+                    f"{json.dumps(transport)[:2000]}")
+        probe.note("the evaluator fail-closed correctly: it wrote NO episode "
+                   "row for any affected task, so nothing entered a denominator "
+                   "and resume would re-run exactly those ids")
+        return probe.finish()
 
     # ---- the trace set ------------------------------------------------------
     traces = {}
