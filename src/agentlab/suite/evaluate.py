@@ -389,7 +389,42 @@ def existing_rows(out_path: pathlib.Path) -> list[dict]:
 
 
 def done_task_ids(out_path: pathlib.Path) -> set:
-    return {r.get("task_id") for r in existing_rows(out_path)}
+    """Task ids already traced UNDER THIS ENVIRONMENT CONTRACT.
+
+    Resume used to deduplicate by task id alone, so a trace produced under the
+    retired tokenless contract would be treated as done for ever and the task
+    would never be re-evaluated under the contract the gates describe. A row
+    without the current stamp is not "done" -- `refuse_stale_environment_rows`
+    below refuses to APPEND to such a file at all, so this is the second line of
+    the same rule rather than a silent re-run.
+    """
+    return {r.get("task_id") for r in existing_rows(out_path)
+            if contract.is_current(r)}
+
+
+def refuse_stale_environment_rows(out_path: pathlib.Path) -> None:
+    """A run may not APPEND to a trace file produced under another environment.
+
+    Mixing an episode the model faced with recovery tokens, remediation text and
+    receipts together with one it faced without them puts TWO environments inside
+    one claim -- the D2 defect, reintroduced through resume. The old trace set is
+    evidence of the defect and keeps its own run id; a repaired run starts a new
+    directory.
+    """
+    for i, row in enumerate(existing_rows(out_path)):
+        if not contract.is_current(row):
+            raise SystemExit(
+                f"REFUSED: {out_path} row {i} carries "
+                f"{'no' if not row.get(contract.STAMP_FIELD) else 'a stale'} "
+                f"{contract.STAMP_FIELD}, so it was produced under a different "
+                f"model-visible environment (recovery tokens, remediation text, "
+                f"receipts, transcript shape).\n"
+                f"  This build's contract is "
+                f"{contract.environment_contract_sha256()}.\n"
+                f"  Move that trace set aside under its own run id -- it is "
+                f"evidence of the retired contract -- and start a NEW directory. "
+                f"Appending would put two environments inside one claim, which is "
+                f"exactly the defect the unified contract closed.")
 
 
 def require_same_fingerprint(out_path: pathlib.Path, fingerprint: dict) -> int:
@@ -515,6 +550,10 @@ def run_shard(args, chat_fn=None, cfg: dict | None = None) -> dict:
     out_path = out_dir / f"{args.arm}.{args.condition}.{args.control}.jsonl"
     refuse_null_hardware_rows(out_path)
     checked = require_same_fingerprint(out_path, fingerprint)
+    # After the hardware refusals, because an unattributed or foreign-card file is
+    # the more upstream problem and its message is the one that tells the operator
+    # which directory to quarantine.
+    refuse_stale_environment_rows(out_path)
     # The evaluator READS the ledger and refuses to start work that would cross the
     # ceiling. It does not APPEND: the driver charges the whole server-resident
     # interval -- startup, every client shard and the idle gaps -- exactly once, and

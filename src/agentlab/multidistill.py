@@ -599,6 +599,24 @@ def _read_jsonl(path: pathlib.Path) -> list:
             if line.strip()]
 
 
+def shard_is_current(index: int) -> bool:
+    """Is this shard's file usable under THIS environment contract?
+
+    A shard produced under the retired tokenless contract exists on disk and would
+    otherwise be treated as done for ever, because resume is "does the file
+    exist". It is treated as NOT done, so the shard is re-rolled under the current
+    contract instead of being silently pooled with it.
+    """
+    path = _shard_path(index)
+    if not path.exists():
+        return False
+    try:
+        rows = _read_jsonl(path)
+    except (json.JSONDecodeError, OSError):
+        return False
+    return bool(rows) and all(contract_mod.is_current(r) for r in rows)
+
+
 # --------------------------------------------------------------------------
 # vLLM backend (GPU only; imported lazily)
 # --------------------------------------------------------------------------
@@ -741,7 +759,7 @@ def cmd_run(args) -> None:
     shards = plan_shards(split, args.shard_size, cfg)
     if args.shard is not None:
         units = [shards[args.shard]]
-        if _shard_path(args.shard).exists() and not args.force:
+        if shard_is_current(args.shard) and not args.force:
             print(f"[rs] shard {args.shard} already done (use --force to redo)")
             return
         forced = {args.shard} if args.force else set()
@@ -749,7 +767,13 @@ def cmd_run(args) -> None:
         units = shards
         forced = set()
     pending = [s for s in units
-               if s["index"] in forced or not _shard_path(s["index"]).exists()]
+               if s["index"] in forced or not shard_is_current(s["index"])]
+    stale = [s["index"] for s in pending
+             if _shard_path(s["index"]).exists() and s["index"] not in forced]
+    if stale:
+        print(f"[rs] {len(stale)} shard(s) were produced under a different "
+              f"environment contract and will be RE-ROLLED, not resumed: "
+              f"{stale[:8]}")
     if not pending:
         print("[rs] all shards done")
         return
@@ -770,7 +794,7 @@ def cmd_run(args) -> None:
           f"{len(pending)} pending shards")
 
     def is_done(shard):
-        return shard["index"] not in forced and _shard_path(shard["index"]).exists()
+        return shard["index"] not in forced and shard_is_current(shard["index"])
 
     def run_one(shard):
         bundles = [by_id[t] for t in shard["task_ids"]]

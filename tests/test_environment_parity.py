@@ -449,3 +449,65 @@ def test_the_evaluation_trace_is_self_describing_about_its_environment():
     assert trace["score"]["verdict_agrees"]
     assert digest(trace["parity"]["progress"]) == digest(
         trace["verdict"]["node_decisions"])
+
+
+def test_resume_can_never_reuse_a_tokenless_artifact(tmp_path, monkeypatch):
+    """The invalidation rule reaches the two places resume actually happens.
+
+    Both consumers resume by presence: evaluation deduplicates by task id in an
+    existing trace file, and rejection sampling treats a shard file as done. A
+    tokenless artifact would therefore be resumed into for ever, and the repair
+    would never reach the tasks it already "finished".
+    """
+    from agentlab.multidistill import shard_is_current
+
+    # (1) evaluation: a stale row makes the file un-appendable, and it is never
+    #     counted as done
+    out = tmp_path / "BP.clean.none.jsonl"
+    fresh = contract_mod.stamp({"kind": "episode", "task_id": "fresh"})
+    stale = {"kind": "episode", "task_id": "stale",
+             contract_mod.STAMP_FIELD: "0" * 64}
+    tokenless = {"kind": "episode", "task_id": "tokenless"}
+    out.write_text("".join(json.dumps(r) + "\n" for r in (fresh, stale, tokenless)),
+                   encoding="utf-8")
+    assert evaluate.done_task_ids(out) == {"fresh"}
+    with pytest.raises(SystemExit) as exc:
+        evaluate.refuse_stale_environment_rows(out)
+    assert contract_mod.STAMP_FIELD in str(exc.value)
+    # a file whose every row is current is appendable and fully counted
+    out.write_text(json.dumps(fresh) + "\n", encoding="utf-8")
+    evaluate.refuse_stale_environment_rows(out)
+    assert evaluate.done_task_ids(out) == {"fresh"}
+
+    # (2) rejection sampling: a stale shard is NOT done, so it is re-rolled
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    monkeypatch.setattr("agentlab.multidistill.RAW_DIR", raw)
+    (raw / "shard-0000.jsonl").write_text(json.dumps(tokenless) + "\n",
+                                          encoding="utf-8")
+    (raw / "shard-0001.jsonl").write_text(json.dumps(fresh) + "\n", encoding="utf-8")
+    assert shard_is_current(0) is False
+    assert shard_is_current(1) is True
+    assert shard_is_current(2) is False          # absent
+
+
+def test_stale_rows_are_dropped_from_the_accepted_corpus_and_the_views(tmp_path):
+    """Acceptance and view construction count the invalidated rows out loud."""
+    from agentlab.multidistill import finalize
+    from agentlab.suite.datasets import build_views
+
+    tokenless = {"kind": "rollout", "task_id": "t", "family": "lookup_chain",
+                 "horizon": 2, "fault_types": [], "messages": [], "verdict": {},
+                 "events": [], "calls": [], "sample_index": 0}
+    kept, summary = finalize([tokenless], {}, __import__(
+        "agentlab.suite.configio", fromlist=["x"]).load_config())
+    assert kept == []
+    assert summary["stale_environment_contract"] == 1
+    assert summary[contract_mod.STAMP_FIELD] == \
+        contract_mod.environment_contract_sha256()
+
+    rows, meta, report = build_views([tokenless], lambda p, c, t: 1)
+    assert rows == [] and meta == []
+    assert report["rejected"]["stale_environment_contract"] == 1
+    assert report[contract_mod.STAMP_FIELD] == \
+        contract_mod.environment_contract_sha256()
