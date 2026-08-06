@@ -417,3 +417,78 @@ artifact — code, corpus, evidence, verdict — remains recoverable at the
 pre-cleanup commit `9ebe44f6bd687e0a6a489ff6cfcd3770abd3b49f`
 (`git show 9ebe44f:<path>`). History was not rewritten; the preregistration
 receipts in `git log` remain valid.
+
+## Background: read these before the report
+
+The method here is an assembly of published techniques, not a new one. These are the
+papers this repository assumes you know, in the order they matter to it. Each line says
+why it matters *here* — the point is not a bibliography, it is the minimum reading that
+makes the design choices legible.
+
+**The training method itself**
+
+- **STaR: Bootstrapping Reasoning With Reasoning** — Zelikman et al., 2022
+  ([arXiv:2203.14465](https://arxiv.org/abs/2203.14465)). The direct ancestor: build
+  training data from the model's own correct outputs. Everything `make agentic` does in
+  the `distill` stage is this idea with an exact verifier in place of an answer check.
+- **Scaling Relationship on Learning Mathematical Reasoning with LLMs (RFT)** — Yuan et
+  al., 2023 ([arXiv:2308.01825](https://arxiv.org/abs/2308.01825)). Rejection-sampling
+  fine-tuning, named and measured. This is the recipe.
+- **Llama 2** — Touvron et al., 2023
+  ([arXiv:2307.09288](https://arxiv.org/abs/2307.09288)). §3 is where rejection sampling
+  becomes a production post-training stage rather than a paper trick.
+- **Qwen3 Technical Report** — Qwen team, 2025. Rejection-sampled SFT is their own
+  Stage 3 ("thinking mode fusion"); this study re-applies the model family's method one
+  level down, which is why the base model is already strong at it.
+
+**The agent loop being trained**
+
+- **ReAct: Synergizing Reasoning and Acting in Language Models** — Yao et al., 2022
+  ([arXiv:2210.03629](https://arxiv.org/abs/2210.03629)). The think → act → observe loop
+  every episode in `agentlab.suite.runtime` follows.
+- **Toolformer** — Schick et al., 2023
+  ([arXiv:2302.04761](https://arxiv.org/abs/2302.04761)). Self-supervised tool use;
+  useful for why tool *selection* is learnable at all.
+
+**The mechanics on a 24 GB card**
+
+- **LoRA: Low-Rank Adaptation of Large Language Models** — Hu et al., 2021
+  ([arXiv:2106.09685](https://arxiv.org/abs/2106.09685)). Why a 260 MB adapter can
+  fine-tune a 4.7B model here when full-parameter training cannot.
+
+**The wider post-training landscape this study deliberately does only part of**
+
+- **Training language models to follow instructions with human feedback (InstructGPT)** —
+  Ouyang et al., 2022 ([arXiv:2203.02155](https://arxiv.org/abs/2203.02155)). The
+  canonical SFT → reward model → PPO pipeline. Read it to see what is *missing* here and
+  why (`docs/EXPERIMENT_HISTORY.md` records the reward-model leg as excluded, at chance
+  accuracy).
+- **Direct Preference Optimization** — Rafailov et al., 2023
+  ([arXiv:2305.18290](https://arxiv.org/abs/2305.18290)). The preference-tuning stage
+  planned as a sibling study.
+- **DeepSeekMath (GRPO)** — Shao et al., 2024
+  ([arXiv:2402.03300](https://arxiv.org/abs/2402.03300)). The RL method registered here as
+  `GRPO_NOT_RUN_HARDWARE_INFEASIBLE`: colocated rollouts need a second full copy of the
+  policy weights, which does not fit alongside the trainer on 23.5 GiB.
+
+**Evaluation, and why this suite scores itself**
+
+- **τ-bench** — Yao et al., 2024
+  ([arXiv:2406.12045](https://arxiv.org/abs/2406.12045)). Agentic tool-use evaluation with
+  a simulated user. Read it for the confounds this project refuses: an LLM judge and a
+  model-simulated user put the measurement inside the thing being measured.
+- **Berkeley Function Calling Leaderboard (BFCL), multi-turn** — Berkeley, 2024. State- and
+  trace-based scoring of multi-turn tool use; the closest published relative of the
+  verifier in `agentlab.suite.verify`.
+
+**Why the thresholds were published before the results**
+
+- **The garden of forking paths** — Gelman & Loken, 2013. Analysis decisions made after
+  seeing data invalidate the inference even with no intent to deceive. This is the whole
+  reason for `configs/preregistration_final.json` and the hash-pinned protocol.
+- **False-Positive Psychology** — Simmons, Nelson & Simonsohn, 2011. Researcher degrees of
+  freedom, and why the sample sizes, margins and stopping rules here are fixed in a
+  committed file rather than chosen during the run.
+
+If you read only two: **STaR** for what the training does, and **Gelman & Loken** for why
+the study is shaped the way it is.
