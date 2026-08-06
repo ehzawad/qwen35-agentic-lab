@@ -511,3 +511,20 @@ def test_stale_rows_are_dropped_from_the_accepted_corpus_and_the_views(tmp_path)
     assert report["rejected"]["stale_environment_contract"] == 1
     assert report[contract_mod.STAMP_FIELD] == \
         contract_mod.environment_contract_sha256()
+
+
+def test_every_artifact_answers_which_tool_surface_produced_it():
+    """The canonical schema digest travels with rollouts, views and traces."""
+    from rollout_helpers import TEST_SECRET, run_engine
+    from agentlab.suite.configio import load_config
+    from agentlab.suite.datasets import build_views
+
+    want = digest_text(rt_mod.tool_schema_bytes("typed_relay"))
+    bundle = build_task(SUITE, SEED, "distill", "typed_relay", 4, 5, None)
+    rec = run_engine([bundle], cfg=load_config(), secret=TEST_SECRET)[0]
+    assert rec["tool_schema_sha256"] == want
+    assert contract_mod.is_current(rec)
+
+    _rows, meta, report = build_views([rec], lambda p, c, t: 10)
+    assert meta and all(m["tool_schema_sha256"] == want for m in meta)
+    assert contract_mod.is_current(report)

@@ -273,6 +273,8 @@ class RolloutEngine:
                                   "tool_msg_index": tool_idx})
 
     def _record(self, c: dict) -> dict:
+        from agentlab.suite.schema import digest_text
+
         bundle, runtime = c["bundle"], c["runtime"]
         spec = bundle.spec
         verdict = runtime.verify(c["final"], transcript=c["messages"],
@@ -299,8 +301,13 @@ class RolloutEngine:
                        "progress": runtime.progress(),
                        "episode": runtime.episode_digest()},
             # Which model-visible environment produced these bytes (D2). Resume
-            # logic can never reuse a tokenless shard after this fix.
+            # logic can never reuse a tokenless shard after this fix. The tool
+            # surface is already inside the contract digest; it is carried
+            # separately as well so a reader can answer "which schemas was this
+            # rolled against" without recomputing the whole contract.
             contract_mod.STAMP_FIELD: contract_mod.environment_contract_sha256(),
+            "tool_schema_sha256": digest_text(
+                rt_mod.tool_schema_bytes(spec.family)),
             # Which card and which engine produced this row (S19). Carried on the
             # ROW, not only in a nearby ledger: a row that cannot say what
             # produced it cannot support a same-card claim.

@@ -229,9 +229,15 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
 
     records, stale = contract.invalidate(records, "accepted trajectory")
     rejected["stale_environment_contract"] = len(stale)
+    schema_sha: dict[str, str] = {}
     for rec in records:
         family = rec["family"]
         tools = schema_cache.setdefault(family, tool_schemas_for_family(family))
+        if family not in schema_sha:
+            from agentlab.suite.runtime import tool_schema_bytes
+            from agentlab.suite.schema import digest_text
+
+            schema_sha[family] = digest_text(tool_schema_bytes(family))
         plan = select_views(rec, cfg)
         if not plan:
             rejected["no_terminal"] += 1
@@ -270,7 +276,8 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
                          # came from (D2): an SFT view built from a tokenless
                          # transcript trains on a different environment from the
                          # one the study evaluates in.
-                         contract.STAMP_FIELD: _stamp()})
+                         contract.STAMP_FIELD: _stamp(),
+                         "tool_schema_sha256": schema_sha[family]})
 
     total = len(rows)
     terminal_weight = counts["terminal"] / total if total else 0.0

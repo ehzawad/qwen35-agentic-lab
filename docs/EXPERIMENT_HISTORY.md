@@ -115,3 +115,48 @@ The twelve final texts are inlined verbatim in
 `tests/suite/test_answer_extraction.py` (`out/` is not committed) so the
 discriminating rescore stays runnable without a GPU or the original run; the
 full-trace certification replay runs additionally whenever those artifacts exist.
+
+## 2026-08-05 — the verify-a5000 dev run is invalidated by the unified fault contract
+
+The twelve-episode `verify-a5000` dev run above is now **excluded, clean-only
+apparatus evidence** and is refused by the current certifier rather than
+re-scored. It was produced under the retired environment: it carries no
+`environment_contract_sha256`, its events use the retired field names
+(`exposed_digest`, `decision`, `fault_emitted`), and it records no canonical
+verdict at all, so oracle-node completion, the fulfillment final state,
+capability-token provenance and the call budget were never checked for it.
+
+Those twelve traces are also, usefully, the **direct evidence for the transcript
+drift** the reconciliation closed. Every assistant turn that made a tool call is
+recorded as `{"role": "assistant", "content": ""}` — the structured tool-call
+object the offline rollout carried is simply absent — and every tool result is
+nameless. Observation digests were blind to both; the chat template is not. That
+is why the parity test compares rendered token ids per decision and not digests.
+
+The answer-grammar rescore this run produced remains valid and remains runnable:
+it is a property of the reader, not of the environment, and the twelve final texts
+are inlined in `tests/suite/test_answer_extraction.py`. What changed is the second
+half of that test — it no longer certifies the on-disk traces through the current
+certification path. It asserts that they are **invalidated**, that their event
+format is not silently accepted, and that both drifts are present in their real
+bytes.
+
+No number from that run enters any claim. It contained no fault-recovery outcomes
+and never entered the study trace set.
+
+## 2026-08-05 — size census under the unified contract
+
+`scenario.tool_output_max_tokens` was 208, measured against the tokenless
+payloads. Re-measured exhaustively (78,100 episodes, 742,500 model-visible
+observations, 624,800 rendered views, all four committed train/dev splits × twelve
+cells × seven fault variants × eight prompts) with the Qwen3.5-4B tokenizer:
+the model-visible tool result peaks at **231 tokens / 474 chars** and the rendered
+terminal view at **4,960 tokens**. Caps moved to 256 and 5,120 respectively;
+`tool_output_max_chars` stayed at 512. Artifact and hash:
+`results/agentic/token_census.json`,
+`98379c42540a30d7c6c29fea53193a169714351f184f9c58b516484dc5896fa8`.
+
+This is a measurement, not a result: it says how large the registered wire format
+is, and the caps follow it. `tests/test_size_ceilings.py` fails if a cap ever
+drops below what was measured, or if the census was taken under a different
+environment contract.
