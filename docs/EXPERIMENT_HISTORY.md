@@ -236,3 +236,38 @@ the cross-check wants to be one-directional (a verdict claiming success the
 ledger side refuses is tampering; a verdict refusing what the ledger side cannot
 see is normal), and `certified_success` already ANDs the two, so no gate needs to
 move.
+
+### Forward correction, 2026-08-06 — the preflight is finished and green
+
+The paragraph above stopped at probes 1–2 and said probes 3, 4 and 5 "were not
+run". That is no longer the state, and the paragraph is left standing rather than
+rewritten because it was true when written.
+
+The S17 cross-predicate seam was closed one-directionally as described
+(`bfc8543`, "a strict refusal is not a harness bug"), the four training-corpus
+seams closed with it (`bbcdb00`), and the preflight then ran to completion:
+**all five probes pass, 87 checks total** (`2ba52da`) —
+probe1 16, probe2 12, probe3 24, probe4 13, probe5 22 — over
+`results/agentic/preflight/probe{1..5}.json`. Probe 3 is the live 12-episode HTTP
+matrix on one server startup, probe 4 the tiny offline-RS batch across both
+prompt variants on one engine, probe 5 the view builder plus a one-optimizer-step
+SFT canary. Those three did charge GPU minutes, and they are on the ledger.
+
+## Round 2 write-up rules: the saturated secondary endpoints
+
+The prompt tournament finished, `p2_plan_state_act` won, and the two secondary
+endpoints turned out to be at ceiling on the development split: 295/300 on the H4
+all-tools orchestration axis and 296/300 on the H8 execution axis, so even a
+perfect trained arm could gain only 0.0167 and 0.0133 on those realized samples —
+both under the registered `+0.05` margin.
+
+I initially wrote that this meant "the preregistered consequence is INCONCLUSIVE
+by saturation" and that "training had nothing to add" (commit message of
+`4c840e3`, which stays as pushed). Both readings are wrong, and the referee's
+corrections — the machine statuses the frozen analyzer actually produces, what a
+saturated *development* endpoint does and does not establish, the required
+pre-results wording, the per-gate reporting template, and why swapping the
+ceiling for the deep-horizon floor (1/26 at fulfillment H14, 7/26 at H20, against
+244/248 across the other ten cells) would be a bad trade — are recorded in
+**[INTERPRETATION.md](INTERPRETATION.md)**. That file governs the write-up of the
+held-out secondary results.
