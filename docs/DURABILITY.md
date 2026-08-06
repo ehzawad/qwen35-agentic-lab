@@ -58,11 +58,27 @@ The tool is deliberately not on any stage's import path and imports no
 
 A digest of a file that is still being appended to is a lie, and an index entry
 built from one is worse than no entry: it points at bytes that have moved. So
-every candidate is digested twice before upload, uploaded, then digested a third
-time. A file whose digest moved at any point is **not recorded** — it goes to
-`skipped` with both digests and the reason, and the next run picks it up. The
-GPU ledger and session journal are appended to continuously during rejection
-sampling, so they are expected to land in `skipped` until the stage closes.
+every candidate is digested at four points:
+
+1. twice before upload — a cheap prescan that stops an obviously live file from
+   being transferred at all (`digest_moved_prescan`);
+2. again immediately after its upload (`digest_moved`);
+3. once more when the whole run ends (`digest_moved_during_run`).
+
+Point 3 exists because points 1 and 2 only cover a file's own upload window. The
+GPU session journal heartbeats about every 30 s and sailed straight through that
+window on the first real run — `verify` showed its recorded digest was already
+stale nine seconds later. So the end-of-run recheck also holds the observation
+window open to at least `--settle-seconds` (default 45), because a window
+shorter than the slowest appender's period is not evidence of quiescence, and
+the difference between "did not move" and "was not watched long enough to move"
+is the whole claim. Records written by *earlier* runs are left alone: they
+correctly describe the bytes at an earlier stage boundary.
+
+A file that fails any of those checks is **not recorded**. It goes to `skipped`
+with both digests and the reason, and the next run picks it up. The GPU session
+journal is therefore expected to sit in `skipped` for as long as a producer
+holds the card.
 
 Consequence: `hf_artifacts.py upload` is safe to run at any time, including
 while rejection sampling holds the A5000. It never starts a GPU process, never

@@ -114,6 +114,7 @@ class FakeUploader:
 
 
 def publish(ha, root, uploader, groups=None, remote=None, **kw):
+    kw.setdefault("settle", 0.0)          # no wall-clock waiting in the tests
     pub = ha.Publisher(root, "ehzawad/test-artifacts", uploader,
                        remote_files=set() if remote is None else remote,
                        log=lambda *a, **k: None, **kw)
@@ -258,6 +259,72 @@ def test_a_file_growing_before_upload_is_not_even_sent(ha, tree, monkeypatch):
     skipped = {s["path"]: s for s in idx["skipped"]}
     assert skipped[LIVE]["reason"] == "digest_moved_prescan"
     assert LIVE not in [f["path"] for f in idx["files"]]
+
+
+def test_a_slow_appender_is_caught_by_the_end_of_run_recheck(ha, tree):
+    """The session journal heartbeats twice a minute: its own window is not enough.
+
+    The tamper lands on a file uploaded EARLY, long after which other groups are
+    still being transferred -- exactly the shape that let a live journal through
+    a per-file-only check.
+    """
+    up = FakeUploader()
+    pub = ha.Publisher(tree, "ehzawad/test-artifacts", up, remote_files=set(),
+                       log=lambda *a, **k: None, settle=0.0)
+    real_record = pub._record
+
+    def record_then_grow(p, oid):
+        real_record(p, oid)
+        if p.rel == LIVE:                    # a heartbeat lands after recording
+            with p.abs.open("ab") as fh:
+                fh.write(b'{"event": "heartbeat"}\n')
+    pub._record = record_then_grow
+    idx = pub.run(list(ha.DEFAULT_GROUPS))
+
+    assert LIVE not in [f["path"] for f in idx["files"]]
+    s = {x["path"]: x for x in idx["skipped"]}[LIVE]
+    assert s["reason"] == "digest_moved_during_run"
+    assert s["sha256_after"] == hashlib.sha256(
+        (tree / LIVE).read_bytes()).hexdigest()
+    assert pub.stats["skipped"] == 1
+    assert pub.stats["recorded"] == len(idx["files"])
+    assert idx["totals"]["files"] == len(idx["files"])
+    assert idx["totals"]["bytes"] == sum(f["bytes"] for f in idx["files"])
+
+
+def test_the_observation_window_is_held_open_to_the_settle_floor(ha, tree,
+                                                                monkeypatch):
+    """A window shorter than the appender's period is not evidence of quiescence."""
+    slept: list[float] = []
+    monkeypatch.setattr(ha.time, "sleep", lambda s: slept.append(s))
+    up = FakeUploader()
+    pub, idx = publish(ha, tree, up, settle=45.0)
+    assert slept and 40 < slept[0] <= 45, slept
+    assert idx["files"]
+
+    # nothing recorded means nothing to watch, so nothing to wait for
+    slept.clear()
+    remote = {f["remote_path"] for f in idx["files"]}
+    publish(ha, tree, FakeUploader(), remote=remote, settle=45.0)
+    assert slept == []
+
+
+def test_an_earlier_runs_record_is_not_demoted_by_a_later_change(ha, tree):
+    """A record from a previous boundary correctly describes the bytes then."""
+    _, idx1 = publish(ha, tree, FakeUploader())
+    remote = {f["remote_path"] for f in idx1["files"]}
+    stale = {f["path"]: f["sha256"] for f in idx1["files"]}[LIVE]
+
+    # nothing to do this time except one unrelated new file
+    _write(tree / "results/agentic/manifests/m2.json",
+           json.dumps({"run_id": "agentic-v1", "session_id": SESSION}))
+    up2 = FakeUploader(tamper="results/agentic/manifests/m2.json")
+    _, idx2 = publish(ha, tree, up2, remote=remote)
+
+    kept = {f["path"]: f for f in idx2["files"]}
+    assert LIVE in kept and kept[LIVE]["sha256"] == stale
+    assert "results/agentic/manifests/m2.json" in [s["path"]
+                                                   for s in idx2["skipped"]]
 
 
 def test_a_previously_recorded_file_that_goes_live_loses_its_record(ha, tree):

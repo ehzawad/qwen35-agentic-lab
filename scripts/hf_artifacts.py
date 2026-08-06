@@ -28,12 +28,15 @@ names the dataset-repo commit oid that added the file.
 
 THE WRITER RULE. A digest of a file that is still being appended to is a lie.
 Every candidate is digested twice before upload (a cheap prescan), uploaded,
-and then digested a THIRD time. A file whose digest moved at any point is
-NOT recorded: it goes to `skipped` with both digests and the reason. The
-remote may hold a torn copy of such a file; it is not referenced by the index,
-and the next run re-uploads and overwrites it. This is why the tool can be run
-while rejection sampling is appending to the GPU ledger: the ledger simply
-fails to record until its producer is quiescent.
+then digested a THIRD time, and finally re-digested once more when the whole
+run ends -- because a slow appender such as the GPU session journal, which
+heartbeats about twice a minute, can sail through its own upload window and
+still be live. A file whose digest moved at ANY of those points is NOT
+recorded: it goes to `skipped` with both digests and the reason. The remote may
+hold a snapshot of such a file; it is not referenced by the index, and the next
+run re-uploads and overwrites it. This is why the tool can be run while
+rejection sampling is appending to the GPU ledger: the ledger simply fails to
+record until its producer is quiescent.
 
 Re-runnable at every stage boundary. Recorded files are matched by (size,
 mtime, digest) and skipped without re-uploading, so a second run transfers
@@ -75,6 +78,7 @@ import os
 import pathlib
 import secrets
 import sys
+import time
 from typing import Callable, Iterable, Sequence
 
 TOOL = "scripts/hf_artifacts.py"
@@ -101,6 +105,15 @@ COMMITMENT_DOMAIN = "agentlab-run-secret-commitment-v1"
 CHUNK = 1 << 20
 MAX_OPS_PER_COMMIT = 48
 MAX_BYTES_PER_COMMIT = 1_500_000_000
+
+# A window shorter than the slowest appender's period is not evidence of
+# quiescence. The GPU session journal heartbeats about every 30 s, and on the
+# first real run a small upload finished inside that gap and recorded a digest
+# that was already stale nine seconds later. So the end-of-run recheck holds the
+# observation window open to at least this long. It costs nothing at a stage
+# boundary and is what makes "these bytes did not move while the run watched
+# them" a claim rather than a coincidence.
+SETTLE_SECONDS = 45.0
 
 
 # ---------------------------------------------------------------------------
@@ -459,8 +472,10 @@ class Publisher:
     def __init__(self, root: pathlib.Path, repo_id: str, uploader: Uploader,
                  remote_files: set[str] | None = None,
                  now: Callable[[], str] = now_utc,
-                 recheck: bool = False, log=print):
+                 recheck: bool = False, log=print,
+                 settle: float = SETTLE_SECONDS):
         self.root = root
+        self.settle = float(settle)
         self.repo_id = repo_id
         self.uploader = uploader
         self.remote = set() if remote_files is None else set(remote_files)
@@ -471,6 +486,7 @@ class Publisher:
         self.prior = {f["path"]: f for f in self.index["files"]}
         self.stats = {"recorded": 0, "unchanged": 0, "skipped": 0,
                       "refused": 0, "uploaded_bytes": 0}
+        self.touched: set[str] = set()
 
     # -- URIs ----------------------------------------------------------------
     def uri(self, remote_path: str, oid: str | None = None) -> str:
@@ -506,7 +522,59 @@ class Publisher:
         self._note("files", entry)
         self.prior[p.rel] = entry
         self.remote.add(p.remote_path)
+        self.touched.add(p.rel)
         self.stats["recorded"] += 1
+
+    def _demote(self, rel: str, group: str, before: str, after: str,
+                reason: str, detail: str) -> None:
+        self._drop("files", rel)
+        self.prior.pop(rel, None)
+        self.touched.discard(rel)
+        self._note("skipped", {"path": rel, "group": group, "reason": reason,
+                               "sha256_before": before, "sha256_after": after,
+                               "detail": detail,
+                               "observed_at_utc": self.now()})
+        self.stats["recorded"] = max(0, self.stats["recorded"] - 1)
+        self.stats["skipped"] += 1
+        self.log(f"  LIVE     {rel}: {reason}")
+
+    def _reverify(self) -> None:
+        """Everything recorded in this run must still hash the same at the end.
+
+        The per-file check only covers the window between a file's own digest
+        and its own upload. A slow appender -- the GPU session journal
+        heartbeats about twice a minute -- can sail through that window and
+        still be live. Requiring stability across the WHOLE run is the honest
+        claim: the index says these bytes did not move while this run watched
+        them. Records made by EARLIER runs are left alone; they correctly
+        describe the bytes at an earlier stage boundary.
+        """
+        if not self.touched:
+            return
+        left = self.settle - (time.monotonic() - self.t0)
+        if left > 0:
+            self.log(f"  settle   holding the window open {left:.0f}s so a slow "
+                     f"appender cannot pass as quiescent")
+            time.sleep(left)
+        for rel in sorted(self.touched):
+            rec = self.prior.get(rel)
+            if not rec:
+                continue
+            p = self.root / rel
+            if not p.exists():
+                self._demote(rel, rec.get("group", ""), rec["sha256"], "",
+                             "vanished_after_upload",
+                             "the file was removed before the run finished")
+                continue
+            after, _ = sha256_file(p)
+            if after != rec["sha256"]:
+                self._demote(
+                    rel, rec.get("group", ""), rec["sha256"], after,
+                    "digest_moved_during_run",
+                    "the digest was stable across this file's own upload but "
+                    "moved before the run finished, so its producer is still "
+                    "appending; the remote copy is a snapshot and is "
+                    "deliberately not referenced")
 
     # -- the one interesting decision ---------------------------------------
     def _stable_digest(self, path: pathlib.Path) -> tuple[str, int, int] | dict:
@@ -520,6 +588,7 @@ class Publisher:
         return d1, n1, st.st_mtime_ns
 
     def run(self, groups: Sequence[str]) -> dict:
+        self.t0 = time.monotonic()
         for name in groups:
             g = GROUPS_BY_NAME[name]
             pending: list[Pending] = []
@@ -596,6 +665,7 @@ class Publisher:
                         continue
                     self._record(p, oid)
                 self._flush()
+        self._reverify()
         return self._flush()
 
     @staticmethod
@@ -921,7 +991,7 @@ def cmd_upload(args) -> int:
     groups = chosen_groups(args)
     if args.dry_run:
         pub = Publisher(root, args.repo_id, dry_uploader(), remote_files=set(),
-                        recheck=args.recheck_digests)
+                        recheck=args.recheck_digests, settle=0.0)
         # a dry run must not rewrite the committed index
         pub._flush = lambda: pub.index  # type: ignore[method-assign]
         idx = pub.run(groups)
@@ -936,7 +1006,8 @@ def cmd_upload(args) -> int:
     print(f"repo {args.repo_id} (private dataset): {len(remote)} file(s) present")
     pub = Publisher(root, args.repo_id,
                     hf_uploader(api, args.repo_id, args.run_id),
-                    remote_files=remote, recheck=args.recheck_digests)
+                    remote_files=remote, recheck=args.recheck_digests,
+                    settle=args.settle_seconds)
     idx = pub.run(groups)
     # the index itself belongs in the remote too, so the bucket is self-describing
     try:
@@ -998,6 +1069,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "so it lists everything a first upload would send")
     p.add_argument("--recheck-digests", action="store_true",
                    help="ignore the (size, mtime) fast path")
+    p.add_argument("--settle-seconds", type=float, default=SETTLE_SECONDS,
+                   help="minimum observation window before the end-of-run "
+                        "digest recheck; a window shorter than the slowest "
+                        "appender's period is not evidence of quiescence")
     p.set_defaults(fn=cmd_upload)
 
     p = sub.add_parser("commit-secret",
