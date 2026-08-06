@@ -2,6 +2,21 @@
 
 **Dated 2026-08-06, written while rejection sampling is executing on the pinned A5000.**
 
+## Closure update — 2026-08-06
+
+D5 is **closed** by commit `1b07a64`. The removed
+`tests/test_chain.py::test_lock_prompt_refuses_before_P_exists` test used a
+placeholder prompt hash that always triggered the earlier S16 candidate-hash
+refusal, so it never reached the no-`P` gate named by the function. Removing it
+was more accurate than rebuilding a fixture for a branch it did not exercise:
+`test_reveal_always_requires_a_committed_P` still covers the no-`P` refusal on
+the reveal path, and the non-candidate prompt refusal has its own focused test.
+The recorded suite result is 1,052 passed, 6 skipped, 0 failed.
+
+The historical diagnosis remains below rather than being rewritten away. D1–D4
+and the smaller items remain open unless a later closure update names the commit
+that closed them.
+
 This ledger exists because of one constraint, and it is worth stating plainly rather
 than discovering later from a corpus that cannot be explained:
 
@@ -13,9 +28,10 @@ than discovering later from a corpus that cannot be explained:
 > silent and unrecoverable: no receipt would show it, because each shard's receipt is
 > internally consistent with whatever program wrote it.
 
-So the following repairs were **identified, diagnosed, and deliberately not applied**.
-Each row names the file it touches and why it waited. None of them is closed by this
-commit series; this file is the promise, not the fix.
+So the following repairs were **identified, diagnosed, and deliberately not applied**
+when this ledger was first written. Each row names the file it touches and why it
+waited. The original diagnosis is preserved; later closure updates are recorded above
+with the commit that changed the state.
 
 Frozen for the duration of the distill stage: `src/agentlab/multidistill.py`,
 `src/agentlab/prompt_control.py`, `src/agentlab/chat.py`, `src/agentlab/provenance.py`,
@@ -215,6 +231,10 @@ markdown file.
 
 ## D5 — One test consults the live repository instead of an isolated git history
 
+> **Historical diagnosis.** D5 is closed by commit `1b07a64`; the closure update above
+> records why the test was removed rather than rebuilt. The text below preserves what
+> was known when the defect was open.
+
 **File:** `tests/test_chain.py:431`, `test_lock_prompt_refuses_before_P_exists`. This is
 the single failing test in the current suite (**998 passed, 1 failed, 6 skipped**).
 
@@ -283,7 +303,8 @@ writes, and it belongs in a coherent later pass rather than a lone drive-by.
 ## What this ledger commits me to
 
 1. Nothing above is fixed by pretending it is fixed. The README status block and
-   `docs/INTERPRETATION.md` state the same facts this file does.
+   `docs/INTERPRETATION.md` state the same facts this file does; a closure update names
+   the commit that changed the state and preserves the historical diagnosis.
 2. **D1 lands before `L`.** That is the one ordering constraint in this file that a
    reviewer can check by git ancestry, and it is the one I am most likely to be tempted
    to skip, because the winner is unaffected.
