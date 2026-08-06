@@ -379,11 +379,16 @@ def check_horizons(splits_data) -> list[str]:
 
 def check_oracle_execution(splits_data) -> list[str]:
     """Checks 4, 5, 6, 7 over every spec (both arms for dev/eval/stress)."""
+    from agentlab.suite import faults as faults_mod
     from agentlab.suite.faults import MALFORMED_LITERAL
     from agentlab.suite.runtime import run_oracle
     from agentlab.suite.schema import digest_text
 
-    literal_digest = digest_text(MALFORMED_LITERAL)
+    # The malformed exposure is the truncated prefix, a newline, and a MARKED
+    # error envelope carrying the recovery token. The token is keyed with the run
+    # secret, so the whole exposure cannot be pinned by one committed digest; the
+    # PREFIX line can, and that is the part that must never contain the value.
+    _ = digest_text
     problems: list[str] = []
 
     def run_arm(bundle, spec, label: str) -> None:
@@ -415,9 +420,18 @@ def check_oracle_execution(splits_data) -> list[str]:
                 continue
             fire = [e for e in rt.events
                     if e.fault_triggered and e.oracle_node == f.target_node]
-            if fire and fire[0].exposed_result_digest != literal_digest:
+            if not fire:
+                continue
+            lines = fire[0].exposed_text.splitlines()
+            if lines[0] != MALFORMED_LITERAL:
                 problems.append(f"{spec.task_id}[{label}]: malformed exposure "
-                                "is not the committed truncated literal")
+                                "does not begin with the committed truncated "
+                                "literal")
+            if faults_mod.recovery_token(_run_secret(), spec.task_id,
+                                         "malformed", f.target_node) not in \
+                    fire[0].exposed_text:
+                problems.append(f"{spec.task_id}[{label}]: malformed exposure "
+                                "carries no recovery token")
         # 7: idempotent replay after the ambiguous mutation
         for f in spec.faults:
             if not (f.fault_type == "malformed"
@@ -558,10 +572,15 @@ def check_kb_miss_no_leak(splits_data) -> list[str]:
             rt = _fresh_runtime(b)
             rt.begin_decision()
             exposed = rt.dispatch("kb_lookup", {"key": "KNOSUCHKEY404"})
-            obj = json.loads(exposed)
+            from agentlab.suite.runtime import parse_observation
+
+            parsed = parse_observation(exposed)
+            obj = parsed["objects"][0] if parsed["objects"] else {}
             if obj.get("ok") is not False or obj.get("error") != "no_entry":
                 problems.append(f"{family}: kb miss payload is {exposed!r}")
-            extras = set(obj) - {"ok", "error", "event_id"}
+            if not parsed["receipt"]:
+                problems.append(f"{family}: kb miss carries no receipt line")
+            extras = set(obj) - {"ok", "error"}
             if extras:
                 problems.append(f"{family}: kb miss leaks fields {sorted(extras)}")
             for key in b.kb:
