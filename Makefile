@@ -22,7 +22,7 @@ RSSFT   := out/$(SLUG)-rssft-lora
 GRPO    := out/$(SLUG)-rsgrpo-lora
 MERGED  := out/$(SLUG)-merged
 
-.PHONY: help setup gpu smoke data inspect rs-sft grpo grpo-from-base \
+.PHONY: help setup gpu smoke data inspect rs-sft grpo grpo-from-base token-census \
         agentic agentic-plan agentic-stages locks \
         suite validate-suite export-specs variance-report \
         distill \
@@ -167,6 +167,13 @@ validate-suite:
 # split-leakage veto needs.
 export-specs:
 	$(PY) scripts/export_eval_specs.py
+
+# Re-measure the model-visible size ceilings under the unified fault contract
+# (D2). CPU only: it opens no CUDA context, it only loads the tokenizer. The
+# artifact and its SHA-256 are what the preregistration amendment pins, so a cap
+# in configs/multifaceted.yaml can only move after this has been re-run.
+token-census:
+	$(PY) scripts/token_census.py
 
 variance-report:
 	$(PY) -m agentlab.variance report

@@ -21,6 +21,131 @@
     "future_a6000_work": "A future A6000 experiment would be a SEPARATE registered run with its own locks, seeds, ledger and hardware declaration. It may never be spliced into this run's trace set (see machine.hardware_integrity.replication_rule)."
   },
 
+    "fault_contract_reconciliation_receipt": {
+      "date": "2026-08-05",
+      "defect": "D2: the repository implemented TWO model-visible environments. The training path (suite.runtime.EpisodeRuntime + FaultEngine) emitted tokenless fault envelopes carrying request_id and sometimes event_id, offered no recovery_token tool argument, neither parsed nor stripped one, credited recovery for any later canonical observation at the faulted node, and included event_id with no receipt on clean results. The claim-bearing evaluator (suite.evaluate.SpecRuntime + FaultInjector) emitted token-bearing envelopes with remediation text, locally augmented every tool schema with recovery_token, parsed and stripped it, demanded the registered remediation contract, appended a receipt line, DROPPED the assistant tool-call object and the tool result's name, and RE-DERIVED the wrong unit through wrong_unit_target instead of using the committed FaultSpec value. provenance.certify_episode -- the function the gates are denominated in -- contained zero references to oracle-node completion, the fulfillment final state, capability-token provenance or the call budget. Both paths imported the canonical modules and both passed their own tests.",
+      "treatment_change_statement": "This changes the registered training treatment. Prompt selection, rejection sampling, SFT recovery views and any variance work will now expose recovery tokens, remediation text and receipts that the previous training runtime omitted, and will filter recovery with the registered remediation predicate.",
+      "canonical_direction": "The registered TOKEN-BEARING contract, implemented in suite.runtime.EpisodeRuntime and its strict verifier. Evaluation's SpecRuntime was NOT promoted wholesale: the token-bearing form is already the preregistered contract, p4_error_repair and p8_combined train against it, and tokens are the only evidence that distinguishes deliberate remediation from a blind retry.",
+      "environment_contract": {
+        "previous": "two contracts, and no digest existed, so no artifact could say which environment produced it",
+        "current_version": "token-bearing-v1",
+        "current_sha256": "SET_BY_CENSUS",
+        "digest_inputs": [
+          "exact tool-schema bytes per family",
+          "observation form: canonical envelope plus a receipt line, no event_id, no request_id",
+          "every fault envelope: transient, rate_limit, rate_limit_active, malformed, wrong_unit",
+          "the remediation requirement per fault class",
+          "the remediation predicate",
+          "the success predicate",
+          "the budget formulas",
+          "the TraceEvent field list"
+        ],
+        "stamped_into": [
+          "certification specs",
+          "prompt-tournament rows",
+          "raw rejection-sampling shards",
+          "accepted records",
+          "SFT view metadata and report",
+          "evaluation traces"
+        ],
+        "invalidation_rule": "An artifact whose environment_contract_sha256 is absent or stale is REFUSED, not resumed. Resume-by-task-id can therefore never smuggle a tokenless artifact back in."
+      },
+      "deleted_parallel_implementations": [
+        "agentlab.suite.evaluate.SpecRuntime",
+        "agentlab.suite.evaluate.suite_tool_schemas",
+        "agentlab.suite.faults.FaultInjector",
+        "agentlab.suite.faults.wrong_unit_target",
+        "agentlab.suite.verify.Verdict.strict_success"
+      ],
+      "one_success_predicate": "certified_success = committed exact answer AND every oracle node completed in order AND every dependency crossed a later assistant decision AND runtime/verifier credit maps agree AND the terminal answer came from a validated observation AND the receipt chain is valid AND no hallucinated result AND no unsafe mutation AND capability tokens were observed before use AND the fulfillment final state equals oracle_final AND calls <= max_calls AND decisions <= max_decisions AND no wall/parser/call-cap termination AND no runaway AND every assigned fault has a certifying recovery event",
+      "one_remediation_predicate": "The event that ESTABLISHES the post-fault canonical result must itself satisfy the contract: the exact emitted token on the same stripped call identity (transient, malformed); additionally a strictly later decision (rate_limit); a later unit_convert explicitly requesting the original target unit (wrong_unit); a token-bearing idempotent replay with replay=true (ambiguous malformed mutation). Labels: ok, blind_retry, no_remediation, no_post_fault_result, not_exposed. A canonical result reached without a qualifying establishing event is blind_retry and is never certified, and a decorative token echo after an earlier blind recovery cannot launder it.",
+      "protocol_reinterpretations": [
+        "A status query after an ambiguous malformed mutation is NO LONGER certified recovery: it neither reissues the same call nor echoes the token. Certifying it again requires its own amendment.",
+        "The equality-cap ruling: an episode that succeeds using exactly max_calls is WITHIN budget; only exceeding the cap, or the runner terminating at it, is runaway. The cap value 2H+4 is unchanged.",
+        "A hallucinated-result source is any scalar of a validated successful observation, not only its `value` field. Reading only `value` labelled every correct fulfillment episode -- whose answer is the finalize completion_token -- a fabrication."
+      ],
+      "caps": {
+        "token_census_artifact": "out/agentic/token_census.json",
+        "token_census_sha256": "SET_BY_CENSUS",
+        "tokenizer": "SET_BY_CENSUS",
+        "changes": "SET_BY_CENSUS"
+      },
+      "affected_modules": [
+        "scripts/token_census.py (new)",
+        "scripts/validate_suite.py",
+        "src/agentlab/analyze.py",
+        "src/agentlab/chat.py",
+        "src/agentlab/multidistill.py",
+        "src/agentlab/prompt_control.py",
+        "src/agentlab/provenance.py",
+        "src/agentlab/suite/contract.py (new)",
+        "src/agentlab/suite/datasets.py",
+        "src/agentlab/suite/envs/fulfillment.py",
+        "src/agentlab/suite/envs/lookup_chain.py",
+        "src/agentlab/suite/envs/typed_relay.py",
+        "src/agentlab/suite/evaluate.py",
+        "src/agentlab/suite/faults.py",
+        "src/agentlab/suite/generate.py",
+        "src/agentlab/suite/rewards.py",
+        "src/agentlab/suite/runtime.py",
+        "src/agentlab/suite/schema.py",
+        "src/agentlab/suite/verify.py",
+        "src/agentlab/variance.py"
+      ],
+      "rewritten_test_modules": [
+        "tests/agentic_helpers.py",
+        "tests/rollout_helpers.py",
+        "tests/suite/conftest.py",
+        "tests/suite/test_answer_extraction.py",
+        "tests/suite/test_claim_splits.py",
+        "tests/suite/test_faults.py",
+        "tests/suite/test_oracle_execution.py",
+        "tests/suite/test_recovery_verifier.py",
+        "tests/test_agentic_analyze.py",
+        "tests/test_environment_parity.py (new)",
+        "tests/test_fault_injection.py",
+        "tests/test_provenance.py",
+        "tests/test_suite_reconciliation.py",
+        "tests/test_variance.py"
+      ],
+      "observational_equivalence_test": {
+        "path": "tests/test_environment_parity.py",
+        "compared_fields": [
+          "environment_contract_sha256",
+          "tool_schema_bytes",
+          "budgets",
+          "model_visible_tool_bytes",
+          "rendered_prefix_token_ids_by_decision",
+          "progress",
+          "final_state_digest",
+          "verdict"
+        ],
+        "decisive_field": "rendered_prefix_token_ids_by_decision. Observation digests catch a receipt versus an event_id but are blind to a dropped assistant tool-call object or a missing tool name, which is exactly what the real A5000 trace carried.",
+        "coverage": "all 12 family/horizon cells, clean plus every eligible fault class plus the ambiguous malformed mutation",
+        "cases": "SET_BY_CENSUS",
+        "teeth": "Verified by mutation: flattening the assistant turn back to {role: assistant, content} and dropping the tool name fails the first cell while every observation digest still matches."
+      },
+      "state_of_the_study": {
+        "measured_study_gpu_hours": 0.0,
+        "optimizer_steps": 0,
+        "heldout_results": 0,
+        "frozen_prompt_winner": "absent",
+        "trained_checkpoints": 0,
+        "preregistration_final_marker": "absent"
+      },
+      "excluded_prior_evidence": "The isolated 12-episode verify-a5000 dev verification run is disclosed as excluded, clean-only apparatus evidence. It contained no fault-recovery outcomes and never entered the study trace set; it carries no environment_contract_sha256, uses the retired event format, and visibly contains both transcript drifts. It is refused by the invalidation rule rather than re-certified.",
+      "nothing_outcome_driven": "No threshold, margin, sample size, estimand, launch floor or held-out result motivated or was touched by this change. Zero study GPU-hours and zero held-out results existed when it was made, so there is no result it could have been fitted to.",
+      "regenerated_artifacts": {
+        "suite_specs_kb_oracles": "unchanged: scripts/validate_suite.py check 1 regenerates them and verifies the committed SHA256SUMS byte-for-byte",
+        "certspecs": "REGENERATED: they now export spec_row and oracle_nodes (the canonical runtime inputs) and carry the contract stamp",
+        "prompt_tournament_rows": "none existed",
+        "raw_rs_shards": "none existed",
+        "accepted_corpus": "none existed",
+        "sft_views": "none existed",
+        "evaluation_traces": "none existed under the study run id"
+      },
+      "finalization_refusal": "finalize-prereg may not run unless the observational-equivalence test passes and the tokenizer size census has been recorded with its artifact hash."
+    },
   "hardware": {
     "gpu_count": 1,
     "expected_name": "NVIDIA RTX A5000",
@@ -79,7 +204,7 @@
   },
 
   "runaway_definition": [
-    "hard call cap 2H+4 reached",
+    "hard call cap 2H+4 EXCEEDED, or the runner terminating at the cap (termination_reason == call_cap). AMENDMENT 2026-08-05 (fault_contract_reconciliation_receipt.protocol_reinterpretations): an episode that succeeds using exactly max_calls is WITHIN budget and is not runaway. The cap VALUE 2H+4 is unchanged; the earlier wording \"reached\" was implemented as len(events) >= max_calls, which contradicted the verifier and the reward commentary, both of which treat calls <= max_calls as reachable success.",
     "three identical normalized calls each returning the identical error observation",
     "four consecutive calls that do not advance the provenance ledger",
     "runner termination for token, wall-clock, or parser budget (termination_reason in {token_budget, wall_clock, parser_budget})"

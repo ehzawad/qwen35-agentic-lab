@@ -686,3 +686,138 @@ speculative-decoding claims. Successful dependency-chain execution does not
 reveal an internal planning mechanism: the protocol supports narrow
 *behavioural* claims inside one procedural generator distribution, nothing
 more.
+
+## 11. AMENDMENT 2026-08-05 — one fault contract, one success predicate (D2)
+
+> **This changes the registered training treatment.** Prompt selection,
+> rejection sampling, SFT recovery views and any variance work will now expose
+> recovery tokens, remediation text and receipts that the previous training
+> runtime omitted, and will filter recovery with the registered remediation
+> predicate. Recorded **before** any prompt tournament or production rollout.
+
+### What was wrong
+
+The repository implemented **two environments**.
+
+| surface | training path (`suite.runtime.EpisodeRuntime` + `FaultEngine`) | evaluation path (`suite.evaluate.SpecRuntime` + `FaultInjector`) |
+|---|---|---|
+| error envelope | tokenless; `request_id`, sometimes `event_id` | `recovery_token` + `remediation` |
+| tool schema | no `recovery_token` argument | locally augmented with it |
+| token handling | never parsed or stripped | parsed and stripped |
+| recovery | any later canonical result sufficed | token / timing / corrected-unit contract |
+| task success | oracle nodes, final state, capability provenance, budgets | answer source, receipts, hallucination, runaway |
+| clean result | included `event_id`, no receipt | no `event_id`, appended `receipt: r-…` |
+| transcript | assistant tool-call object and tool `name` preserved | **tool-call object dropped**, tool result nameless |
+| wrong unit | committed `FaultSpec.params["wrong_unit"]` | **re-derived** through `wrong_unit_target` |
+
+Both imported "the canonical modules"; both passed their own tests. The
+consequences were outcome-blind (no GPU stage had run) and material:
+
+* the policy would have been **trained in a different environment from the one
+  it is scored in**, for all four fault classes;
+* two definitions of strict success survived and the **weaker one was what the
+  SFT acceptance filter enforced**, so the corpus could contain trajectories the
+  claim-bearing certifier labels `blind_retry`;
+* `p4_error_repair` and `p8_combined` instruct the model about `recovery_token`,
+  but the tournament that SELECTS the winning prompt ran tokenless, where that
+  instruction is **inert**; `p5_provenance` promises a receipt on every tool
+  result, and offline rollouts had none, so it was inert too;
+* `provenance.certify_episode` — the function the gates are denominated in —
+  contained **zero** references to oracle-node completion, the fulfillment final
+  state, capability-token provenance or the call budget.
+
+### What is registered now
+
+**One runtime.** `suite.runtime.EpisodeRuntime` and its strict verifier, for
+prompt selection, rejection sampling, SFT acceptance, variance work, evaluation
+and analyzer recomputation. `SpecRuntime` and `FaultInjector` are deleted.
+
+**One tool schema.** `tool_schemas_for_family` declares the optional
+`recovery_token` argument on **every** tool of **every** family — the model does
+not know in advance which tool will fault. Parsed and stripped in exactly one
+place; it never reaches canonical tool semantics, oracle matching or the semantic
+call digest.
+
+**One model-visible observation form**, on every observation including clean ones:
+
+```text
+<canonical envelope, sorted keys, compact separators>
+receipt: r-<32 hex>
+```
+
+No `event_id`, no `request_id` — call and event ids stay in the hidden ledger.
+
+**One event format.** The `suite.schema.TraceEvent` superset, serialized by both
+paths: `exposed_text`, `exposed_result_digest`, `receipt`,
+`model_visible_digest`, `canonical_semantic_digest`, `token_provided`,
+`recovery_token`, `requested_unit`, plus the existing oracle/credit/decision/
+mutation/replay/state/capability fields.
+
+**One remediation predicate**, in `suite.verify`. The event that ESTABLISHES the
+post-fault canonical result must itself satisfy the contract: the exact emitted
+token on the same stripped call identity (transient, malformed); additionally a
+strictly later decision (rate_limit); a later `unit_convert` explicitly
+requesting the original target unit (wrong_unit); a token-bearing idempotent
+replay with `replay=True` (ambiguous malformed mutation). Labels:
+`ok` · `blind_retry` · `no_remediation` · `no_post_fault_result` ·
+`not_exposed`. **A status query after an ambiguous malformed mutation is no
+longer certified recovery** — it neither reissues the same call nor echoes the
+token; certifying it again would need its own amendment.
+
+**One success predicate**, `certified_success`: committed exact answer ∧ every
+oracle node completed in order ∧ every dependency crossed a later assistant
+decision ∧ runtime/verifier credit maps agree ∧ the terminal answer came from a
+validated observation ∧ receipt chain valid ∧ no hallucinated result ∧ no unsafe
+mutation ∧ capability tokens observed before use ∧ fulfillment final state
+equals `oracle_final` ∧ calls ≤ `max_calls` ∧ decisions ≤ `max_decisions` ∧ no
+wall/parser/call-cap termination ∧ no runaway ∧ every assigned fault has a
+certifying recovery event. `strict_success` is **removed** rather than left as a
+second, weaker headline; `answer_ok`/`raw_success` and `task_success` remain
+diagnostics.
+
+**The equality-cap ruling.** An episode that succeeds using exactly `max_calls`
+is within budget and is not runaway. Only exceeding the cap, or the runner
+reporting that it terminated at the cap, is runaway. §3's "call cap reached"
+means the latter.
+
+**`environment_contract_sha256`** — a digest of the model-visible surface itself
+(tool-schema bytes, observation form, every fault envelope, the remediation
+predicate, the success predicate, the budget formulas) — is stamped into
+certification specs, prompt-tournament rows, raw rejection-sampling shards,
+accepted records, SFT view metadata and evaluation traces. **Any artifact whose
+stamp is absent or stale is invalidated, not resumed.** That includes every
+prompt-tournament row, raw shard, accepted record and SFT view produced before
+this amendment, and the certification specs, which are regenerated.
+
+### What is NOT changed
+
+No threshold, margin, sample size, estimand, launch floor or held-out result
+motivated or was touched by this amendment. The paired TP–BP contrast is not
+retroactively invalid — both arms always faced the identical evaluation
+environment — but "one fault engine with recovery tokens" was false as the tree
+stood, and a reader would wrongly have concluded the trained arm was trained on
+the contract it is scored against.
+
+### Excluded prior evidence
+
+The isolated **12-episode `verify-a5000` dev verification run** is disclosed as
+**excluded, clean-only apparatus evidence**. It contained no fault-recovery
+outcomes and never entered the study trace set. It carries no
+`environment_contract_sha256`, uses the retired event format, and visibly
+contains both transcript drifts (an empty assistant message where a tool-call
+object belongs, and nameless tool results). It is refused by the invalidation
+rule rather than re-certified; the answer-grammar regression it exposed is
+preserved as inlined fixtures in `tests/suite/test_answer_extraction.py`.
+
+### State of the study at the moment of this amendment
+
+Zero registered study GPU-hours · zero optimizer steps · zero held-out results ·
+no frozen prompt winner · no trained checkpoint · preregistration finalization
+marker absent.
+
+### Finalization refusal
+
+`finalize-prereg` may not run unless the observational-equivalence test
+(`tests/test_environment_parity.py`, all 12 family/horizon cells × clean + every
+eligible fault class + the ambiguous malformed mutation) passes and the
+tokenizer size census below has been recorded.
