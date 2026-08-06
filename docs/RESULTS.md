@@ -53,7 +53,21 @@ throughput puts it at roughly **6.4 A5000 GPU-hours**, arithmetic and caveats in
 of this file **the paragraph below is a template that does not yet apply, and no
 deviation notice is due.**
 
-**The tripwire.** If the registered 7,800-episode evaluation is *not* completed — for any
+**THE TRIPWIRE FIRED ON 2026-08-06.** The registered 7,800-episode evaluation was
+**not** completed: rejection sampling was stopped at 15 shards and the training,
+calibration, `L`, `R`, held-out and verdict stages were never run. The canonical notice is
+**[DEVIATION_2026-08-06.md](DEVIATION_2026-08-06.md)**, the README carries the link and a
+one-sentence status, and the required paragraph is reproduced verbatim immediately below.
+No reduced evaluation was substituted — none was run at any size. No gate was computed, so
+no gate has a status: a gate that was never evaluated is not a FAIL.
+
+> The preregistered 7,800-episode evaluation was not completed. This study is reported as
+> a deliberate post-registration deviation and partial completion. No preregistered
+> study-level winner is claimed. The reduced evaluation reported below, if any, was
+> prospectively fixed before checkpoint lock but is post-registration descriptive
+> evidence, not a substitute for the original confirmatory evaluation.
+
+**The original conditional text, kept for the record.** If the registered 7,800-episode evaluation is *not* completed — for any
 reason: budget, hardware, time, a reduced audit substituted for it — then the following
 paragraph becomes the study status verbatim, a dated canonical notice is published at
 `docs/DEVIATION_<date>.md`, a prominent link and one-sentence status go in the README, and

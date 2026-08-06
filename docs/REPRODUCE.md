@@ -178,14 +178,15 @@ python scripts/record_host_apparatus.py check
 python scripts/record_model_revision.py verify
 ```
 
-Known pre-existing failure as of 2026-08-06:
-`tests/test_chain.py::test_lock_prompt_refuses_before_P_exists` fails in *this*
-checkout because it asserts a refusal message that only appears while P does not
-exist — and P now does. It is a test-isolation defect (council Priority 1), not
-an apparatus defect, and it is untouched here. Everything else passes:
-**912 passed, 1 failed, 6 skipped** on the tree at this commit — the 890 that
-passed before the apparatus records landed, plus the 22 in
-`tests/test_apparatus_records.py`, with the same single failure before and after.
+The recorded suite result at commit `1b07a64` is **1,052 passed, 7 skipped,
+0 failed**. That commit removed
+`tests/test_chain.py::test_lock_prompt_refuses_before_P_exists`: its placeholder
+prompt hash always triggered the earlier S16 candidate-hash check, so the test
+never exercised the no-`P` branch named by the function. The no-`P` refusal is
+still covered by `test_reveal_always_requires_a_committed_P`, and the
+non-candidate prompt refusal has its own focused test. This count is a receipt
+for that commit, not a promise that a later checkout will have the same total;
+run the command above and report the result your tree actually produces.
 
 ## Step 5 — the suite payload (deterministic, CPU, ~3 s)
 

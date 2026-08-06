@@ -88,14 +88,23 @@ def test_results_carries_the_required_wording_verbatim(block: str) -> None:
         "it cannot be softened once they do")
 
 
-def test_results_says_the_study_status_paragraph_is_conditional() -> None:
+def test_results_records_that_the_tripwire_actually_fired() -> None:
+    """This test used to assert the study status was still CONDITIONAL.
+
+    It is inverted deliberately. On 2026-08-06 rejection sampling was stopped at 15
+    shards and the training, L, R, held-out and verdict stages were never run, so the
+    registered 7,800-episode evaluation was not completed and the trigger the previous
+    version of this test described as hypothetical became today's status. The paragraph
+    is no longer a template here: it is the finding, and the assertions below make it
+    impossible to quietly revert to the conditional phrasing while the deviation stands.
+    """
     text = _flat(RESULTS)
-    # The registered evaluation IS being completed, so the DEVIATED/PARTIALLY
-    # COMPLETED paragraph is a template with a stated trigger, not today's status.
-    assert "only if the registered evaluation is not completed" in text
-    assert "no deviation notice is due" in text
-    assert "docs/DEVIATION_" in text, (
-        "the tripwire must name the canonical file a real deviation would need")
+    assert "THE TRIPWIRE FIRED ON 2026-08-06" in text
+    assert "DEVIATION_2026-08-06.md" in text
+    assert "No reduced evaluation was substituted" in text
+    assert "a gate that was never evaluated is not a FAIL" in text
+    # the conditional framing is preserved as history, explicitly labelled as such
+    assert "The original conditional text, kept for the record" in text
 
 
 @pytest.mark.parametrize("slot", (
@@ -283,7 +292,32 @@ def test_readme_carries_the_deep_horizon_warning_and_labels_every_row() -> None:
     assert "Descriptive only; not a preregistered claim" in text
 
 
-def test_readme_states_the_registered_evaluation_is_being_completed() -> None:
+def test_readme_states_the_registered_evaluation_was_not_completed() -> None:
+    """The premise this test guarded changed on 2026-08-06, so the guard changed with it.
+
+    It used to assert the README said the 7,800-episode census "is being completed".
+    Rejection sampling was then stopped at 15 shards and the training, L, R, held-out and
+    verdict stages were never run, so that sentence became false and this test failed --
+    which is the guard doing its job, not a broken test. The assertion now enforces the
+    replacement claim, so the README cannot quietly drift back to the completed story and
+    cannot go silent about the deviation either.
+    """
     text = _flat(README)
-    assert "is being completed" in text
-    assert "not a deviation" in text
+    assert "NOT COMPLETED" in text
+    assert "DEVIATION_2026-08-06.md" in text
+    assert "no registered study-level winner" in text.lower()
+    # the old, now-false claim must be gone
+    assert "is being completed" not in text
+
+
+def test_the_deviation_notice_exists_and_carries_the_required_paragraph() -> None:
+    """The tripwire in RESULTS.md promises a dated canonical notice; this is its receipt."""
+    notice = ROOT / "docs" / "DEVIATION_2026-08-06.md"
+    assert notice.exists(), "the tripwire fired but no dated notice was published"
+    text = _flat(notice)
+    assert "The preregistered 7,800-episode evaluation was not completed" in text
+    assert "deliberate post-registration deviation and partial completion" in text
+    # a gate that was never evaluated must not be reported as a failure
+    assert "not a FAIL" in text or "is not a FAIL" in text
+    # and it must say plainly that the train-vs-prompt comparison never ran
+    assert "never run" in text

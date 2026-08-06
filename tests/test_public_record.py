@@ -1,16 +1,16 @@
 """The public record must not drift back into claims the study has outgrown.
 
 These tests read files only -- no git, no GPU, no network, no live repository
-state. That is deliberate: the one test this suite currently fails
-(`test_lock_prompt_refuses_before_P_exists`) fails precisely because it asserts
-against the live repository, so a guard written to protect the README must not
-repeat that mistake.
+state. That is deliberate: public-record guards must remain stable as repository
+history advances instead of deriving their expectations from the checkout they
+are meant to describe.
 
-What is pinned here is the SHAPE of the honest status block, not its numbers. The
-test count and the GPU-hour figure move every time the suite or the ledger moves;
-asserting them would make this file a maintenance tax that gets deleted. What
-cannot move without a lie is the set of retired claims, and the reporting rules
-for the saturated secondary endpoints.
+What is pinned here is the SHAPE of the honest status block, not its moving
+numbers. The test count and the GPU-hour figure change as the suite and ledger
+move; asserting them would make this file a maintenance tax that gets deleted.
+What cannot move without a lie is the set of retired claims, the recorded closure
+of a previously published defect, and the reporting rules for the saturated
+secondary endpoints.
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
 INTERPRETATION = ROOT / "docs" / "INTERPRETATION.md"
 DEFERRED = ROOT / "docs" / "DEFERRED_REPAIRS.md"
+REPRODUCE = ROOT / "docs" / "REPRODUCE.md"
 
 # Every one of these was true of some earlier commit and is false now. A README
 # that says any of them again is a materially false account of study state.
@@ -32,6 +33,18 @@ RETIRED_README_CLAIMS = (
     "S18 delivers test-set commitment",
     "Until the finalization marker exists the preregistration is a **draft**",
 )
+
+# D5 was closed by 1b07a64. The diagnosis remains useful history in the deferred
+# ledger, but the README and clean-clone guide must not keep presenting it as a
+# failure in the current tree.
+RETIRED_D5_CURRENT_STATE_CLAIMS = (
+    "The single failing test is",
+    "Known pre-existing failure as of 2026-08-06",
+    "Current `main` is therefore not green from a fresh clone",
+    "will stay that way until this is fixed",
+)
+D5_TEST = "test_lock_prompt_refuses_before_P_exists"
+D5_CLOSURE_COMMIT = "1b07a64"
 
 
 def _read(p: pathlib.Path) -> str:
@@ -57,6 +70,31 @@ def test_readme_does_not_restate_a_retired_claim(claim: str) -> None:
     assert claim not in _flat(README), (
         f"README restates a retired claim: {claim!r}. The preregistration is "
         f"finalized, GPU hours are on the ledger, and the S18 defect closed.")
+
+
+@pytest.mark.parametrize("document", (README, REPRODUCE))
+@pytest.mark.parametrize("claim", RETIRED_D5_CURRENT_STATE_CLAIMS)
+def test_public_guides_do_not_present_closed_d5_as_current(
+        document: pathlib.Path, claim: str) -> None:
+    assert claim not in _flat(document), (
+        f"{document.relative_to(ROOT)} still presents closed D5 as current: "
+        f"{claim!r}")
+
+
+@pytest.mark.parametrize("document", (README, REPRODUCE, DEFERRED))
+def test_public_record_names_the_d5_closure(document: pathlib.Path) -> None:
+    text = _flat(document)
+    assert D5_TEST in text, (
+        f"{document.relative_to(ROOT)} must identify the test whose status changed")
+    assert D5_CLOSURE_COMMIT in text, (
+        f"{document.relative_to(ROOT)} must name the commit that closed D5")
+
+
+def test_deferred_ledger_marks_d5_closed_without_erasing_the_diagnosis() -> None:
+    text = _flat(DEFERRED)
+    assert "D5 is **closed**" in text or "D5 is closed" in text
+    assert "historical diagnosis" in text.lower(), (
+        "the closure must preserve the original diagnosis instead of rewriting it away")
 
 
 def test_readme_states_the_true_lock_state() -> None:
