@@ -205,17 +205,29 @@ GROUPS: tuple[Group, ...] = (
                      "data/multiface/raw/*.receipt.json"),
           STUDY_RUN_ID, "distill", False,
           "rejection-sampling shards; a producer is appending until distill ends"),
+    # These paths are the chain's own ACCEPTED / VIEWS / RSSFT variables, pinned
+    # by a test -- a durability group that silently expands to nothing at its
+    # boundary is worse than no group at all.
     Group("accepted_corpus", ("data/multiface/accepted.jsonl",
-                              "data/multiface/accepted.*.json"),
+                              "data/multiface/accepted.receipt.json"),
           STUDY_RUN_ID, "distill", False, "the accepted corpus and its receipt"),
-    Group("sft_views", ("out/multiface/views/**/*",), STUDY_RUN_ID, "views",
-          False, "the SFT views and the view chain report"),
-    Group("adapter", ("out/qwen35-4b-rssft-lora/**/*",
-                      "out/*.agentlab_training_manifest.json"),
+    Group("sft_views", ("data/multiface/sft_views.jsonl",
+                        "data/multiface/sft_views.report.json"),
+          STUDY_RUN_ID, "views", False,
+          "the SFT views and the view-chain report"),
+    Group("adapter", ("out/multiface/rssft-lora/**/*",
+                      "out/multiface/rssft-lora.agentlab_training_manifest.json"),
           STUDY_RUN_ID, "sft", False,
           "THE locked adapter and its training manifest; the L commit hashes it"),
+    Group("grpo_adapter",
+          ("out/multiface/rsgrpo-lora/**/*",
+           "out/multiface/rsgrpo-lora.agentlab_training_manifest.json"),
+          STUDY_RUN_ID, "grpo", False,
+          "the conditional GRPO adapter, if that leg is admitted at all"),
     Group("traces", ("results/agentic/traces/**/*",), STUDY_RUN_ID, "eval", False,
           "the evaluation trace archive"),
+    Group("ship_smoke", ("out/multiface/ship_smoke/**/*",), STUDY_RUN_ID, "ship",
+          False, "the shipped-configuration smoke run"),
 )
 
 GROUPS_BY_NAME = {g.name: g for g in GROUPS}

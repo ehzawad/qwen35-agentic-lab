@@ -31,10 +31,12 @@ No network, no GPU: the uploader is injected.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import importlib.util
 import json
 import pathlib
+import re
 import sys
 
 import pytest
@@ -477,10 +479,66 @@ def test_stage_gated_groups_are_not_swept_by_a_bare_upload(ha):
     assert {"rs_raw", "accepted_corpus", "sft_views", "adapter",
             "traces"} <= gated
     assert not gated & set(ha.DEFAULT_GROUPS)
-    # ... and each names the boundary at which it becomes complete
+    # ... and each names a real stage of the chain
+    stages = set(_chain_stages())
     for name in gated:
-        assert ha.GROUPS_BY_NAME[name].stage in {
-            "distill", "views", "sft", "eval"}
+        assert ha.GROUPS_BY_NAME[name].stage in stages, name
+
+
+CHAIN = REPO / "scripts" / "run_multifaceted_chain.sh"
+
+
+def _chain_text() -> str:
+    return CHAIN.read_text(encoding="utf-8")
+
+
+def _chain_stages() -> list[str]:
+    m = re.search(r"^STAGES=\(([^)]*)\)", _chain_text(), re.M)
+    assert m, "the chain no longer declares STAGES"
+    return m.group(1).split()
+
+
+def _chain_paths() -> dict[str, str]:
+    """The chain's own path variables, one level of indirection resolved."""
+    text = _chain_text()
+    out: dict[str, str] = {}
+    for m in re.finditer(r'^([A-Z_]+)="([^"$]+)"$', text, re.M):
+        out[m.group(1)] = m.group(2)
+    for m in re.finditer(r'^([A-Z_]+)="\$([A-Z_]+)/([^"$]+)"$', text, re.M):
+        base = out.get(m.group(2))
+        if base:
+            out[m.group(1)] = f"{base}/{m.group(3)}"
+    return out
+
+
+def test_the_expensive_artifacts_the_chain_writes_are_all_covered(ha):
+    """A group that expands to nothing at its boundary is worse than no group.
+
+    The first version of this table guessed `out/multiface/views/**` and
+    `out/qwen35-4b-rssft-lora/**`; the chain actually writes
+    `data/multiface/sft_views.jsonl` and `out/multiface/rssft-lora`. Both groups
+    would have swept up zero files at their stage boundary and reported success,
+    which is precisely the failure mode this tool exists to prevent.
+    """
+    v = _chain_paths()
+    patterns = [p for g in ha.GROUPS for p in g.patterns]
+
+    for name in ("ACCEPTED", "ACCEPTED_RECEIPT", "VIEWS", "VIEWS_REPORT",
+                 "SECRET_FILE"):
+        path = v[name]
+        covered = any(fnmatch.fnmatch(path, p) for p in patterns)
+        if name == "SECRET_FILE":            # covered by a refusal, not a group
+            assert ha.refusal_reason(path)
+            continue
+        assert covered, f"{name}={path} is not covered by any group"
+
+    for name in ("RSSFT", "RSGRPO"):
+        d = v[name]
+        assert any(p.startswith(d + "/") for p in patterns), f"{name}={d}"
+        assert f"{d}.agentlab_training_manifest.json" in patterns, name
+
+    # the raw shard directory the running producer is filling
+    assert any(p.startswith("data/multiface/raw/") for p in patterns)
 
 
 # ---------------------------------------------------------------------------
