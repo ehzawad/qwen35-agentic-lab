@@ -32,6 +32,25 @@ copied verbatim. The chain continues into `agentlab.sft`'s training manifest and
 from there into the checkpoint lock, so a locked adapter can name the card behind
 every row it was trained on. A trajectory that cannot say what produced it is
 dropped and counted, never built from.
+
+ONE ANSWER GRAMMAR. "Did this trajectory commit a final answer" is asked here
+with `schema.extract_committed_answer`, the same reader the strict verifier and
+the certification layer use. A local `\\boxed{}`-only regex used to ask it
+instead, so a certified-successful trajectory that obeyed the system prompt's
+`ANSWER: <value>` form produced ZERO views and was tallied as a trajectory with
+no terminal at all (the bucket is now `no_committed_answer`): about 36% of the
+now-correct dev episodes commit in exactly that plain form, and the corpus
+silently dropped every one of them.
+
+COMPLETION IS A RECEIPT, NOT A PATH. The CLI validates the whole corpus BEFORE
+it writes anything -- the chain, the registered row range (views.expected_rows)
+naming the short stratum, and the terminal-weight floor -- then writes the three
+files atomically with the row file LAST, because both resumers downstream (the
+chain script's marker test and `agentlab.sft.load_views_metadata`) trust that
+path's existence. The report doubles as the corpus receipt: it carries the row
+count, the row-id digest, the per-stratum census and the gate verdicts, and
+`require_views_chain` re-checks the count and the digest against the rows in
+hand, so a truncated or half-written corpus can never be read as a finished one.
 """
 
 from __future__ import annotations
@@ -72,11 +91,31 @@ VIEW_CHAIN_OPTIONAL_FIELDS = ("gpu_execution", "runtime_manifest_sha256",
                               "session_id")
 
 
+# A corpus the CLI wrote for the study, and therefore the one the registered row
+# range and terminal-weight floor apply to. An in-process build (the dev
+# preflight's deliberately tiny one-optimizer-step canary, and the tests) is
+# honest evidence about the builder and is NOT a production corpus, so it carries
+# the other label and is never measured against a corpus-level size gate.
+PRODUCTION_CORPUS = "production"
+IN_PROCESS_CORPUS = "in_process"
+
+
 def view_row_id(task_id: str, view: str, index: int, copy_index: int) -> str:
     """A stable identity for one training row: task, view kind, turn, copy."""
     from agentlab.suite.schema import digest_text
 
     return digest_text(f"view|{task_id}|{view}|{index}|{copy_index}")[:24]
+
+
+def row_ids_digest(meta: list) -> str:
+    """The identity of a corpus: its row ids, in order, as one digest.
+
+    The count alone cannot tell a truncated corpus from a differently-built one
+    of the same size, and the receipt has to be able to.
+    """
+    from agentlab.suite.schema import digest_text
+
+    return digest_text("|".join(str(m.get("row_id")) for m in meta))
 
 
 def require_view_chain(meta_row: dict, what: str = "an SFT view") -> dict:
@@ -120,6 +159,19 @@ def require_views_chain(rows: list, meta: list, report: dict | None = None,
       corpus descends from exactly ONE producer identity; and -- unless a caller
       explicitly asks otherwise -- that producer actually owned a card.
 
+    The report is the corpus RECEIPT, so it is checked against the rows in hand,
+    not merely read: the recorded row count, the number of distinct row ids and
+    the row-id digest must all describe exactly these rows. A corpus whose row
+    file was truncated (or half-written, or built by another run) fails here
+    instead of training.
+
+    And when the receipt says it describes the PRODUCTION corpus, the registered
+    corpus-level gates -- the `views.expected_rows` range and the terminal-weight
+    floor -- must have passed. The trainer runs this function, so a production
+    corpus that missed its row range cannot be trained on even if its files are
+    on disk. An in-process build (the dev canary, tests) is labelled as such and
+    is measured against neither: those gates describe the study corpus.
+
     The GPU requirement is stated separately from the chain requirement on
     purpose: a CPU-scripted corpus is honest evidence about the harness and a
     perfectly good test fixture, but it is not a corpus a reportable checkpoint
@@ -128,6 +180,12 @@ def require_views_chain(rows: list, meta: list, report: dict | None = None,
     """
     from agentlab.multidistill import require_one_producer
 
+    if not rows:
+        raise SystemExit(
+            "REFUSED: a zero-row view corpus is not a corpus. An empty file is "
+            "indistinguishable from a finished build to every resume check in this "
+            "chain, so nothing-was-built stops here: check the accepted corpus and "
+            "the view report's `rejected` counts.")
     if len(meta) != len(rows):
         raise SystemExit(
             f"REFUSED: {len(rows)} training rows and {len(meta)} metadata rows. "
@@ -169,8 +227,111 @@ def require_views_chain(rows: list, meta: list, report: dict | None = None,
                 f"REFUSED: the view report counts {report['rows']} rows and the "
                 f"corpus holds {len(rows)}; one of the two describes another "
                 f"build.")
+        if report.get("row_ids") is not None and int(report["row_ids"]) != len(set(ids)):
+            raise SystemExit(
+                f"REFUSED: the view report counts {report['row_ids']} distinct row "
+                f"ids and the metadata holds {len(set(ids))}. The receipt names the "
+                f"rows it certifies; a different set of rows is a different corpus.")
+        recorded_digest = report.get("row_ids_sha256")
+        if recorded_digest and recorded_digest != row_ids_digest(meta):
+            raise SystemExit(
+                f"REFUSED: the view report's row-id digest {recorded_digest[:12]}... "
+                f"does not match the metadata in hand ({row_ids_digest(meta)[:12]}"
+                f"...). Completion means a receipt that matches these bytes, not a "
+                f"path that exists: rebuild the corpus with `python -m "
+                f"agentlab.suite.datasets`.")
+        if report.get("corpus_kind") == PRODUCTION_CORPUS:
+            require_expected_rows(report)
     return {"rows": len(rows), "source_provenance": ident,
-            "row_ids": len(set(ids))}
+            "row_ids": len(set(ids)),
+            "row_ids_sha256": row_ids_digest(meta),
+            "corpus_kind": (report or {}).get("corpus_kind", IN_PROCESS_CORPUS)}
+
+
+def stratum_shortfall(report: dict, cfg: dict | None = None) -> list[dict]:
+    """Where a row shortfall actually happened, worst stratum first.
+
+    A total-only report ("4,912 rows, wanted 5,000") says nothing about what to
+    regenerate. Every dropped trajectory is counted in the family/horizon cell it
+    was dropped from, so the shortfall can be attributed: a stratum's own
+    rows-per-kept-trajectory (or the corpus mean, when it kept nothing) turns its
+    dropped trajectories into an estimate of the rows that stratum did not
+    contribute. The estimate is DIAGNOSTIC -- the gate is the registered range --
+    but it names the stratum that has to be re-rolled.
+    """
+    cfg = cfg or load_config()
+    strata = report.get("strata") or {}
+    rows = int(report.get("rows") or 0)
+    kept = sum(int(s.get("trajectories") or 0) for s in strata.values())
+    # Fallback rate for a stratum that kept nothing: the corpus mean, or -- with
+    # nothing kept anywhere -- the minimum a surviving trajectory always yields
+    # (the terminal view's copies, which every plan contains).
+    mean_rate = (rows / kept) if kept else float(cfg["views"]["terminal_copies"])
+    out = []
+    for name in sorted(strata):
+        cell = strata[name]
+        n_rows = int(cell.get("rows") or 0)
+        n_kept = int(cell.get("trajectories") or 0)
+        n_drop = int(cell.get("trajectories_dropped") or 0)
+        if n_drop == 0 and n_rows > 0:
+            continue
+        rate = (n_rows / n_kept) if n_kept else mean_rate
+        out.append({"stratum": name, "rows": n_rows, "trajectories": n_kept,
+                    "trajectories_dropped": n_drop,
+                    "dropped_reasons": dict(sorted(
+                        (cell.get("dropped_reasons") or {}).items())),
+                    "rows_lost_estimate": int(round(rate * n_drop))})
+    out.sort(key=lambda c: (-c["rows_lost_estimate"], c["rows"], c["stratum"]))
+    return out
+
+
+def require_expected_rows(report: dict, cfg: dict | None = None) -> dict:
+    """ENFORCE the registered SFT-view row range and terminal-weight floor.
+
+    `views.expected_rows` (5,000-6,000) and `views.terminal_weight_min` were
+    reported and never checked, so a corpus of 300 rows -- or of 4,912 after a
+    stratum silently dropped out -- would have been written, resumed over and
+    trained on. Both are registered numbers: this raises, it never adjusts them,
+    and the failure names the stratum that is short so the fix is a re-roll of
+    that cell rather than a lowered gate.
+    """
+    cfg = cfg or load_config()
+    lo, hi = (int(x) for x in cfg["views"]["expected_rows"])
+    rows = int(report.get("rows") or 0)
+    floor = float(cfg["views"]["terminal_weight_min"])
+    weight = float(report.get("terminal_weight") or 0.0)
+    problems = []
+    if not lo <= rows <= hi:
+        problems.append(f"{rows} rows is outside the registered range {lo}-{hi}")
+    if weight < floor:
+        problems.append(f"terminal weight {weight:.3f} is below the registered "
+                        f"floor {floor}")
+    if not problems:
+        return {"rows": rows, "expected_rows": [lo, hi], "terminal_weight": weight,
+                "terminal_weight_min": floor, "ok": True}
+    detail = stratum_shortfall(report, cfg)
+    lines = [f"REFUSED: this SFT view corpus is not trainable: "
+             f"{'; '.join(problems)}."]
+    if rows < lo and detail:
+        lines.append("  Short strata (worst first), by the trajectories each cell "
+                     "lost:")
+        for cell in detail[:8]:
+            reasons = ", ".join(f"{k} {v}" for k, v in
+                                cell["dropped_reasons"].items()) or "none"
+            lines.append(
+                f"    {cell['stratum']}: {cell['rows']} rows from "
+                f"{cell['trajectories']} kept trajectories, "
+                f"{cell['trajectories_dropped']} dropped ({reasons}); "
+                f"~{cell['rows_lost_estimate']} rows not contributed")
+    elif rows < lo:
+        lines.append("  No stratum lost a trajectory, so the accepted corpus "
+                     "itself is too small: the quotas it passed cannot fill the "
+                     "registered row range.")
+    lines.append("  The range and the floor are preregistered. Roll out and accept "
+                 "more trajectories in the named strata (`python -m "
+                 "agentlab.multidistill run` then `finalize`); do not widen the "
+                 "range and do not train on a partial corpus.")
+    raise SystemExit("\n".join(lines))
 
 _NUM_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 # Opaque identifiers the suite generators mint, all uppercase and high-entropy:
@@ -182,7 +343,8 @@ _NUM_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 # actually generates -- the previous four-groups-of-four pattern matched none of
 # them, which silently made every lookup hop look dependency-free.
 _KEY_RE = re.compile(r"[A-Z][A-Z2-7]{5,}|[A-Z2-7]{3,}-[A-Z0-9]{3,}")
-_BOXED_RE = re.compile(r"\\boxed\{([^{}]*)\}")
+# There is NO answer regex in this module: `committed_answer` below delegates to
+# schema.extract_committed_answer, the one grammar in the repo.
 
 
 # --------------------------------------------------------------------------
@@ -264,6 +426,23 @@ def _pivot_seed(task_id: str) -> int:
     return int(digest_text(f"pivot-seed|{task_id}")[:16], 16) >> 1
 
 
+def committed_answer(text) -> str | None:
+    """What this text COMMITTED, read by the one shared grammar.
+
+    Delegates to `schema.extract_committed_answer`: the preregistered system
+    prompt asks for `ANSWER: <value>` and the generated task prompt asks for
+    `\\boxed{}`, and the strict verifier, the certification layer and this view
+    builder must all read a commitment the same way. When the builder asked with
+    its own `\\boxed{}`-only regex, a trajectory the verifier had CERTIFIED --
+    terminating with a plain `ANSWER: 55640a29...` -- selected no views at all, so
+    trajectories that obeyed the system prompt alone were dropped from the
+    training corpus.
+    """
+    from agentlab.suite.schema import extract_committed_answer
+
+    return extract_committed_answer(str(text or ""))
+
+
 def select_views(record: dict, cfg: dict | None = None) -> list[dict]:
     """The (msg_index, view, copies) plan for one accepted trajectory."""
     cfg = cfg or load_config()
@@ -273,7 +452,7 @@ def select_views(record: dict, cfg: dict | None = None) -> list[dict]:
     if not a_idx:
         return []
     terminal = a_idx[-1]
-    if not _BOXED_RE.search(str(messages[terminal].get("content", ""))):
+    if committed_answer(messages[terminal].get("content", "")) is None:
         # No committed final answer: nothing here is worth supervising.
         return []
 
@@ -344,6 +523,16 @@ def default_token_counter():
     return count
 
 
+def stratum_of(family: str, horizon) -> str:
+    """The structural stratum of a view: the family/horizon cell it came from.
+
+    Spelled exactly as the acceptance report spells its cells (`family-hN`), so a
+    row shortfall can be attributed to the stratum that is actually short -- and
+    re-rolled there -- instead of being reported as one small total.
+    """
+    return f"{family}-h{int(horizon)}"
+
+
 def build_views(records: list, token_counter, cfg: dict | None = None):
     """Accepted trajectories -> (SFT rows, build report).
 
@@ -351,6 +540,11 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
     (prompt, completion, tools, chat_template_kwargs); the provenance chain goes
     to the parallel metadata (one row per training row, same order) and its
     summary to the report, so the trainer sees no stray columns.
+
+    The report also carries a per-STRATUM census (rows, trajectories kept, and
+    every trajectory dropped with its reason, per family/horizon cell). It is
+    what `require_expected_rows` reads to name which stratum is short instead of
+    reporting only that the corpus total is small.
     """
     from agentlab.multidistill import (provenance_gaps, require_one_producer,
                                        row_digest)
@@ -360,11 +554,33 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
     schema_cache: dict[str, list] = {}
     rows, meta = [], []
     counts = {"terminal": 0, "pivot": 0, "recovery": 0}
-    rejected = {"over_token_budget": 0, "no_terminal": 0, "trajectory_over_budget": 0,
-                "stale_environment_contract": 0, "missing_source_provenance": 0}
+    rejected = {"over_token_budget": 0, "no_committed_answer": 0,
+                "trajectory_over_budget": 0, "stale_environment_contract": 0,
+                "missing_source_provenance": 0}
+    strata: dict[str, dict] = {}
+
+    def stratum(name: str) -> dict:
+        return strata.setdefault(name, {"rows": 0, "trajectories": 0,
+                                        "trajectories_dropped": 0,
+                                        "dropped_reasons": {},
+                                        "view_counts": {"terminal": 0, "pivot": 0,
+                                                        "recovery": 0}})
+
+    def drop(name: str, reason: str) -> None:
+        cell = stratum(name)
+        cell["trajectories_dropped"] += 1
+        cell["dropped_reasons"][reason] = cell["dropped_reasons"].get(reason, 0) + 1
+
+    def cell_name(rec: dict) -> str:
+        try:
+            return stratum_of(rec["family"], rec["horizon"])
+        except (KeyError, TypeError, ValueError):
+            return "unattributable-stratum"
 
     records, stale = contract.invalidate(records, "accepted trajectory")
     rejected["stale_environment_contract"] = len(stale)
+    for rec in stale:
+        drop(cell_name(rec), "stale_environment_contract")
     # A trajectory that cannot name its producer cannot be trained on: the view
     # inherits the snapshot, so there is nothing honest to inherit. Dropped and
     # COUNTED, never quietly built from.
@@ -372,6 +588,7 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
     for rec in records:
         if provenance_gaps(rec.get("provenance")):
             unattributable += 1
+            drop(cell_name(rec), "missing_source_provenance")
             continue
         attributable.append(rec)
     rejected["missing_source_provenance"] = unattributable
@@ -380,6 +597,7 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
     schema_sha: dict[str, str] = {}
     for rec in records:
         family = rec["family"]
+        cell = cell_name(rec)
         source_sha = row_digest(rec)
         rec_prov = dict(rec["provenance"])
         tools = schema_cache.setdefault(family, tool_schemas_for_family(family))
@@ -390,7 +608,10 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
             schema_sha[family] = digest_text(tool_schema_bytes(family))
         plan = select_views(rec, cfg)
         if not plan:
-            rejected["no_terminal"] += 1
+            # No committed final answer under the ONE shared grammar (or no
+            # assistant turn at all): nothing here is worth supervising.
+            rejected["no_committed_answer"] += 1
+            drop(cell, "no_committed_answer")
             continue
 
         # The terminal view has the longest prompt; if IT does not fit, the
@@ -415,9 +636,15 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
             for copy_index in range(item["copies"]):
                 candidate_rows.append((item["view"], row, n_tok, i, copy_index))
 
+        if not candidate_rows:
+            drop(cell, "trajectory_over_budget")
+            continue
+        stratum(cell)["trajectories"] += 1
         for view, row, n_tok, msg_index, copy_index in candidate_rows:
             rows.append(row)
             counts[view] += 1
+            stratum(cell)["rows"] += 1
+            stratum(cell)["view_counts"][view] += 1
             meta.append({"row_id": view_row_id(rec["task_id"], view, msg_index,
                                                copy_index),
                          "task_id": rec["task_id"], "family": family,
@@ -446,14 +673,25 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
 
     total = len(rows)
     terminal_weight = counts["terminal"] / total if total else 0.0
+    lo, hi = (int(x) for x in cfg["views"]["expected_rows"])
     report = {
         "rows": total,
         "view_counts": counts,
         "rejected": rejected,
+        # The per-stratum census: which family/horizon cells the rows came from,
+        # and every trajectory that was dropped, with its reason, in the cell it
+        # was dropped from. A total-only report cannot say which stratum is short.
+        "strata": {k: strata[k] for k in sorted(strata)},
         "terminal_weight": round(terminal_weight, 4),
         "terminal_weight_min": cfg["views"]["terminal_weight_min"],
         "terminal_weight_ok": terminal_weight >= cfg["views"]["terminal_weight_min"],
         "expected_rows": cfg["views"]["expected_rows"],
+        "rows_in_expected_range": lo <= total <= hi,
+        # The receipt half of the report: what a reader must be able to check
+        # against the rows and metadata it actually loaded (count and identity),
+        # so a truncated corpus cannot pass as this build.
+        "row_ids": len({m["row_id"] for m in meta}),
+        "row_ids_sha256": row_ids_digest(meta),
         contract.STAMP_FIELD: _stamp(),
         # The chain, summarized: which producer, which sessions, which
         # attestations, and how many trajectories the rows descend from.
@@ -465,8 +703,55 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
             {m["runtime_manifest_sha256"] for m in meta
              if m["runtime_manifest_sha256"]}),
         "gpu_execution": bool(source_provenance.get("gpu_execution")),
+        # An in-process build until a writer says otherwise: the CLI relabels the
+        # corpus it validated and wrote as the production one, and the registered
+        # size gates apply to exactly that label.
+        "corpus_kind": IN_PROCESS_CORPUS,
     }
     return rows, meta, report
+
+
+# --------------------------------------------------------------------------
+# writing the corpus: three files, validated first, row file LAST
+# --------------------------------------------------------------------------
+
+def _write_atomic(path: pathlib.Path, text: str) -> pathlib.Path:
+    """Write via a temp file in the same directory, then rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def write_view_corpus(rows: list, meta: list, report: dict, *, out, meta_out,
+                      report_out) -> dict:
+    """Publish a validated view corpus, in the order the resumers read it.
+
+    The three files are written atomically and the ROW FILE LAST, because that is
+    the path both resumers test for: `scripts/run_multifaceted_chain.sh` skips the
+    views stage when `sft_views.jsonl` exists, and `agentlab.sft` refuses only
+    when a file is missing. Writing the rows first meant a build killed halfway
+    left a row file with no metadata and no receipt that the next invocation
+    treated as a finished corpus. Now the rows appear only after the metadata and
+    the receipt that describe them are already on disk, and any pre-existing
+    receipt is removed BEFORE the corpus changes, so a crash can never leave a
+    receipt describing rows it does not match.
+    """
+    out, meta_out = pathlib.Path(out), pathlib.Path(meta_out)
+    report_out = pathlib.Path(report_out)
+    # Invalidate the old completion marker first: while the corpus is being
+    # replaced there must be no receipt on disk claiming it is finished.
+    for stale in (report_out, out):
+        if stale.exists():
+            stale.unlink()
+    _write_atomic(meta_out, "".join(json.dumps(m, ensure_ascii=False) + "\n"
+                                    for m in meta))
+    _write_atomic(report_out, json.dumps(report, indent=2) + "\n")
+    _write_atomic(out, "".join(json.dumps(r, ensure_ascii=False) + "\n"
+                               for r in rows))
+    return {"rows_path": str(out), "meta_path": str(meta_out),
+            "report_path": str(report_out)}
 
 
 # --------------------------------------------------------------------------
@@ -482,35 +767,56 @@ def main() -> None:
     ap.add_argument("--report-out", default="data/multiface/sft_views.report.json")
     args = ap.parse_args()
 
+    from agentlab.multidistill import require_accepted_corpus
+
     src = pathlib.Path(args.accepted)
+    # The accepted corpus is trusted because its OWN receipt validates -- expected
+    # shards, kept task ids, count, digest and passing quotas -- not because the
+    # path exists. A quota-missing or half-finalized corpus stops the chain here.
+    accepted_receipt = require_accepted_corpus(src)
     records = [json.loads(line) for line in src.read_text(encoding="utf-8").splitlines()
                if line.strip()]
     rows, meta, report = build_views(records, default_token_counter())
+    report["corpus_kind"] = PRODUCTION_CORPUS
+    report["accepted_corpus"] = {
+        "path": str(src),
+        "sha256": accepted_receipt["corpus_sha256"],
+        "accepted": accepted_receipt["accepted"],
+        "receipt_sha256": accepted_receipt["receipt_sha256"]}
 
-    out = pathlib.Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open("w", encoding="utf-8") as fh:
-        for r in rows:
-            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-    with pathlib.Path(args.meta_out).open("w", encoding="utf-8") as fh:
-        for m in meta:
-            fh.write(json.dumps(m, ensure_ascii=False) + "\n")
-    pathlib.Path(args.report_out).write_text(json.dumps(report, indent=2) + "\n",
-                                             encoding="utf-8")
-    print(f"[views] {report['rows']} rows -> {out}")
+    print(f"[views] {report['rows']} rows built from {report['source_trajectories']} "
+          f"accepted trajectories")
     print(f"[views] counts {report['view_counts']}  rejected {report['rejected']}")
-    print(f"[views] provenance: {report['source_trajectories']} trajectories, "
-          f"{len(report['source_sessions'])} producer session(s), "
-          f"gpu_execution={report['gpu_execution']}")
-    # The chain is checked HERE too, not only in the trainer: a corpus written to
-    # disk without it would look finished, and the next stage's refusal would be
-    # read as a trainer bug rather than as a missing rollout attestation.
-    require_views_chain(rows, meta, report, require_gpu_source=False)
+    print(f"[views] provenance: {len(report['source_sessions'])} producer "
+          f"session(s), gpu_execution={report['gpu_execution']}")
     print(f"[views] terminal weight {report['terminal_weight']:.3f} "
-          f"(min {report['terminal_weight_min']})")
-    if not report["terminal_weight_ok"]:
-        raise SystemExit("terminal weight below the preregistered minimum; "
-                         "do not train on this corpus")
+          f"(min {report['terminal_weight_min']}), rows "
+          f"{report['rows']} in {report['expected_rows']}: "
+          f"{report['rows_in_expected_range']}")
+    # NOTHING IS WRITTEN UNTIL BOTH GATES PASS. The chain is checked here and not
+    # only in the trainer, and the registered row range and terminal-weight floor
+    # are ENFORCED here rather than reported: a corpus on disk is a corpus the
+    # chain script and the trainer treat as finished work.
+    require_views_chain(rows, meta, report, require_gpu_source=False)
+    require_expected_rows(report)
+    paths = write_view_corpus(rows, meta, report, out=args.out,
+                             meta_out=args.meta_out, report_out=args.report_out)
+    print(f"[views] {report['rows']} rows -> {paths['rows_path']}")
+    # Read the corpus back through the same gate a consumer uses: the receipt on
+    # disk must describe the bytes on disk.
+    reread_rows = [json.loads(line) for line in
+                   pathlib.Path(paths["rows_path"]).read_text(
+                       encoding="utf-8").splitlines() if line.strip()]
+    reread_meta = [json.loads(line) for line in
+                   pathlib.Path(paths["meta_path"]).read_text(
+                       encoding="utf-8").splitlines() if line.strip()]
+    reread_report = json.loads(pathlib.Path(paths["report_path"]).read_text(
+        encoding="utf-8"))
+    checked = require_views_chain(reread_rows, reread_meta, reread_report,
+                                 require_gpu_source=False)
+    print(f"[views] receipt verified on disk: {checked['rows']} rows, "
+          f"row-id digest {checked['row_ids_sha256'][:12]}..., "
+          f"corpus_kind={checked['corpus_kind']}")
 
 
 if __name__ == "__main__":

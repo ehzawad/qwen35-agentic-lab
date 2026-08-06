@@ -30,12 +30,22 @@ bytes and the whole verdict row come back identical. A trajectory that merely
 Sharding contract: ONE engine, MANY shards. Engine startup measured 289.7 s on
 the registered A5000, so `run` builds the engine once and feeds it every pending
 shard: 50 shards each paying their own startup was 4.02 GPU-hours of pure model
-loading. A shard is still an atomic, resumable client-side work unit -- done when
-its output file exists, at 48 variants (<=384 rollouts at k<=8, ~150
-rollouts/min measured) so a kill costs at most one shard -- but it no longer pays
-for an engine. The engine start is charged to the ledger as its own row and each
-shard is charged its own decode minutes, so the two never overlap. `finalize` is
-CPU-only.
+loading. A shard is still an atomic, resumable client-side work unit at 48
+variants (<=384 rollouts at k<=8, ~150 rollouts/min measured) so a kill costs at
+most one shard -- but it no longer pays for an engine. The engine start is charged
+to the ledger as its own row and each shard is charged its own decode minutes, so
+the two never overlap. `finalize` is CPU-only.
+
+COMPLETION IS A RECEIPT, NOT A PATH. A shard is done when `shard-NNNN.receipt.
+json` validates against the PLAN: the exact rollout ids it owed (task id x sample
+index), their count, the current environment contract, one producer identity, and
+the digest of the row bytes on disk. A file holding three of 384 rollouts, a file
+written under the retired contract and a file planned at another --shard-size are
+all re-rolled instead of resumed. The same rule ends the stage: a quota miss or a
+partial finalize writes `rs_finalize_failure.json`, REMOVES anything a resume
+could trust, and exits nonzero -- it never leaves an `accepted.jsonl` behind for
+the next invocation to skip past. `accepted.receipt.json` is the completion marker
+the view builder demands before it reads a single trajectory.
 
 Elicitation-control ordering: production sampling REQUIRES the frozen winner
 written by `agentlab.prompt_control finalize` (half of every variant's attempts
@@ -58,7 +68,7 @@ import pathlib
 import re
 import time
 
-from agentlab.chat import (assistant_tool_message, boxed_answer, numeric_answer,
+from agentlab.chat import (assistant_tool_message, numeric_answer,
                           parse_tool_calls, strip_thinking)
 from agentlab.suite import contract as contract_mod
 from agentlab.suite import runtime as rt_mod
@@ -71,6 +81,14 @@ MULTIFACE_DIR = ROOT / "data" / "multiface"
 RAW_DIR = MULTIFACE_DIR / "raw"
 ACCEPTED_PATH = MULTIFACE_DIR / "accepted.jsonl"
 SUMMARY_PATH = MULTIFACE_DIR / "rs_summary.json"
+# Why a finalize refused, written whenever one does: the operator needs the
+# reason on disk, and the ABSENCE of accepted.jsonl is what stops the chain.
+FAILURE_PATH = MULTIFACE_DIR / "rs_finalize_failure.json"
+
+SHARD_RECEIPT_KIND = "agentlab_rs_shard_receipt"
+ACCEPTED_RECEIPT_KIND = "agentlab_accepted_corpus_receipt"
+RECEIPT_VERSION = 1
+RECEIPT_HASH_FIELD = "receipt_sha256"
 
 _BOXED_ANY = re.compile(r"\\boxed")
 
@@ -78,6 +96,19 @@ _BOXED_ANY = re.compile(r"\\boxed")
 # --------------------------------------------------------------------------
 # small shared helpers
 # --------------------------------------------------------------------------
+
+def committed_answer(final_text) -> str | None:
+    """What this final turn COMMITTED, read by the one grammar in the repo.
+
+    Delegates to `suite.schema.extract_committed_answer`, exactly as the strict
+    verifier and the SFT view builder do. A local `\\boxed{}`-only test here
+    rejected certified-successful trajectories that obeyed the preregistered
+    system prompt's `ANSWER: <value>` form, which is how they left the corpus.
+    """
+    from agentlab.suite.schema import extract_committed_answer
+
+    return extract_committed_answer(str(final_text or ""))
+
 
 def answers_match(got, want) -> bool:
     """Numeric answers match within the preregistered hybrid tolerance;
@@ -690,10 +721,17 @@ def accept_record(rec: dict, cfg: dict | None = None, bundles: dict | None = Non
         return False, "no_final"
     if "</think>" in rec["final"]:
         return False, "stray_think"
-    if boxed_answer(rec["final"]) is None:
-        # Commitment discipline: every family's prompt asks for \boxed{}. Answer
-        # CORRECTNESS is decided by the verifier below and nowhere else.
-        return False, "no_box"
+    if committed_answer(rec["final"]) is None:
+        # Commitment discipline, asked with the ONE shared grammar
+        # (`schema.extract_committed_answer`): the preregistered system prompt asks
+        # for `ANSWER: <value>` and the generated task prompt asks for `\boxed{}`,
+        # and either is a commitment. This filter used to demand `\boxed{}`
+        # specifically, so a trajectory the strict verifier had CERTIFIED --
+        # terminating `ANSWER: 55640a29...`, which is what obeying the system
+        # prompt alone produces -- was rejected here as `no_box` and never reached
+        # the view builder at all. Answer CORRECTNESS is still decided by the
+        # verifier below and nowhere else.
+        return False, "no_committed_answer"
     max_chars = cfg["scenario"]["tool_output_max_chars"]
     for m in rec["messages"]:
         if m.get("role") != "tool":
@@ -732,6 +770,12 @@ def accept_record(rec: dict, cfg: dict | None = None, bundles: dict | None = Non
 
 def plan_shards(split: str | None = None, shard_size: int = 48,
                 cfg: dict | None = None) -> list[dict]:
+    """The shard table, with the EXACT work each shard owes.
+
+    `k` and `expected_rollouts` are part of the plan because "this shard is done"
+    is answered against them: a shard file holding three rollouts of the 384 it
+    owes exists exactly like a complete one.
+    """
     cfg = cfg or load_config()
     split = split or rs_split(cfg)
     bundles = load_split(split, cfg)
@@ -741,15 +785,22 @@ def plan_shards(split: str | None = None, shard_size: int = 48,
     shards = []
     for (family, horizon) in sorted(groups):
         block = groups[(family, horizon)]
+        k = int(cfg["mixture"][family]["k"][f"h{horizon}"])
         for i in range(0, len(block), shard_size):
             chunk = block[i:i + shard_size]
+            task_ids = [b.spec.task_id for b in chunk]
             shards.append({"index": len(shards), "family": family, "horizon": horizon,
-                           "task_ids": [b.spec.task_id for b in chunk]})
+                           "split": split, "task_ids": task_ids, "k": k,
+                           "expected_rollouts": k * len(task_ids)})
     return shards
 
 
 def _shard_path(index: int) -> pathlib.Path:
     return RAW_DIR / f"shard-{index:04d}.jsonl"
+
+
+def shard_receipt_path(index: int) -> pathlib.Path:
+    return RAW_DIR / f"shard-{index:04d}.receipt.json"
 
 
 def _write_jsonl(path: pathlib.Path, rows: list) -> None:
@@ -766,6 +817,15 @@ def _read_jsonl(path: pathlib.Path) -> list:
             if line.strip()]
 
 
+def _write_json(path: pathlib.Path, payload: dict) -> pathlib.Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, default=str) + "\n",
+                   encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
 def write_attested_jsonl(path: pathlib.Path, rows: list, what: str) -> pathlib.Path:
     """Write claim-bearing rows only after the whole batch is attributable.
 
@@ -773,11 +833,152 @@ def write_attested_jsonl(path: pathlib.Path, rows: list, what: str) -> pathlib.P
     on disk is indistinguishable from one produced by an engine nobody checked,
     and every later layer (acceptance, views, trainer manifest, checkpoint lock)
     points back at exactly these bytes.
+
+    A ZERO-ROW batch is refused for the same reason: an empty file is a path that
+    exists, and every resumer in this pipeline reads a path that exists as work
+    that was done. "Nothing was produced" is a stop, not an artifact.
     """
+    if not rows:
+        raise SystemExit(
+            f"REFUSED: {what} would be written with zero rows. An empty artifact "
+            f"is indistinguishable from a finished one to every resume check in "
+            f"this pipeline, so nothing-produced must stop the stage instead of "
+            f"leaving a file behind.")
     for i, row in enumerate(rows):
         require_row_provenance(row.get("provenance"), f"{what} row {i}")
     require_one_producer(rows, what)
     _write_jsonl(path, rows)
+    return path
+
+
+def file_sha256(path) -> str:
+    """SHA-256 over one file's bytes: what a receipt points at."""
+    import hashlib
+
+    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+
+
+def seal_receipt(payload: dict) -> dict:
+    """Add the self-hash that makes a receipt tamper-evident."""
+    rec = {k: payload[k] for k in payload if k != RECEIPT_HASH_FIELD}
+    rec[RECEIPT_HASH_FIELD] = digest_text(canon(rec))
+    return rec
+
+
+def receipt_seal_ok(rec: dict) -> bool:
+    if not isinstance(rec, dict) or not rec.get(RECEIPT_HASH_FIELD):
+        return False
+    body = {k: rec[k] for k in rec if k != RECEIPT_HASH_FIELD}
+    return digest_text(canon(body)) == rec[RECEIPT_HASH_FIELD]
+
+
+def _load_receipt(path: pathlib.Path) -> dict | None:
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def expected_rollout_ids(shard: dict) -> list[str]:
+    """The exact (task_id, sample_index) pairs one shard owes, as sorted ids."""
+    k = int(shard["k"])
+    return sorted(f"{t}#{j}" for t in shard["task_ids"] for j in range(k))
+
+
+def rollout_id(row: dict) -> str:
+    return f"{row.get('task_id')}#{row.get('sample_index')}"
+
+
+def shard_rows_gaps(shard: dict, rows: list) -> list[str]:
+    """Why these rows are not the complete work of this shard. Empty means done.
+
+    Checked against the PLAN, not against themselves: the exact rollout ids
+    (task id x sample index) the shard owes, all of them, none extra, every row
+    under the current environment contract, one producer identity.
+    """
+    gaps = []
+    if not rows:
+        return ["zero_rows"]
+    stale = [r for r in rows if not contract_mod.is_current(r)]
+    if stale:
+        gaps.append(f"{len(stale)}_rows_under_another_environment_contract")
+    want = expected_rollout_ids(shard)
+    got = [rollout_id(r) for r in rows]
+    if len(got) != len(want):
+        gaps.append(f"{len(got)}_rollouts_of_{len(want)}")
+    missing = sorted(set(want) - set(got))
+    extra = sorted(set(got) - set(want))
+    if missing:
+        gaps.append(f"missing_rollouts:{','.join(missing[:4])}"
+                    + (f"+{len(missing) - 4}" if len(missing) > 4 else ""))
+    if extra:
+        gaps.append(f"unplanned_rollouts:{','.join(extra[:4])}"
+                    + (f"+{len(extra) - 4}" if len(extra) > 4 else ""))
+    if len(set(got)) != len(got):
+        gaps.append("duplicate_rollout_ids")
+    if len(distinct_producers(rows)) > 1:
+        gaps.append("more_than_one_producer_identity")
+    return gaps
+
+
+def build_shard_receipt(shard: dict, rows: list, path: pathlib.Path,
+                        cfg: dict | None = None) -> dict:
+    """The receipt that makes this shard's completion checkable.
+
+    It states what the shard OWED (the planned task ids, the sample count, the
+    expected rollout ids and their digest), what it actually holds, and the digest
+    of the bytes that hold it. Resume then asks the receipt, and the receipt is
+    bound to the file: a truncated or re-planned shard cannot satisfy it.
+    """
+    cfg = cfg or load_config()
+    want = expected_rollout_ids(shard)
+    return seal_receipt({
+        "kind": SHARD_RECEIPT_KIND,
+        "schema_version": RECEIPT_VERSION,
+        "index": int(shard["index"]),
+        "family": shard["family"],
+        "horizon": int(shard["horizon"]),
+        "split": shard.get("split") or rs_split(cfg),
+        "samples_per_task": int(shard["k"]),
+        "expected_task_ids": list(shard["task_ids"]),
+        "expected_task_ids_sha256": digest_text(canon(list(shard["task_ids"]))),
+        "expected_rollouts": len(want),
+        "expected_rollout_ids_sha256": digest_text(canon(want)),
+        "rollouts": len(rows),
+        "rollout_ids_sha256": digest_text(canon(sorted(rollout_id(r) for r in rows))),
+        "rows_path": path.name,
+        "rows_sha256": file_sha256(path),
+        contract_mod.STAMP_FIELD: contract_mod.environment_contract_sha256(),
+        "source_provenance": require_one_producer(rows, f"shard {shard['index']}"),
+        "sessions": sorted({r["provenance"]["session_id"] for r in rows
+                            if (r.get("provenance") or {}).get("session_id")}),
+        "complete": True,
+        "written_at_utc": now_utc(),
+    })
+
+
+def write_shard(shard: dict, rows: list, cfg: dict | None = None) -> pathlib.Path:
+    """Write one shard and its receipt, refusing anything short of its plan.
+
+    The rows are validated against the plan BEFORE the file is published, and the
+    receipt is written after it, so the only shard that ever carries a receipt is
+    a complete one.
+    """
+    index = int(shard["index"])
+    gaps = shard_rows_gaps(shard, rows)
+    if gaps:
+        raise SystemExit(
+            f"REFUSED: shard {index:04d} is not the work it was planned to do "
+            f"({', '.join(gaps)}). A short shard on disk is read as a finished "
+            f"one by resume, so it is not written at all: re-roll the shard.")
+    path = _shard_path(index)
+    receipt_path = shard_receipt_path(index)
+    if receipt_path.exists():
+        receipt_path.unlink()          # no stale receipt while the rows change
+    write_attested_jsonl(path, rows, f"rejection-sampling shard {index:04d}")
+    receipt = build_shard_receipt(shard, rows, path, cfg)
+    _write_json(receipt_path, receipt)
     return path
 
 
@@ -788,6 +989,9 @@ def shard_is_current(index: int) -> bool:
     otherwise be treated as done for ever, because resume is "does the file
     exist". It is treated as NOT done, so the shard is re-rolled under the current
     contract instead of being silently pooled with it.
+
+    Contract currency is necessary and NOT sufficient for completion: see
+    `shard_gaps`, which is what resume actually asks.
     """
     path = _shard_path(index)
     if not path.exists():
@@ -797,6 +1001,59 @@ def shard_is_current(index: int) -> bool:
     except (json.JSONDecodeError, OSError):
         return False
     return bool(rows) and all(contract_mod.is_current(r) for r in rows)
+
+
+def shard_gaps(shard: dict, cfg: dict | None = None) -> list[str]:
+    """Why this shard is not complete. Empty means a validated receipt covers it.
+
+    Resume asks this instead of `path.exists()`. It is deliberately cheap -- the
+    receipt already asserts the parsed facts (expected ids, count, contract,
+    producer) and the rows digest binds those assertions to these exact bytes, so
+    a resume check hashes the file rather than re-parsing every rollout.
+    """
+    index = int(shard["index"])
+    path, receipt_path = _shard_path(index), shard_receipt_path(index)
+    if not path.exists():
+        return ["rows_file_absent"]
+    if not receipt_path.exists():
+        return ["receipt_absent"]
+    rec = _load_receipt(receipt_path)
+    if rec is None:
+        return ["receipt_unreadable"]
+    if not receipt_seal_ok(rec):
+        return ["receipt_self_hash_mismatch"]
+    gaps = []
+    if rec.get("kind") != SHARD_RECEIPT_KIND:
+        gaps.append(f"receipt_kind_{rec.get('kind')!r}")
+    if int(rec.get("schema_version") or 0) != RECEIPT_VERSION:
+        gaps.append(f"receipt_schema_version_{rec.get('schema_version')!r}")
+    if not rec.get("complete"):
+        gaps.append("receipt_says_incomplete")
+    if not contract_mod.is_current(rec):
+        gaps.append("receipt_under_another_environment_contract")
+    if int(rec.get("index", -1)) != index:
+        gaps.append("receipt_names_another_shard")
+    if (rec.get("family"), int(rec.get("horizon") or -1)) != (
+            shard["family"], int(shard["horizon"])):
+        gaps.append("receipt_names_another_cell")
+    if rec.get("expected_task_ids_sha256") != digest_text(canon(list(shard["task_ids"]))):
+        gaps.append("receipt_covers_another_task_set")
+    want = expected_rollout_ids(shard)
+    if int(rec.get("expected_rollouts") or -1) != len(want):
+        gaps.append(f"receipt_expected_{rec.get('expected_rollouts')}_"
+                    f"of_{len(want)}_rollouts")
+    if int(rec.get("rollouts") or -1) != len(want):
+        gaps.append(f"receipt_recorded_{rec.get('rollouts')}_of_{len(want)}_rollouts")
+    if rec.get("rollout_ids_sha256") != digest_text(canon(want)):
+        gaps.append("receipt_rollout_ids_differ_from_the_plan")
+    if rec.get("rows_sha256") != file_sha256(path):
+        gaps.append("rows_file_changed_since_the_receipt")
+    return gaps
+
+
+def shard_is_complete(shard: dict, cfg: dict | None = None) -> bool:
+    """Completion is a validated receipt over the planned ids, count and digest."""
+    return not shard_gaps(shard, cfg)
 
 
 # --------------------------------------------------------------------------
@@ -962,12 +1219,16 @@ def run_units(engine, units: list, *, run_one, is_done, budget_minutes: float,
 def cmd_plan(args) -> None:
     cfg = load_config()
     shards = plan_shards(args.split, args.shard_size, cfg)
-    done = sum(1 for s in shards if _shard_path(s["index"]).exists())
+    done = 0
     for s in shards:
-        mark = "done" if _shard_path(s["index"]).exists() else "    "
+        gaps = shard_gaps(s, cfg)
+        done += not gaps
+        mark = "done" if not gaps else ("    " if gaps == ["rows_file_absent"]
+                                        else f"INCOMPLETE: {', '.join(gaps[:2])}")
         print(f"  shard {s['index']:04d}  {s['family']:13s} h{s['horizon']:<3d} "
-              f"{len(s['task_ids']):3d} variants  {mark}")
-    print(f"[plan] {len(shards)} shards ({done} done), "
+              f"{len(s['task_ids']):3d} variants x k{s['k']} = "
+              f"{s['expected_rollouts']:4d} rollouts  {mark}")
+    print(f"[plan] {len(shards)} shards ({done} done, receipt-validated), "
           f"split={args.split or rs_split(cfg)}, shard_size={args.shard_size}")
 
 
@@ -984,7 +1245,7 @@ def cmd_run(args) -> None:
     shards = plan_shards(split, args.shard_size, cfg)
     if args.shard is not None:
         units = [shards[args.shard]]
-        if shard_is_current(args.shard) and not args.force:
+        if shard_is_complete(shards[args.shard], cfg) and not args.force:
             print(f"[rs] shard {args.shard} already done (use --force to redo)")
             return
         forced = {args.shard} if args.force else set()
@@ -992,13 +1253,17 @@ def cmd_run(args) -> None:
         units = shards
         forced = set()
     pending = [s for s in units
-               if s["index"] in forced or not shard_is_current(s["index"])]
-    stale = [s["index"] for s in pending
-             if _shard_path(s["index"]).exists() and s["index"] not in forced]
-    if stale:
-        print(f"[rs] {len(stale)} shard(s) were produced under a different "
-              f"environment contract and will be RE-ROLLED, not resumed: "
-              f"{stale[:8]}")
+               if s["index"] in forced or not shard_is_complete(s, cfg)]
+    # A shard file that exists but does not satisfy its receipt is RE-ROLLED, not
+    # resumed: a retired-contract shard, a shard truncated by a kill, and a shard
+    # planned at another --shard-size all land here rather than counting as done.
+    unusable = {s["index"]: shard_gaps(s, cfg) for s in pending
+                if s["index"] not in forced and _shard_path(s["index"]).exists()}
+    if unusable:
+        print(f"[rs] {len(unusable)} shard file(s) exist without a valid receipt "
+              f"and will be RE-ROLLED, not resumed: "
+              + "; ".join(f"{i:04d}: {', '.join(g[:2])}"
+                          for i, g in sorted(unusable.items())[:8]))
     if not pending:
         print("[rs] all shards done")
         return
@@ -1024,14 +1289,15 @@ def cmd_run(args) -> None:
           f"{len(pending)} pending shards")
 
     def is_done(shard):
-        return shard["index"] not in forced and shard_is_current(shard["index"])
+        return shard["index"] not in forced and shard_is_complete(shard, cfg)
 
     def run_one(shard):
         bundles = [by_id[t] for t in shard["task_ids"]]
         t0 = time.time()
         records = engine.run(engine.rollouts_for(bundles, variants=variants))
-        write_attested_jsonl(_shard_path(shard["index"]), records,
-                             f"rejection-sampling shard {shard['index']:04d}")
+        # Validates the rollouts against the shard's plan, then writes the rows and
+        # the receipt that certifies them; a short shard is never published.
+        write_shard(shard, records, cfg)
         forced.discard(shard["index"])
         minutes = (time.time() - t0) / 60.0
         cumulative = ledger_append("multidistill", minutes, cfg, kind="shard",
@@ -1127,40 +1393,273 @@ def finalize(records: list, bundles: dict, cfg: dict) -> tuple[list, dict]:
     return kept, summary
 
 
+# --------------------------------------------------------------------------
+# the accepted corpus: a receipt, or no corpus at all
+# --------------------------------------------------------------------------
+
+def accepted_receipt_path(path=None) -> pathlib.Path:
+    """`accepted.receipt.json` beside the corpus it certifies."""
+    return pathlib.Path(path or ACCEPTED_PATH).with_suffix(".receipt.json")
+
+
+def quota_misses(summary: dict) -> list[dict]:
+    """The quota rows that did NOT pass, worst deficit first."""
+    out = []
+    for name, q in (summary.get("quotas") or {}).items():
+        if q.get("ok"):
+            continue
+        got, want = int(q.get("accepted") or 0), int(q.get("min_accepted") or 0)
+        out.append({"quota": name, "accepted": got, "min_accepted": want,
+                    "short_by": max(want - got, 0),
+                    "excluded_cells": q.get("excluded_cells") or []})
+    out.sort(key=lambda q: (-q["short_by"], q["quota"]))
+    return out
+
+
+def clear_accepted_corpus() -> list[str]:
+    """Remove the corpus AND its receipt, so no resume can trust either."""
+    removed = []
+    for path in (accepted_receipt_path(), ACCEPTED_PATH):
+        if path.exists():
+            path.unlink()
+            removed.append(str(path))
+    return removed
+
+
+def build_accepted_receipt(kept: list, summary: dict, shards: list,
+                           path: pathlib.Path, cfg: dict | None = None) -> dict:
+    """The receipt that lets a later stage trust this corpus.
+
+    It names the shard census the corpus was assembled from (every shard receipt
+    digest), the kept task ids and their digest, the row count, the digest of the
+    corpus bytes and the quota verdicts. It exists ONLY for a corpus that passed
+    every quota with every planned shard validated -- which is what makes its
+    presence the completion marker.
+    """
+    cfg = cfg or load_config()
+    task_ids = sorted(r["task_id"] for r in kept)
+    receipts = []
+    for shard in shards:
+        rec = _load_receipt(shard_receipt_path(int(shard["index"]))) or {}
+        receipts.append({"index": int(shard["index"]),
+                         RECEIPT_HASH_FIELD: rec.get(RECEIPT_HASH_FIELD)})
+    return seal_receipt({
+        "kind": ACCEPTED_RECEIPT_KIND,
+        "schema_version": RECEIPT_VERSION,
+        "split": summary.get("split") or rs_split(cfg),
+        "shards": len(shards),
+        "shard_receipts": receipts,
+        "rollouts": int(summary.get("rollouts") or 0),
+        "accepted": len(kept),
+        "task_ids": len(task_ids),
+        "task_ids_sha256": digest_text(canon(task_ids)),
+        "corpus_path": path.name,
+        "corpus_sha256": file_sha256(path),
+        "quotas": summary.get("quotas") or {},
+        "quota_ok": True,
+        "partial": False,
+        "per_cell": summary.get("per_cell") or {},
+        "faulted_accepted": int(summary.get("faulted_accepted") or 0),
+        contract_mod.STAMP_FIELD: contract_mod.environment_contract_sha256(),
+        "source_provenance": summary.get("source_provenance") or {},
+        "source_sessions": summary.get("source_sessions") or [],
+        "complete": True,
+        "written_at_utc": now_utc(),
+    })
+
+
+def accepted_corpus_gaps(path=None) -> list[str]:
+    """Why the accepted corpus on disk may not be consumed. Empty means it may.
+
+    Existence is not completion: the receipt must be sealed, current, quota-clean,
+    non-partial, and must match the corpus bytes -- count, task-id digest and file
+    digest -- that a consumer is about to read.
+    """
+    corpus = pathlib.Path(path or ACCEPTED_PATH)
+    receipt_path = accepted_receipt_path(corpus)
+    if not corpus.exists():
+        return ["corpus_absent"]
+    if not receipt_path.exists():
+        return ["receipt_absent"]
+    rec = _load_receipt(receipt_path)
+    if rec is None:
+        return ["receipt_unreadable"]
+    if not receipt_seal_ok(rec):
+        return ["receipt_self_hash_mismatch"]
+    gaps = []
+    if rec.get("kind") != ACCEPTED_RECEIPT_KIND:
+        gaps.append(f"receipt_kind_{rec.get('kind')!r}")
+    if int(rec.get("schema_version") or 0) != RECEIPT_VERSION:
+        gaps.append(f"receipt_schema_version_{rec.get('schema_version')!r}")
+    if not rec.get("complete"):
+        gaps.append("receipt_says_incomplete")
+    if rec.get("partial"):
+        gaps.append("receipt_says_partial")
+    if not rec.get("quota_ok"):
+        gaps.append("receipt_says_quota_miss")
+    if not contract_mod.is_current(rec):
+        gaps.append("receipt_under_another_environment_contract")
+    if rec.get("corpus_sha256") != file_sha256(corpus):
+        gaps.append("corpus_changed_since_the_receipt")
+        return gaps
+    try:
+        rows = _read_jsonl(corpus)
+    except (json.JSONDecodeError, OSError):
+        return gaps + ["corpus_unreadable"]
+    if not rows:
+        gaps.append("zero_accepted_rows")
+    if int(rec.get("accepted") or -1) != len(rows):
+        gaps.append(f"receipt_counts_{rec.get('accepted')}_of_{len(rows)}_rows")
+    ids = sorted(r.get("task_id") for r in rows)
+    if rec.get("task_ids_sha256") != digest_text(canon(ids)):
+        gaps.append("receipt_names_another_task_set")
+    return gaps
+
+
+def require_accepted_corpus(path=None) -> dict:
+    """Return the validated receipt, or refuse to let the next stage start.
+
+    This is the "do not allow views/SFT" half of the quota rule: the view builder
+    calls it before it reads a single trajectory, so a corpus that missed a quota
+    (or was never finalized, or was truncated afterwards) stops the chain here
+    instead of quietly training on whatever is on disk.
+    """
+    corpus = pathlib.Path(path or ACCEPTED_PATH)
+    gaps = accepted_corpus_gaps(corpus)
+    if gaps:
+        raise SystemExit(
+            f"REFUSED: {corpus} is not a completed accepted corpus "
+            f"({', '.join(gaps)}).\n"
+            f"  Completion is a validated receipt at {accepted_receipt_path(corpus)} "
+            f"-- expected shards, kept task ids, row count, corpus digest and "
+            f"PASSING quotas -- never a path that exists. Re-run `python -m "
+            f"agentlab.multidistill run` for the shards that are short, then "
+            f"`finalize`.")
+    return _load_receipt(accepted_receipt_path(corpus))
+
+
 def cmd_finalize(args) -> None:
     cfg = load_config()
     split = args.split or rs_split(cfg)
     shards = plan_shards(split, args.shard_size, cfg)
-    missing = [s["index"] for s in shards if not _shard_path(s["index"]).exists()]
-    if missing and not args.partial:
-        raise SystemExit(f"missing shards {missing}; run them or pass --partial")
+    # "Missing" is measured against each shard's RECEIPT, not its path: a shard
+    # holding 3 of the 384 rollouts it owes would otherwise be finalized as if it
+    # had run, and its cell would look like an honest quota miss.
+    incomplete = {int(s["index"]): shard_gaps(s, cfg) for s in shards}
+    incomplete = {i: g for i, g in incomplete.items() if g}
+    if incomplete and not args.partial:
+        detail = "; ".join(f"{i:04d}: {', '.join(g)}"
+                           for i, g in sorted(incomplete.items())[:8])
+        raise SystemExit(
+            f"REFUSED: {len(incomplete)} of {len(shards)} shards have no valid "
+            f"receipt ({detail}"
+            f"{', ...' if len(incomplete) > 8 else ''}).\n"
+            f"  Run them (`python -m agentlab.multidistill run`) or pass "
+            f"--partial, which reports acceptance so far and deliberately "
+            f"produces NO accepted corpus.")
 
-    records = []
+    # Only receipt-validated shards are pooled, even in the --partial diagnostic:
+    # rows from a truncated shard would distort the acceptance rate the operator is
+    # about to read, and they may never reach a corpus in any case.
+    records, pooled = [], []
     for s in shards:
-        p = _shard_path(s["index"])
-        if p.exists():
-            records += _read_jsonl(p)
+        if int(s["index"]) in incomplete:
+            continue
+        records += _read_jsonl(_shard_path(s["index"]))
+        pooled.append(int(s["index"]))
 
     bundles = {b.spec.task_id: b for b in load_split(split, cfg)}
     kept, summary = finalize(records, bundles, cfg)
-    summary["partial"] = bool(missing)
+    summary["split"] = split
+    summary["shards"] = len(shards)
+    summary["shards_pooled"] = len(pooled)
+    summary["shards_incomplete"] = sorted(incomplete)
+    summary["partial"] = bool(incomplete)
+    summary["quota_misses"] = quota_misses(summary)
+    summary["quota_ok"] = not summary["quota_misses"]
+    summary["complete"] = summary["quota_ok"] and not summary["partial"]
+    SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(SUMMARY_PATH, summary)
+    print(json.dumps(summary, indent=2))
+
+    # THE HARD STOP. A quota miss (or a partial finalize) used to print a warning
+    # and exit 0 after writing accepted.jsonl, so the next invocation of the chain
+    # saw the file, skipped the stage, and trained on a corpus that had failed its
+    # preregistered minimum. The quotas are registered numbers: the fix is more
+    # rollouts in the short cells, never a smaller floor. So nothing is written,
+    # anything a resume could trust is REMOVED, the reason is written down, and
+    # the stage exits nonzero.
+    if not summary["complete"]:
+        removed = clear_accepted_corpus()
+        failure = {
+            "kind": "agentlab_rs_finalize_failure",
+            "schema_version": RECEIPT_VERSION,
+            "split": split,
+            "reason": ("quota_miss" if summary["quota_misses"]
+                       else "incomplete_shards"),
+            "quota_misses": summary["quota_misses"],
+            "shards": len(shards),
+            "shards_incomplete": sorted(incomplete),
+            "shard_gaps": {str(i): g for i, g in sorted(incomplete.items())},
+            "accepted": len(kept),
+            "per_cell": summary["per_cell"],
+            "faulted_accepted": summary["faulted_accepted"],
+            "removed_untrustworthy_artifacts": removed,
+            contract_mod.STAMP_FIELD: contract_mod.environment_contract_sha256(),
+            "written_at_utc": now_utc(),
+        }
+        _write_json(FAILURE_PATH, failure)
+        lines = [f"REFUSED: the accepted RS corpus is not complete, so it was not "
+                 f"written."]
+        for q in summary["quota_misses"]:
+            lines.append(f"  quota {q['quota']}: {q['accepted']} accepted, "
+                         f"minimum {q['min_accepted']} (short by {q['short_by']})")
+        if summary["partial"]:
+            lines.append(f"  {len(incomplete)} of {len(shards)} shards have no "
+                         f"valid receipt: {sorted(incomplete)[:8]}")
+        if removed:
+            lines.append(f"  removed so no resume can trust it: "
+                         f"{', '.join(removed)}")
+        lines.append(f"  why, as data: {FAILURE_PATH}")
+        lines.append("  The quotas and the horizon strata are preregistered: roll "
+                     "out more variants in the short cells (`python -m "
+                     "agentlab.multidistill run`) and finalize again. A missing "
+                     "deep-cell quota is never backfilled from easier cells, and "
+                     "no minimum may be lowered.")
+        raise SystemExit("\n".join(lines))
+
     # Horizon strata are structural: acceptance is one-per-variant and each
     # variant's horizon is fixed by the committed spec, so a missing deep-cell
     # quota can never be silently backfilled with easy cells.
+    if FAILURE_PATH.exists():
+        FAILURE_PATH.unlink()          # this finalize succeeded; the old why is void
+    receipt_path = accepted_receipt_path()
+    if receipt_path.exists():
+        receipt_path.unlink()          # never a receipt for bytes being replaced
     write_attested_jsonl(ACCEPTED_PATH, kept, "the accepted RS corpus")
-    SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SUMMARY_PATH.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(summary, indent=2))
-    if not all(q["ok"] for q in summary["quotas"].values()):
-        print("[rs] QUOTA MISS: at least one family is under its preregistered "
-              "minimum; the RS-SFT stage must not proceed on this corpus.")
+    receipt = build_accepted_receipt(kept, summary, shards, ACCEPTED_PATH, cfg)
+    _write_json(receipt_path, receipt)
+    # Read it back through the consumer's own gate: the receipt must describe the
+    # bytes on disk, not the objects that were in memory a moment ago.
+    require_accepted_corpus(ACCEPTED_PATH)
+    print(f"[rs] accepted corpus {ACCEPTED_PATH} ({len(kept)} trajectories) "
+          f"certified by {receipt_path} "
+          f"(digest {receipt[RECEIPT_HASH_FIELD][:12]}...)")
 
 
 def cmd_status(args) -> None:
     cfg = load_config()
     shards = plan_shards(args.split, args.shard_size, cfg)
-    done = [s for s in shards if _shard_path(s["index"]).exists()]
-    print(f"[status] shards {len(done)}/{len(shards)} done")
+    done = [s for s in shards if shard_is_complete(s, cfg)]
+    started = [s for s in shards
+               if s not in done and _shard_path(s["index"]).exists()]
+    print(f"[status] shards {len(done)}/{len(shards)} done (receipt-validated), "
+          f"{len(started)} file(s) present without a valid receipt")
+    gaps = accepted_corpus_gaps()
+    print(f"[status] accepted corpus: "
+          + ("complete" if not gaps else f"NOT usable ({', '.join(gaps)})"))
+    if FAILURE_PATH.exists():
+        print(f"[status] last finalize refused; why: {FAILURE_PATH}")
     if SUMMARY_PATH.exists():
         print(SUMMARY_PATH.read_text(encoding="utf-8"))
 
@@ -1201,7 +1700,12 @@ def main() -> None:
                          "resumable; re-invoke to continue.")
 
     fin = sub.add_parser("finalize", parents=[common])
-    fin.add_argument("--partial", action="store_true")
+    fin.add_argument("--partial", action="store_true",
+                     help="DIAGNOSTIC ONLY: report acceptance over the shards "
+                          "that have valid receipts. It writes the summary, "
+                          "produces NO accepted corpus, and exits nonzero -- a "
+                          "corpus assembled from part of the plan is not the "
+                          "registered corpus and must never be trained on.")
     sub.add_parser("status", parents=[common])
 
     args = ap.parse_args()

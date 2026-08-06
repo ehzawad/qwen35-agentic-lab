@@ -282,13 +282,20 @@ def test_harmless_extra_read_only_calls_earn_nothing_but_stay_acceptable():
 
 
 def test_a_missing_committed_answer_is_rejected_before_the_verifier():
+    """No commitment under the ONE grammar -- not "no \\boxed{}" specifically.
+
+    The bucket is `no_committed_answer` because the filter asks
+    `schema.extract_committed_answer`: a trajectory that terminated with the
+    preregistered `ANSWER: <value>` form DID commit and must not be dropped
+    (tests/test_corpus_completion.py pins that half).
+    """
     from agentlab.multidistill import accept_record
 
     bundle = _bundle("lookup_chain", 2, None, index=80)
     policy = OraclePolicy([bundle], terminal_text="the code is right here")
     rec = run_engine([bundle], policy=policy, cfg=CFG)[0]
     ok, why = accept_record(rec, CFG, {bundle.spec.task_id: bundle}, secret=TEST_SECRET)
-    assert not ok and why == "no_box"
+    assert not ok and why == "no_committed_answer"
 
 
 # ---------------------------------------------------------------------------
