@@ -168,6 +168,38 @@ Publishing the secret before evaluation would let the model's recovery tokens be
 anticipated; committing only after evaluation would let the secret be chosen to
 fit the result. The commitment/reveal split is what removes both.
 
+## The recovery drill
+
+A backup nobody has restored is a hope. This was run end to end on
+2026-08-06, while rejection sampling held the A5000:
+
+```python
+# 1. pull a file from the commit the index pins, not from the branch tip
+from huggingface_hub import hf_hub_download
+import hashlib, json
+idx = json.load(open("ARTIFACTS.json"))
+f = [x for x in idx["files"] if x["path"].endswith("run_secret.enc.json")][0]
+p = hf_hub_download(repo_id=idx["remote"]["repo_id"], repo_type="dataset",
+                    filename=f["remote_path"], revision=f["remote_commit"])
+assert hashlib.sha256(open(p, "rb").read()).hexdigest() == f["sha256"]
+```
+
+Results:
+
+- four files pulled from their pinned commits (the envelope, a tournament
+  rollout, a preflight trace, the hardware lock) all hash to the digests the
+  index records;
+- the Hub's own server-side LFS `sha256` matches the index for every large
+  object, including the 519 MB optimizer state — independent server-side
+  confirmation, not our own digest read back;
+- the run secret was recovered from the remote envelope and reproduces both
+  `secret_sha256` and the run-bound `commitment.digest` in the committed
+  commitment, and is byte-identical to the live secret.
+
+So the claim "this run survives loss of this host" is tested, not asserted —
+with the one stated exception that the *passphrase* still has to be copied
+off-host by hand.
+
 ## What this does not fix
 
 Deliberately out of scope here, and open in council round 6:
