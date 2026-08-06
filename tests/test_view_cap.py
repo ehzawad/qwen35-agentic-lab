@@ -352,12 +352,20 @@ def over_full_corpus():
     # rejections rather than on eligible trajectories
     assert extract_committed_answer(records[0]["messages"][-1]["content"])
     rows, meta, report = ds.build_views(records, token_counter_stub(), CFG)
-    return rows, meta, report
+    # The records themselves are handed back: determinism means SAME INPUT ->
+    # same output, and a rebuilt "identical" record is not the same input. Each
+    # row id is keyed by its source trajectory's content digest (one task can
+    # contribute several accepted trajectories, so a task-keyed id collides), and
+    # that digest covers the rollout's provenance block, which carries the
+    # producer's `timestamp_utc`. Constructing the fixtures a second time
+    # therefore yields genuinely different artifacts. In production the digest is
+    # taken over rollout rows read from disk, which do not move.
+    return rows, meta, report, records
 
 
 def test_build_views_caps_an_over_full_corpus_into_the_registered_range(
         over_full_corpus):
-    rows, meta, report = over_full_corpus
+    rows, meta, report, _records = over_full_corpus
     cap = report["view_cap"]
     assert cap["applied"] is True, cap
     assert cap["full_rows"] > HI
@@ -370,7 +378,7 @@ def test_build_views_caps_an_over_full_corpus_into_the_registered_range(
 
 
 def test_the_census_reconciles_with_the_cap_receipt(over_full_corpus):
-    _rows, _meta, report = over_full_corpus
+    _rows, _meta, report, _records = over_full_corpus
     cap = report["view_cap"]
     assert sum(c["rows"] for c in report["strata"].values()) == report["rows"]
     assert sum(c["trajectories_capped"] for c in report["strata"].values()) \
@@ -388,12 +396,17 @@ def test_the_capped_corpus_rebuilds_byte_identically(over_full_corpus):
     """Determinism where it is finally observable: the row-id digest."""
     from rollout_helpers import token_counter_stub
 
-    _rows, _meta, report = over_full_corpus
-    # `% 5` and not `% 3`: with twelve cells a `% 3` schedule makes the fault a
-    # property of the CELL, so four cells would carry every recovery view and
-    # eight would carry none. The cap must be exercised on a realistic mixture.
-    records = [_synthetic_record(CELLS[i % 12], i, faulted=(i % 5 == 0))
-               for i in range(2000)]
+    _rows, _meta, report, records0 = over_full_corpus
+    # THE SAME artifacts, in a different order -- not rebuilt ones. Each row id is
+    # keyed by its source trajectory's content digest, because one task can
+    # contribute several accepted trajectories (different rollout samples, and the
+    # clean and faulted conditions of one scenario) that legitimately supervise the
+    # same view kind at the same turn; a task-keyed id collided and the builder
+    # rightly refused the corpus. That digest covers the rollout's provenance,
+    # which carries the producer's `timestamp_utc`, so re-CONSTRUCTING the fixtures
+    # would hand `build_views` genuinely different artifacts and test nothing.
+    # Determinism is: same input, any order, same corpus.
+    records = list(records0)
     random.Random(7).shuffle(records)
     rows2, meta2, report2 = ds.build_views(records, token_counter_stub(), CFG)
     assert report2["rows"] == report["rows"]
@@ -406,7 +419,7 @@ def test_the_capped_corpus_rebuilds_byte_identically(over_full_corpus):
 
 
 def test_the_receipt_is_json_serialisable_and_names_the_rule(over_full_corpus):
-    _rows, _meta, report = over_full_corpus
+    _rows, _meta, report, _records = over_full_corpus
     text = json.dumps(report["view_cap"], indent=2)
     assert "view-cap-v1" in text
     assert "never score, reward, length or any outcome" in text

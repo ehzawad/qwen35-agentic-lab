@@ -1,0 +1,133 @@
+{
+  "checks": [
+    {
+      "check": "rs_worker_completed",
+      "detail": "/mnt/sdb/arafat/ehz/llm/qwen35-agentic-lab/out/preflight/rs/rs.log",
+      "pass": true
+    },
+    {
+      "check": "probe4_card_returned_to_baseline",
+      "detail": "baseline 6 MiB, now 6 MiB",
+      "pass": true
+    },
+    {
+      "check": "expected_rollout_count",
+      "detail": "48 = 6 tasks x 2 conditions x 4 samples",
+      "pass": true
+    },
+    {
+      "check": "both_prompt_variants_ran",
+      "detail": "{\"canonical\": 24, \"frozen\": 24}",
+      "pass": true
+    },
+    {
+      "check": "every_rollout_carries_complete_producer_provenance",
+      "detail": "[]",
+      "pass": true
+    },
+    {
+      "check": "one_gpu_producer_for_the_whole_batch",
+      "detail": "{\"pooled_identity_card\": \"GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567\", \"gpu_execution\": true, \"row_producers\": [\"preflight_rs\"], \"row_sessions\": [\"preflight_rs-20260806T080543Z-4080388-935237d3\"], \"row_manifests\": [\"f3703f775bc286829831b9dfe5aaf20def8222a23bb8ff1bc999ca32890e05ca\"], \"engine_receipt_session\": \"preflight_rs-20260806T080543Z-4080388-935237d3\", \"engine_receipt_manifest\": \"f3703f775bc286829831b9dfe5aaf20def8222a23bb8ff1bc999ca32890e05ca\"}",
+      "pass": true
+    },
+    {
+      "check": "every_rollout_replays_to_identical_bytes_and_verdict",
+      "detail": "{}",
+      "pass": true
+    },
+    {
+      "check": "no_unknown_tool_or_argument_failures",
+      "detail": "{\"unknown_tool\": [], \"arg_error\": []}",
+      "pass": true
+    },
+    {
+      "check": "one_environment_contract_with_this_build",
+      "detail": "a904665020ee3ff1",
+      "pass": true
+    },
+    {
+      "check": "tool_surface_digest_matches_this_build",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "fault_envelope_bytes_equal_the_evaluation_path",
+      "detail": "24 task(s) fired in both paths; mismatched []",
+      "pass": true
+    },
+    {
+      "check": "the_evaluation_traces_were_available_to_compare_against",
+      "detail": "12 evaluation rows from probe3",
+      "pass": true
+    },
+    {
+      "check": "probe4_card_returned_to_baseline",
+      "detail": "baseline 6 MiB, now 6 MiB",
+      "pass": true
+    }
+  ],
+  "config_hash": "f65975dc42d41f1fee06f407c475c195e198c7b33c7a19af7ec0e39f1d69491e",
+  "elapsed_s": 323.0,
+  "environment_contract_sha256": "a904665020ee3ff178d90bc887b36c22493bb468b6ee626802c5138739ec3c95",
+  "finished_at_utc": "2026-08-06T08:10:55Z",
+  "git_sha": "f18973ef20c31143aeb38e02c74e5e91bacfccf5",
+  "notes": [
+    "falsifies: offline chat-template/tool-parsing drift and train/eval environment divergence",
+    "the second prompt variant is p8_combined.txt, a tournament CANDIDATE standing in for the frozen winner, which does not exist yet by design (the tournament runs after this preflight)"
+  ],
+  "numbers": {
+    "capability_diagnostic": {
+      "call_cap": 0,
+      "certified_success": 38,
+      "exhausted": 0,
+      "no_final": 2,
+      "recovered": 24,
+      "truncated": 2
+    },
+    "engine_startup_min": 0.93,
+    "fault_envelope_comparisons": 24,
+    "gpu_used_mib_before": 6,
+    "ledger_cumulative_h_after": 0.3037,
+    "probe4_gpu_used_mib_after": 6,
+    "producer_identity": {
+      "config_hash": "f65975dc42d41f1fee06f407c475c195e198c7b33c7a19af7ec0e39f1d69491e",
+      "cuda_visible_bytes": 25282805760,
+      "driver_version": "610.43.02",
+      "enable_thinking_effective": false,
+      "engine_fingerprint": {
+        "dtype": "bfloat16",
+        "enable_thinking": false,
+        "enforce_eager": false,
+        "gpu_memory_utilization": 0.8,
+        "max_model_len": 8192,
+        "max_num_batched_tokens": 8192,
+        "max_num_seqs": 8,
+        "multimodal_inputs": "REJECTED",
+        "peft": "0.20.0",
+        "tensor_parallel_size": 1,
+        "torch": "2.11.0",
+        "transformers": "5.14.1",
+        "trl": "1.9.2",
+        "vllm": "0.25.1"
+      },
+      "gpu_execution": true,
+      "gpu_name": "NVIDIA RTX A5000",
+      "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+      "run_id": "dev-preflight-v1"
+    },
+    "rollout_minutes": 4.29,
+    "rollouts": 48
+  },
+  "pass": true,
+  "probe": "probe4",
+  "run_id": "dev-preflight-v1",
+  "tasks": [
+    "dev-lookup_chain-h2-0000",
+    "dev-lookup_chain-h12-0102",
+    "dev-typed_relay-h2-0150",
+    "dev-typed_relay-h12-0225",
+    "dev-fulfillment-h4-0102",
+    "dev-fulfillment-h20-0225"
+  ],
+  "title": "tiny offline-RS batch, both prompt variants, one engine"
+}

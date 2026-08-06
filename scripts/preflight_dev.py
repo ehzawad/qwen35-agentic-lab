@@ -1568,16 +1568,41 @@ def cmd_probe4(args) -> int:
     gaps = [md.provenance_gaps(r.get("provenance")) for r in all_rows]
     probe.check("every_rollout_carries_complete_producer_provenance",
                 not any(gaps), json.dumps([g for g in gaps if g]))
+    # ONE CARD, and one attested session behind every row -- but these are two
+    # different objects and must be read from two different places.
+    #
+    # `require_one_producer` returns the POOLED identity, and for a GPU producer
+    # that identity is deliberately just the card plus the engine fingerprint: it
+    # omits producer/session_id/runtime_manifest_sha256 precisely so that two
+    # rejection-sampling SESSIONS of one run on one card pool into one producer
+    # instead of reading as an S19 violation -- which is what makes the stage
+    # resumable at all. Asserting the session fields ON that pooled identity could
+    # never pass; the earlier version of this check did, and reported the design as
+    # a defect.
+    #
+    # So: the identity carries the card, and the per-row provenance blocks carry
+    # the session. Completeness of those blocks is already asserted just above
+    # (`every_rollout_carries_complete_producer_provenance`); here we additionally
+    # require that they AGREE with each other and with the engine's own receipt.
     ident = md.require_one_producer(all_rows, "the preflight RS batch")
+    blocks = [r.get("provenance") or {} for r in all_rows]
+    sessions = sorted({b.get("session_id") for b in blocks})
+    manifests = sorted({b.get("runtime_manifest_sha256") for b in blocks})
+    producers = sorted({b.get("producer") for b in blocks})
     probe.check("one_gpu_producer_for_the_whole_batch",
                 bool(ident.get("gpu_execution"))
-                and ident.get("producer") == "preflight_rs"
-                and ident.get("runtime_manifest_sha256")
-                == info["runtime_manifest_sha256"]
-                and ident.get("session_id") == info["session_id"],
-                json.dumps({k: ident.get(k) for k in
-                            ("producer", "gpu_execution", "gpu_uuid",
-                             "session_id", "runtime_manifest_sha256")}))
+                and ident.get("gpu_uuid")
+                and producers == ["preflight_rs"]
+                and sessions == [info["session_id"]]
+                and manifests == [info["runtime_manifest_sha256"]],
+                json.dumps({"pooled_identity_card": ident.get("gpu_uuid"),
+                            "gpu_execution": ident.get("gpu_execution"),
+                            "row_producers": producers,
+                            "row_sessions": sessions,
+                            "row_manifests": manifests,
+                            "engine_receipt_session": info["session_id"],
+                            "engine_receipt_manifest":
+                                info["runtime_manifest_sha256"]}))
     probe.number("producer_identity", ident)
 
     # replay parity
@@ -1908,11 +1933,38 @@ def cmd_probe5(args) -> int:
     probe.check("the_corpus_the_receipt_names_is_the_corpus_on_disk",
                 manifest["inputs"]["views_sha256"] == sha256_file(CANARY_VIEWS)
                 and manifest["inputs"]["views_rows"] == len(rows))
+    # THE CARD comes from the pooled identity; THE SESSIONS come from their own
+    # fields. `source_provenance` is the pooled producer identity, and for a GPU
+    # producer that identity is deliberately just the card plus the engine
+    # fingerprint -- it carries no `session_id` at all, so that two rejection-
+    # sampling sessions of one run on one card pool into one producer instead of
+    # reading as an S19 violation. Asking it for `session_id` raised KeyError on
+    # both sides of this comparison; the same conflation of "pooled identity" with
+    # "per-row provenance block" produced a false failure in probe 4.
+    #
+    # The trainer already records the sessions properly, as `source_sessions` and
+    # `source_runtime_manifests` gathered over the view metadata, so the chain from
+    # checkpoint back to attested engine session is asserted from those.
+    meta_sessions = sorted({m["session_id"] for m in meta
+                            if m.get("session_id")})
+    meta_manifests = sorted({m["runtime_manifest_sha256"] for m in meta
+                             if m.get("runtime_manifest_sha256")})
     probe.check("the_receipt_inherits_the_rollout_producer",
-                manifest["inputs"]["source_provenance"]["session_id"]
-                == checked["source_provenance"]["session_id"]
-                and manifest["inputs"]["source_provenance"]["gpu_uuid"]
-                == checked["source_provenance"]["gpu_uuid"])
+                manifest["inputs"]["source_provenance"]["gpu_uuid"]
+                == checked["source_provenance"]["gpu_uuid"]
+                and bool(manifest["inputs"]["source_provenance"]["gpu_uuid"])
+                and manifest["inputs"]["source_sessions"] == meta_sessions
+                and manifest["inputs"]["source_runtime_manifests"]
+                == meta_manifests
+                and len(meta_sessions) == 1 and len(meta_manifests) == 1,
+                json.dumps({"gpu_uuid":
+                            manifest["inputs"]["source_provenance"]["gpu_uuid"],
+                            "receipt_sessions":
+                                manifest["inputs"]["source_sessions"],
+                            "view_meta_sessions": meta_sessions,
+                            "receipt_manifests":
+                                manifest["inputs"]["source_runtime_manifests"],
+                            "view_meta_manifests": meta_manifests}))
     probe.number("training_manifest", {
         "run_id": manifest["run_id"], "stage": manifest["stage"],
         "optimizer_steps": manifest["optimizer_steps"],

@@ -109,11 +109,26 @@ PRODUCTION_CORPUS = "production"
 IN_PROCESS_CORPUS = "in_process"
 
 
-def view_row_id(task_id: str, view: str, index: int, copy_index: int) -> str:
-    """A stable identity for one training row: task, view kind, turn, copy."""
+def view_row_id(task_id: str, view: str, index: int, copy_index: int,
+                source_sha: str) -> str:
+    """A stable identity for one training row.
+
+    Keyed by the SOURCE TRAJECTORY as well as the task, view kind, turn and copy.
+    The trajectory digest is load-bearing, not decorative: one task can contribute
+    several accepted trajectories -- different rollout samples, and the clean and
+    faulted conditions of the same scenario -- and those trajectories legitimately
+    supervise the same view kind at the same turn index. Keyed on the task alone,
+    such rows collided, and since a duplicate id makes the mapping from a trained
+    checkpoint back to the trajectory that taught it ambiguous, the view builder
+    refused the corpus outright (measured on the dev canary: 9 rows sharing 3 ids).
+
+    Distinctness is a property the whole provenance chain rests on, so it is
+    enforced by construction here rather than hoped for.
+    """
     from agentlab.suite.schema import digest_text
 
-    return digest_text(f"view|{task_id}|{view}|{index}|{copy_index}")[:24]
+    return digest_text(
+        f"view|{task_id}|{view}|{index}|{copy_index}|{source_sha}")[:24]
 
 
 def row_ids_digest(meta: list) -> str:
@@ -852,7 +867,7 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
             stratum(cell)["rows"] += 1
             stratum(cell)["view_counts"][view] += 1
             meta.append({"row_id": view_row_id(b["task_id"], view, msg_index,
-                                               copy_index),
+                                               copy_index, b["source_sha"]),
                          "task_id": b["task_id"], "family": family,
                          "horizon": b["horizon"],
                          "fault_types": list(b["fault_types"]),

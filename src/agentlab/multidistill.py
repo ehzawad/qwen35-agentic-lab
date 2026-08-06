@@ -1116,6 +1116,22 @@ def _vllm_engine(cfg: dict, args, frozen: str | None,
                   max_num_batched_tokens=contract["max_num_batched_tokens"],
                   enforce_eager=contract["enforce_eager"],
                   tensor_parallel_size=contract["tensor_parallel_size"])
+    if contract["multimodal_inputs"] == "REJECTED":
+        # The registered contract says multimodal inputs are REJECTED, not merely
+        # unused, and until now only scripts/serve.sh honoured that -- it passed
+        # `--limit-mm-per-prompt '{"image":0,"video":0}'` as a literal while this
+        # offline path read every other contract key and never learned about this
+        # one. So the two engines were NOT the same engine, which is the drift the
+        # single contract exists to prevent.
+        #
+        # It is not cosmetic: with the vision tower live, vLLM's memory
+        # `profile_run` builds a dummy MULTIMODAL batch, and on this hybrid
+        # checkpoint that dummy forward dies inside the Gated DeltaNet path with
+        # `AttributeError: 'NoneType' object has no attribute 'size'`
+        # (qwen3_next.py forward, via profile_run -> _dummy_run). The engine never
+        # reached its KV-cache sizing, so preflight probe 4 could not start an
+        # engine at all while probe 3's server -- carrying the literal -- was fine.
+        kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
     lora_request = None
     if adapter:
         kwargs.update(enable_lora=True,

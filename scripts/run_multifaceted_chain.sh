@@ -121,6 +121,16 @@ PY="$ROOT/.venv/bin/python"
 export PYTHONPATH="src"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
+# The SFT step needs this on a 24 GB card, and it is an ALLOCATOR policy: no
+# shape, hyperparameter or gradient changes, so the registered treatment is
+# untouched. Measured on the dev canary: at the registered sft.bsz 2 x accum 8 x
+# max_length 5120, log_softmax over the 248,320-token vocabulary died asking for
+# 244 MiB with 150 MiB free -- while 2.33 GiB sat reserved-but-unallocated. That
+# is fragmentation, not a capacity shortfall: with expandable segments the same
+# step completed in 49 s (train_loss 0.05317) at the same shapes, so batch 1 x
+# accum 16 was not needed. It lives here, not in an operator's shell, because a
+# run that depended on an exported variable would be a run nobody could reproduce.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export AGENTIC_RUN_ID="${AGENTIC_RUN_ID:-agentic-v1}"
 
 MODEL="${MODEL:-Qwen/Qwen3.5-4B}"

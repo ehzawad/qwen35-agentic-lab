@@ -1,0 +1,254 @@
+{
+  "checks": [
+    {
+      "check": "probe4_rollouts_present",
+      "detail": "48 rollouts",
+      "pass": true
+    },
+    {
+      "check": "at_least_one_verified_dev_canary",
+      "detail": "38 of 48 rollouts accepted by the strict verifier + registered budget/recovery filters",
+      "pass": true
+    },
+    {
+      "check": "training_rows_carry_exactly_the_four_TRL_columns",
+      "detail": "12 rows, columns ['chat_template_kwargs', 'completion', 'prompt', 'tools']",
+      "pass": true
+    },
+    {
+      "check": "view_metadata_is_one_to_one_with_the_rows",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "the_view_chain_names_one_attested_gpu_producer",
+      "detail": "{\"producer\": null, \"gpu_uuid\": \"GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567\", \"session_id\": null, \"runtime_manifest_sha256\": null}",
+      "pass": true
+    },
+    {
+      "check": "every_completion_is_exactly_one_assistant_message",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "the_prompt_is_a_token_prefix_of_prompt_plus_completion",
+      "detail": "TRL masks by prompt length; a non-prefix tokenization would train on the wrong tokens",
+      "pass": true
+    },
+    {
+      "check": "only_the_final_assistant_turn_is_supervised",
+      "detail": "supervised tokens per row: [22, 22, 65, 44, 44, 122, 44, 44, 107, 44, 44, 115]",
+      "pass": true
+    },
+    {
+      "check": "no_view_exceeds_the_registered_view_budget",
+      "detail": "max 2517 of 5120",
+      "pass": true
+    },
+    {
+      "check": "eval_batch_is_one_and_loss_only",
+      "detail": "eval_bsz 1, prediction_loss_only True",
+      "pass": true
+    },
+    {
+      "check": "completion_only_loss_is_left_to_the_dataset_shape",
+      "detail": "SFTTrainer resolves completion_only_loss=True for a prompt-completion dataset",
+      "pass": true
+    },
+    {
+      "check": "packing_off_and_length_matches_the_view_budget",
+      "detail": "max_length 5120, packing False",
+      "pass": true
+    },
+    {
+      "check": "sft_canary_completed",
+      "detail": "/mnt/sdb/arafat/ehz/llm/qwen35-agentic-lab/out/preflight/sft/sft.log",
+      "pass": true
+    },
+    {
+      "check": "checkpoint_written",
+      "detail": "/mnt/sdb/arafat/ehz/llm/qwen35-agentic-lab/out/preflight/sft-canary-lora",
+      "pass": true
+    },
+    {
+      "check": "trainer_manifest_is_complete",
+      "detail": "[]",
+      "pass": true
+    },
+    {
+      "check": "checkpoint_hash_matches_the_bytes_on_disk",
+      "detail": "e1cf731377894641",
+      "pass": true
+    },
+    {
+      "check": "ledger_uuid_matches_the_training_card",
+      "detail": "trainer GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567, ledger GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567, run binding GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+      "pass": true
+    },
+    {
+      "check": "the_receipt_passes_the_checkpoint_locks_own_gate",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "one_optimizer_step",
+      "detail": "1 step(s) over 11 train rows",
+      "pass": true
+    },
+    {
+      "check": "the_corpus_the_receipt_names_is_the_corpus_on_disk",
+      "detail": "",
+      "pass": true
+    },
+    {
+      "check": "the_receipt_inherits_the_rollout_producer",
+      "detail": "{\"gpu_uuid\": \"GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567\", \"receipt_sessions\": [\"preflight_rs-20260806T080543Z-4080388-935237d3\"], \"view_meta_sessions\": [\"preflight_rs-20260806T080543Z-4080388-935237d3\"], \"receipt_manifests\": [\"f3703f775bc286829831b9dfe5aaf20def8222a23bb8ff1bc999ca32890e05ca\"], \"view_meta_manifests\": [\"f3703f775bc286829831b9dfe5aaf20def8222a23bb8ff1bc999ca32890e05ca\"]}",
+      "pass": true
+    },
+    {
+      "check": "probe5_card_returned_to_baseline",
+      "detail": "baseline 218 MiB, now 218 MiB",
+      "pass": true
+    }
+  ],
+  "config_hash": "f65975dc42d41f1fee06f407c475c195e198c7b33c7a19af7ec0e39f1d69491e",
+  "elapsed_s": 112.7,
+  "environment_contract_sha256": "a904665020ee3ff178d90bc887b36c22493bb468b6ee626802c5138739ec3c95",
+  "finished_at_utc": "2026-08-06T08:24:20Z",
+  "git_sha": "f18973ef20c31143aeb38e02c74e5e91bacfccf5",
+  "notes": [
+    "falsifies: the training-side provenance seam and dangerous trainer defaults",
+    "4 of 38 accepted canaries kept so the corpus stays inside one optimizer step (16 = sft.bsz 2 x sft.accum 8); the corpus-level terminal-weight gate applies to the production corpus, not to this canary"
+  ],
+  "numbers": {
+    "acceptance": {
+      "accepted": 38,
+      "rejected": 10
+    },
+    "canary_trajectories": [
+      "dev-fulfillment-h4-0102",
+      "dev-fulfillment-h4-0102",
+      "dev-fulfillment-h4-0102",
+      "dev-fulfillment-h4-0102"
+    ],
+    "gpu_used_mib_before": 218,
+    "ledger_cumulative_h_after": 0.3282,
+    "probe5_gpu_used_mib_after": 218,
+    "rejection_reasons": {
+      "dev-fulfillment-h20-0225:clean:canonical:0": "verifier_rejected",
+      "dev-fulfillment-h20-0225:clean:canonical:1": "verifier_rejected",
+      "dev-fulfillment-h20-0225:clean:frozen:2": "verifier_rejected",
+      "dev-fulfillment-h20-0225:clean:frozen:3": "verifier_rejected",
+      "dev-fulfillment-h20-0225:faulted:canonical:0": "verifier_rejected",
+      "dev-fulfillment-h20-0225:faulted:canonical:1": "verifier_rejected",
+      "dev-fulfillment-h20-0225:faulted:frozen:2": "verifier_rejected",
+      "dev-fulfillment-h20-0225:faulted:frozen:3": "verifier_rejected",
+      "dev-fulfillment-h4-0102:clean:canonical:0": "accepted",
+      "dev-fulfillment-h4-0102:clean:canonical:1": "accepted",
+      "dev-fulfillment-h4-0102:clean:frozen:2": "accepted",
+      "dev-fulfillment-h4-0102:clean:frozen:3": "accepted",
+      "dev-fulfillment-h4-0102:faulted:canonical:0": "accepted",
+      "dev-fulfillment-h4-0102:faulted:canonical:1": "accepted",
+      "dev-fulfillment-h4-0102:faulted:frozen:2": "accepted",
+      "dev-fulfillment-h4-0102:faulted:frozen:3": "accepted",
+      "dev-lookup_chain-h12-0102:clean:canonical:0": "truncated_final",
+      "dev-lookup_chain-h12-0102:clean:canonical:1": "truncated_final",
+      "dev-lookup_chain-h12-0102:clean:frozen:2": "accepted",
+      "dev-lookup_chain-h12-0102:clean:frozen:3": "accepted",
+      "dev-lookup_chain-h12-0102:faulted:canonical:0": "accepted",
+      "dev-lookup_chain-h12-0102:faulted:canonical:1": "accepted",
+      "dev-lookup_chain-h12-0102:faulted:frozen:2": "accepted",
+      "dev-lookup_chain-h12-0102:faulted:frozen:3": "accepted",
+      "dev-lookup_chain-h2-0000:clean:canonical:0": "accepted",
+      "dev-lookup_chain-h2-0000:clean:canonical:1": "accepted",
+      "dev-lookup_chain-h2-0000:clean:frozen:2": "accepted",
+      "dev-lookup_chain-h2-0000:clean:frozen:3": "accepted",
+      "dev-lookup_chain-h2-0000:faulted:canonical:0": "accepted",
+      "dev-lookup_chain-h2-0000:faulted:canonical:1": "accepted",
+      "dev-lookup_chain-h2-0000:faulted:frozen:2": "accepted",
+      "dev-lookup_chain-h2-0000:faulted:frozen:3": "accepted",
+      "dev-typed_relay-h12-0225:clean:canonical:0": "accepted",
+      "dev-typed_relay-h12-0225:clean:canonical:1": "accepted",
+      "dev-typed_relay-h12-0225:clean:frozen:2": "accepted",
+      "dev-typed_relay-h12-0225:clean:frozen:3": "accepted",
+      "dev-typed_relay-h12-0225:faulted:canonical:0": "accepted",
+      "dev-typed_relay-h12-0225:faulted:canonical:1": "accepted",
+      "dev-typed_relay-h12-0225:faulted:frozen:2": "accepted",
+      "dev-typed_relay-h12-0225:faulted:frozen:3": "accepted",
+      "dev-typed_relay-h2-0150:clean:canonical:0": "accepted",
+      "dev-typed_relay-h2-0150:clean:canonical:1": "accepted",
+      "dev-typed_relay-h2-0150:clean:frozen:2": "accepted",
+      "dev-typed_relay-h2-0150:clean:frozen:3": "accepted",
+      "dev-typed_relay-h2-0150:faulted:canonical:0": "accepted",
+      "dev-typed_relay-h2-0150:faulted:canonical:1": "accepted",
+      "dev-typed_relay-h2-0150:faulted:frozen:2": "accepted",
+      "dev-typed_relay-h2-0150:faulted:frozen:3": "accepted"
+    },
+    "sft_minutes": 1.47,
+    "supervised_tokens": [
+      22,
+      22,
+      65,
+      44,
+      44,
+      122,
+      44,
+      44,
+      107,
+      44,
+      44,
+      115
+    ],
+    "terminal_weight": 0.6667,
+    "training_manifest": {
+      "checkpoint_sha256": "e1cf731377894641381ba8b062ad4fb226930a825f94a79fec9a586a9c0b16ef",
+      "eval_rows": 1,
+      "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+      "ledger": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "hours_at_finish": 0.3037
+      },
+      "optimizer_steps": 1,
+      "run_id": "dev-preflight-v1",
+      "runtime_manifest_sha256": "b617f629ea7f1dfbf1a5e913d694bd3f513492f86174d5f3328d5f6f558d89a7",
+      "session_id": "rs_sft-20260806T082249Z-4084290-8b089d66",
+      "source_sessions": [
+        "preflight_rs-20260806T080543Z-4080388-935237d3"
+      ],
+      "stage": "rs_sft",
+      "train_rows": 11
+    },
+    "view_counts": {
+      "pivot": 4,
+      "recovery": 0,
+      "terminal": 8
+    },
+    "view_rows": 12,
+    "view_tokens": [
+      2159,
+      2159,
+      1904,
+      2376,
+      2376,
+      2062,
+      2471,
+      2471,
+      2157,
+      2517,
+      2517,
+      2199
+    ]
+  },
+  "pass": true,
+  "probe": "probe5",
+  "run_id": "dev-preflight-v1",
+  "tasks": [
+    "dev-lookup_chain-h2-0000",
+    "dev-lookup_chain-h12-0102",
+    "dev-typed_relay-h2-0150",
+    "dev-typed_relay-h12-0225",
+    "dev-fulfillment-h4-0102",
+    "dev-fulfillment-h20-0225"
+  ],
+  "title": "view builder + one-optimizer-step SFT canary"
+}

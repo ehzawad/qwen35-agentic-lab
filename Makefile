@@ -11,6 +11,14 @@ export CUDA_DEVICE_ORDER ?= PCI_BUS_ID
 export PYTHONPATH := src
 export TOKENIZERS_PARALLELISM := false
 
+# An allocator policy, not a training change: at the registered SFT shapes the
+# log_softmax over this 248,320-token vocabulary fails on fragmentation alone
+# (244 MiB requested, 150 MiB free, 2.33 GiB reserved-but-unallocated). With
+# expandable segments the same optimizer step completes at the same shapes.
+# scripts/run_multifaceted_chain.sh exports the same default; both exist so a
+# direct `make` target and the supported chain behave identically.
+export PYTORCH_CUDA_ALLOC_CONF ?= expandable_segments:True
+
 PY      := .venv/bin/python
 MODEL   ?= Qwen/Qwen3.5-4B
 
