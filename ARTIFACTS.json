@@ -1,0 +1,1362 @@
+{
+  "durability_note": "Most paths below are excluded from git by .gitignore. This index is the only committed record that the bytes exist; the remote copy is the only copy that survives loss of this host.",
+  "files": [
+    {
+      "bytes": 486866,
+      "group": "census",
+      "mtime_ns": 1785978951396269028,
+      "path": "out/agentic/token_census.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:52Z",
+      "remote_commit": "cf1c826a06fdd4b6fcdb5e9f9fb51c4e422ef1ca",
+      "remote_path": "dev-preflight-v1/out/agentic/token_census.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/agentic/token_census.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@cf1c826a06fdd4b6fcdb5e9f9fb51c4e422ef1ca/dev-preflight-v1/out/agentic/token_census.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "98379c42540a30d7c6c29fea53193a169714351f184f9c58b516484dc5896fa8"
+    },
+    {
+      "bytes": 84,
+      "group": "census",
+      "mtime_ns": 1785978951400269246,
+      "path": "out/agentic/token_census.json.sha256",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:52Z",
+      "remote_commit": "cf1c826a06fdd4b6fcdb5e9f9fb51c4e422ef1ca",
+      "remote_path": "dev-preflight-v1/out/agentic/token_census.json.sha256",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/agentic/token_census.json.sha256",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@cf1c826a06fdd4b6fcdb5e9f9fb51c4e422ef1ca/dev-preflight-v1/out/agentic/token_census.json.sha256",
+      "run_id": "dev-preflight-v1",
+      "sha256": "3c744305e7c110f30087976355e1347af976ae439aacd16d55e03d53117b3d3c"
+    },
+    {
+      "bytes": 853,
+      "group": "census",
+      "mtime_ns": 1785978951668283914,
+      "path": "out/agentic/token_census.log",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:52Z",
+      "remote_commit": "cf1c826a06fdd4b6fcdb5e9f9fb51c4e422ef1ca",
+      "remote_path": "dev-preflight-v1/out/agentic/token_census.log",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/agentic/token_census.log",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@cf1c826a06fdd4b6fcdb5e9f9fb51c4e422ef1ca/dev-preflight-v1/out/agentic/token_census.log",
+      "run_id": "dev-preflight-v1",
+      "sha256": "b22c57ae996dc7e32382e58a83791a4c46b410af9d68107da32755c81f8b95f5"
+    },
+    {
+      "bytes": 790,
+      "group": "run_secret_backup",
+      "mtime_ns": 1786022963581687647,
+      "path": "out/artifacts/run_secret.enc.json",
+      "receipt": {
+        "run_id": "agentic-v1",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:15Z",
+      "remote_commit": "b79548161ffb0df20fcc1d4367873ddc5e090f1d",
+      "remote_path": "agentic-v1/out/artifacts/run_secret.enc.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/out/artifacts/run_secret.enc.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@b79548161ffb0df20fcc1d4367873ddc5e090f1d/agentic-v1/out/artifacts/run_secret.enc.json",
+      "run_id": "agentic-v1",
+      "sha256": "2e69f3fbd5d3472c505c39c5b78239e7b082ddcd6dd941f26a353cf71bfbac97"
+    },
+    {
+      "bytes": 2357,
+      "group": "prompt_tournament",
+      "mtime_ns": 1786016546204471958,
+      "path": "out/multiface/prompt_tournament.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:14Z",
+      "remote_commit": "32431ed1b41b37d3f95bb602c60a28b7a8654f77",
+      "remote_path": "agentic-v1/out/multiface/prompt_tournament.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/out/multiface/prompt_tournament.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@32431ed1b41b37d3f95bb602c60a28b7a8654f77/agentic-v1/out/multiface/prompt_tournament.json",
+      "run_id": "agentic-v1",
+      "sha256": "495820778ede07225bdc8af3a09357a65688ebef2baae447f92177e0f27425b5"
+    },
+    {
+      "bytes": 112358,
+      "group": "prompt_tournament",
+      "mtime_ns": 1786006830843881146,
+      "path": "out/multiface/prompt_tournament/r1-p1_minimal.txt.jsonl",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:14Z",
+      "remote_commit": "32431ed1b41b37d3f95bb602c60a28b7a8654f77",
+      "remote_path": "agentic-v1/out/multiface/prompt_tournament/r1-p1_minimal.txt.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/out/multiface/prompt_tournament/r1-p1_minimal.txt.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@32431ed1b41b37d3f95bb602c60a28b7a8654f77/agentic-v1/out/multiface/prompt_tournament/r1-p1_minimal.txt.jsonl",
+      "run_id": "agentic-v1",
+      "sha256": "36c333389cf45e43d26186d8184f58590dc1213fdfd98096bcf24f254ffc978f"
+    },
+    {
+      "bytes": 114441,
+      "group": "prompt_tournament",
+      "mtime_ns": 1786007802929733439,
+      "path": "out/multiface/prompt_tournament/r1-p2_plan_state_act.txt.jsonl",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:14Z",
+      "remote_commit": "32431ed1b41b37d3f95bb602c60a28b7a8654f77",
+      "remote_path": "agentic-v1/out/multiface/prompt_tournament/r1-p2_plan_state_act.txt.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/out/multiface/prompt_tournament/r1-p2_plan_state_act.txt.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@32431ed1b41b37d3f95bb602c60a28b7a8654f77/agentic-v1/out/multiface/prompt_tournament/r1-p2_plan_state_act.txt.jsonl",
+      "run_id": "agentic-v1",
+      "sha256": "5c56aad872cf7ffd53e3452bf3b7a295449ffd0b3cc422d69aa2ddac7cd38a29"
+    },
+    {
+      "bytes": 113602,
+      "group": "prompt_tournament",
+      "mtime_ns": 1786008849431725852,
+      "path": "out/multiface/prompt_tournament/r1-p3_state_table.txt.jsonl",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:14Z",
+      "remote_commit": "32431ed1b41b37d3f95bb602c60a28b7a8654f77",
+      "remote_path": "agentic-v1/out/multiface/prompt_tournament/r1-p3_state_table.txt.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/out/multiface/prompt_tournament/r1-p3_state_table.txt.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@32431ed1b41b37d3f95bb602c60a28b7a8654f77/agentic-v1/out/multiface/prompt_tournament/r1-p3_state_table.txt.jsonl",
+      "run_id": "agentic-v1",
+      "sha256": "7ca6339f29af9108feb583e583db2f63f241241f5a9efff8768a5485525bbe6a"
+    },
+    {
+      "bytes": 113884,
+      "group": "prompt_tournament",
+      "mtime_ns": 1786009796140190418,
+      "path": "out/multiface/prompt_tournament/r1-p4_error_repair.txt.jsonl",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:14Z",
+      "remote_commit": "32431ed1b41b37d3f95bb602c60a28b7a8654f77",
+      "remote_path": "agentic-v1/out/multiface/prompt_tournament/r1-p4_error_repair.txt.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/out/multiface/prompt_tournament/r1-p4_error_repair.txt.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@32431ed1b41b37d3f95bb602c60a28b7a8654f77/agentic-v1/out/multiface/prompt_tournament/r1-p4_error_repair.txt.jsonl",
+      "run_id": "agentic-v1",
+      "sha256": "54591fdd42a534400e3a1dfdbaca9a1946cc25269fb23b923b2ca03dcf4dbf3e"
+    },
+    {
+      "bytes": 113248,
+      "group": "prompt_tournament",
+      "mtime_ns": 1786010721057256039,
+      "path": "out/multiface/prompt_tournament/r1-p5_provenance.txt.jsonl",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:14Z",
+      "remote_commit": "32431ed1b41b37d3f95bb602c60a28b7a8654f77",
+      "remote_path": "agentic-v1/out/multiface/prompt_tournament/r1-p5_provenance.txt.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/out/multiface/prompt_tournament/r1-p5_provenance.txt.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@32431ed1b41b37d3f95bb602c60a28b7a8654f77/agentic-v1/out/multiface/prompt_tournament/r1-p5_provenance.txt.jsonl",
+      "run_id": "agentic-v1",
+      "sha256": "055a042745a7aa4f07ed8cff931c135067ace94863d2ae715deafa5d0a816333"
+    },
+    {
+      "bytes": 115946,
+      "group": "prompt_tournament",
+      "mtime_ns": 1786011406316037271,
+      "path": "out/multiface/prompt_tournament/r1-p6_concise_termination.txt.jsonl",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:14Z",
+      "remote_commit": "32431ed1b41b37d3f95bb602c60a28b7a8654f77",
+      "remote_path": "agentic-v1/out/multiface/prompt_tournament/r1-p6_concise_termination.txt.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/out/multiface/prompt_tournament/r1-p6_concise_termination.txt.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@32431ed1b41b37d3f95bb602c60a28b7a8654f77/agentic-v1/out/multiface/prompt_tournament/r1-p6_concise_termination.txt.jsonl",
+      "run_id": "agentic-v1",
+      "sha256": "5bae30ead9e6745aa49b7b144e58ab4f4cc9153013c639e4f7a19900e2b99d0c"
+    },
+    {
+      "bytes": 113561,
+      "group": "prompt_tournament",
+      "mtime_ns": 1786012303113007684,
+      "path": "out/multiface/prompt_tournament/r1-p7_budget_loop.txt.jsonl",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:14Z",
+      "remote_commit": "32431ed1b41b37d3f95bb602c60a28b7a8654f77",
+      "remote_path": "agentic-v1/out/multiface/prompt_tournament/r1-p7_budget_loop.txt.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/out/multiface/prompt_tournament/r1-p7_budget_loop.txt.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@32431ed1b41b37d3f95bb602c60a28b7a8654f77/agentic-v1/out/multiface/prompt_tournament/r1-p7_budget_loop.txt.jsonl",
+      "run_id": "agentic-v1",
+      "sha256": "fc4d0979bd909b951f525f2f013310b0a902d3b2a53e65ac659f341bc5d9e98f"
+    },
+    {
+      "bytes": 112659,
+      "group": "prompt_tournament",
+      "mtime_ns": 1786013257944631994,
+      "path": "out/multiface/prompt_tournament/r1-p8_combined.txt.jsonl",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:14Z",
+      "remote_commit": "32431ed1b41b37d3f95bb602c60a28b7a8654f77",
+      "remote_path": "agentic-v1/out/multiface/prompt_tournament/r1-p8_combined.txt.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/out/multiface/prompt_tournament/r1-p8_combined.txt.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@32431ed1b41b37d3f95bb602c60a28b7a8654f77/agentic-v1/out/multiface/prompt_tournament/r1-p8_combined.txt.jsonl",
+      "run_id": "agentic-v1",
+      "sha256": "1d49e5c8c0b6a77e35ffea4d19f16e0a6f86961e1f3567ddb71624e4ff4d3943"
+    },
+    {
+      "bytes": 228940,
+      "group": "prompt_tournament",
+      "mtime_ns": 1786015190331376268,
+      "path": "out/multiface/prompt_tournament/r2-p2_plan_state_act.txt.jsonl",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:14Z",
+      "remote_commit": "32431ed1b41b37d3f95bb602c60a28b7a8654f77",
+      "remote_path": "agentic-v1/out/multiface/prompt_tournament/r2-p2_plan_state_act.txt.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/out/multiface/prompt_tournament/r2-p2_plan_state_act.txt.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@32431ed1b41b37d3f95bb602c60a28b7a8654f77/agentic-v1/out/multiface/prompt_tournament/r2-p2_plan_state_act.txt.jsonl",
+      "run_id": "agentic-v1",
+      "sha256": "71aba538daef68db2edde5f5d8a661c8ca11a0b90c1856d9724568a5971eae37"
+    },
+    {
+      "bytes": 232067,
+      "group": "prompt_tournament",
+      "mtime_ns": 1786016540068074141,
+      "path": "out/multiface/prompt_tournament/r2-p6_concise_termination.txt.jsonl",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:14Z",
+      "remote_commit": "32431ed1b41b37d3f95bb602c60a28b7a8654f77",
+      "remote_path": "agentic-v1/out/multiface/prompt_tournament/r2-p6_concise_termination.txt.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/out/multiface/prompt_tournament/r2-p6_concise_termination.txt.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@32431ed1b41b37d3f95bb602c60a28b7a8654f77/agentic-v1/out/multiface/prompt_tournament/r2-p6_concise_termination.txt.jsonl",
+      "run_id": "agentic-v1",
+      "sha256": "48090a61fffa0180abf1692cf080de2e9a6a55ed34912b52251b7a8119f86b06"
+    },
+    {
+      "bytes": 41496,
+      "group": "preflight_evidence",
+      "mtime_ns": 1785993123280351978,
+      "path": "out/preflight/dev6.jsonl",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/dev6.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/dev6.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/dev6.jsonl",
+      "run_id": "dev-preflight-v1",
+      "sha256": "9992b68b5fef2f2c6647d0db7380bdf7adce3d25e033de0e1592af8c59c08f7e"
+    },
+    {
+      "bytes": 16909,
+      "group": "preflight_evidence",
+      "mtime_ns": 1785993133808937040,
+      "path": "out/preflight/probe1_grammar.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/probe1_grammar.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/probe1_grammar.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/probe1_grammar.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "ccda15c553b7b56e327046fc8ce6f0040760e0ed29f948ae816caae6db2b2e86"
+    },
+    {
+      "bytes": 11622,
+      "group": "preflight_evidence",
+      "mtime_ns": 1785993153330021758,
+      "path": "out/preflight/probe2_matrix.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/probe2_matrix.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/probe2_matrix.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/probe2_matrix.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "1fdce2c62581479eb0ac9d06ecb5318a2ff0dd39189755c42c986fdd10d92203"
+    },
+    {
+      "bytes": 607108,
+      "group": "preflight_evidence",
+      "mtime_ns": 1786003706942311636,
+      "path": "out/preflight/rs/clean.jsonl",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "rows_scanned": 24,
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "f3703f775bc286829831b9dfe5aaf20def8222a23bb8ff1bc999ca32890e05ca",
+        "session_id": "preflight_rs-20260806T080543Z-4080388-935237d3",
+        "source": "embedded_provenance"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/rs/clean.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/rs/clean.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/rs/clean.jsonl",
+      "run_id": "dev-preflight-v1",
+      "sha256": "e20d2418f5b8e8a85af190f2e82a954e65ca27632eba02d089e641fb8875d7b0"
+    },
+    {
+      "bytes": 547,
+      "group": "preflight_evidence",
+      "mtime_ns": 1786003846946051142,
+      "path": "out/preflight/rs/engine.json",
+      "receipt": {
+        "runtime_manifest_sha256": "f3703f775bc286829831b9dfe5aaf20def8222a23bb8ff1bc999ca32890e05ca",
+        "session_id": "preflight_rs-20260806T080543Z-4080388-935237d3",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/rs/engine.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/rs/engine.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/rs/engine.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "a56f8949429af50735c1b1d0ac4dd7e1716bdc88c30e758514eac1c9fe9b7baf"
+    },
+    {
+      "bytes": 693163,
+      "group": "preflight_evidence",
+      "mtime_ns": 1786003846946051142,
+      "path": "out/preflight/rs/faulted.jsonl",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "rows_scanned": 24,
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "f3703f775bc286829831b9dfe5aaf20def8222a23bb8ff1bc999ca32890e05ca",
+        "session_id": "preflight_rs-20260806T080543Z-4080388-935237d3",
+        "source": "embedded_provenance"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/rs/faulted.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/rs/faulted.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/rs/faulted.jsonl",
+      "run_id": "dev-preflight-v1",
+      "sha256": "e16f38e6315f5539c3a827d4211d410d2cecd98f3fb6b4013200e1c4a968090a"
+    },
+    {
+      "bytes": 76087,
+      "group": "preflight_evidence",
+      "mtime_ns": 1786003850270234916,
+      "path": "out/preflight/rs/rs.log",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/rs/rs.log",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/rs/rs.log",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/rs/rs.log",
+      "run_id": "dev-preflight-v1",
+      "sha256": "b8bc353bfcbb0ef08e21b3a125defacf32ba6ca307f6c15c7a2b3d8a27911964"
+    },
+    {
+      "bytes": 32992,
+      "group": "preflight_evidence",
+      "mtime_ns": 1786002788619596447,
+      "path": "out/preflight/serve.log",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/serve.log",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/serve.log",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/serve.log",
+      "run_id": "dev-preflight-v1",
+      "sha256": "ce287d87038ae8311f43c56970b4746b0722196707ee743a8c185a2448852807"
+    },
+    {
+      "bytes": 5493,
+      "group": "preflight_evidence",
+      "mtime_ns": 1786004648218743187,
+      "path": "out/preflight/sft-canary-lora.agentlab_training_manifest.json",
+      "receipt": {
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "b617f629ea7f1dfbf1a5e913d694bd3f513492f86174d5f3328d5f6f558d89a7",
+        "session_id": "rs_sft-20260806T082249Z-4084290-8b089d66",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora.agentlab_training_manifest.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora.agentlab_training_manifest.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/sft-canary-lora.agentlab_training_manifest.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "00aefd7a777047ab4dac481d17a2339a1e6b1a1e09206d532526f65f3348cc94"
+    },
+    {
+      "bytes": 1442,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004643918503001,
+      "path": "out/preflight/sft-canary-lora/README.md",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:10Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/README.md",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/README.md",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/README.md",
+      "run_id": "dev-preflight-v1",
+      "sha256": "02fa1d72f2308dac05ce634752a22bec8052e39a8c4d3162cb0a2de1e4c506f9"
+    },
+    {
+      "bytes": 1379,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004644494535177,
+      "path": "out/preflight/sft-canary-lora/adapter_config.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:10Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/adapter_config.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/adapter_config.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/adapter_config.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "2ad453055bfbb33c6111aecb5f76c5824511e68c833f2b7a5d9f8e8defe3d86c"
+    },
+    {
+      "bytes": 259794448,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004644486534730,
+      "path": "out/preflight/sft-canary-lora/adapter_model.safetensors",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:11Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/adapter_model.safetensors",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/adapter_model.safetensors",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/adapter_model.safetensors",
+      "run_id": "dev-preflight-v1",
+      "sha256": "3d671ce507799eca21c1ca5610de050cd9acddbbe4fe6e14833b2d74b2dde376"
+    },
+    {
+      "bytes": 7756,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004644694546348,
+      "path": "out/preflight/sft-canary-lora/chat_template.jinja",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:11Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/chat_template.jinja",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/chat_template.jinja",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/chat_template.jinja",
+      "run_id": "dev-preflight-v1",
+      "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+    },
+    {
+      "bytes": 5196,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004642210407593,
+      "path": "out/preflight/sft-canary-lora/checkpoint-1/README.md",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:11Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/README.md",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/README.md",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/README.md",
+      "run_id": "dev-preflight-v1",
+      "sha256": "41c40dbe37e289796c4828a6dec8c3ee3a0b76c62397b3133ee970b6df866e80"
+    },
+    {
+      "bytes": 1379,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004642914446919,
+      "path": "out/preflight/sft-canary-lora/checkpoint-1/adapter_config.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:11Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/adapter_config.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/adapter_config.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/adapter_config.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "2ad453055bfbb33c6111aecb5f76c5824511e68c833f2b7a5d9f8e8defe3d86c"
+    },
+    {
+      "bytes": 259794448,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004642906446471,
+      "path": "out/preflight/sft-canary-lora/checkpoint-1/adapter_model.safetensors",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:12Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/adapter_model.safetensors",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/adapter_model.safetensors",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/adapter_model.safetensors",
+      "run_id": "dev-preflight-v1",
+      "sha256": "3d671ce507799eca21c1ca5610de050cd9acddbbe4fe6e14833b2d74b2dde376"
+    },
+    {
+      "bytes": 7756,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004643134459207,
+      "path": "out/preflight/sft-canary-lora/checkpoint-1/chat_template.jinja",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:12Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/chat_template.jinja",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/chat_template.jinja",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/chat_template.jinja",
+      "run_id": "dev-preflight-v1",
+      "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+    },
+    {
+      "bytes": 519864435,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004643910502554,
+      "path": "out/preflight/sft-canary-lora/checkpoint-1/optimizer.pt",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:13Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/optimizer.pt",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/optimizer.pt",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/optimizer.pt",
+      "run_id": "dev-preflight-v1",
+      "sha256": "a8736b5b57348e35de9bbf624790ec564bb117b88b63cae56a7594703abd5beb"
+    },
+    {
+      "bytes": 1191,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004643134459207,
+      "path": "out/preflight/sft-canary-lora/checkpoint-1/processor_config.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:13Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/processor_config.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/processor_config.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/processor_config.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "d89ef49ce9cd37fbf510158e13c1ef063d9286411c1ec9049932dbe0487143b1"
+    },
+    {
+      "bytes": 14645,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004643914502778,
+      "path": "out/preflight/sft-canary-lora/checkpoint-1/rng_state.pth",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:13Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/rng_state.pth",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/rng_state.pth",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/rng_state.pth",
+      "run_id": "dev-preflight-v1",
+      "sha256": "d9b1d7847a869c548f04f64bb069f94ac93c8722fd40c28a1dfdedc75b00f256"
+    },
+    {
+      "bytes": 1465,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004643910502554,
+      "path": "out/preflight/sft-canary-lora/checkpoint-1/scheduler.pt",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:13Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/scheduler.pt",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/scheduler.pt",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/scheduler.pt",
+      "run_id": "dev-preflight-v1",
+      "sha256": "606cfc6388b6cf7d31d99974a689cca32d495ea107cc08ea098ddbe0845d2d35"
+    },
+    {
+      "bytes": 19989325,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004643118458314,
+      "path": "out/preflight/sft-canary-lora/checkpoint-1/tokenizer.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:13Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/tokenizer.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/tokenizer.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/tokenizer.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
+    },
+    {
+      "bytes": 1166,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004642918447141,
+      "path": "out/preflight/sft-canary-lora/checkpoint-1/tokenizer_config.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:13Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/tokenizer_config.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/tokenizer_config.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/tokenizer_config.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "5f7aa0d810000c4a0940b35c8f16e56c3439260fccc13a321826ebc3ccf2501f"
+    },
+    {
+      "bytes": 1077,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004643914502778,
+      "path": "out/preflight/sft-canary-lora/checkpoint-1/trainer_state.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:13Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/trainer_state.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/trainer_state.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/trainer_state.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "ba764e2b66f3c9856f864a6af743b7eb003bd73140c93da57884efea55a51a8e"
+    },
+    {
+      "bytes": 5777,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004643138459432,
+      "path": "out/preflight/sft-canary-lora/checkpoint-1/training_args.bin",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:13Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/training_args.bin",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/training_args.bin",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/checkpoint-1/training_args.bin",
+      "run_id": "dev-preflight-v1",
+      "sha256": "942dbd0f93b0996d8697855ab1cacbf9c2dfb5feaaaaa0041e7c1f681f700f15"
+    },
+    {
+      "bytes": 1191,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004644694546348,
+      "path": "out/preflight/sft-canary-lora/processor_config.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:13Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/processor_config.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/processor_config.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/processor_config.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "d89ef49ce9cd37fbf510158e13c1ef063d9286411c1ec9049932dbe0487143b1"
+    },
+    {
+      "bytes": 19989325,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004644678545454,
+      "path": "out/preflight/sft-canary-lora/tokenizer.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:13Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/tokenizer.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/tokenizer.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/tokenizer.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
+    },
+    {
+      "bytes": 1166,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004644494535177,
+      "path": "out/preflight/sft-canary-lora/tokenizer_config.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:13Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/tokenizer_config.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/tokenizer_config.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/tokenizer_config.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "5f7aa0d810000c4a0940b35c8f16e56c3439260fccc13a321826ebc3ccf2501f"
+    },
+    {
+      "bytes": 5777,
+      "group": "preflight_canary_adapter",
+      "mtime_ns": 1786004644694546348,
+      "path": "out/preflight/sft-canary-lora/training_args.bin",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:31:13Z",
+      "remote_commit": "ca57de17d0707ab7c08800ed2e865dadacc215d5",
+      "remote_path": "dev-preflight-v1/out/preflight/sft-canary-lora/training_args.bin",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft-canary-lora/training_args.bin",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@ca57de17d0707ab7c08800ed2e865dadacc215d5/dev-preflight-v1/out/preflight/sft-canary-lora/training_args.bin",
+      "run_id": "dev-preflight-v1",
+      "sha256": "942dbd0f93b0996d8697855ab1cacbf9c2dfb5feaaaaa0041e7c1f681f700f15"
+    },
+    {
+      "bytes": 92118,
+      "group": "preflight_evidence",
+      "mtime_ns": 1786004563073984527,
+      "path": "out/preflight/sft/canary_views.jsonl",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/sft/canary_views.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft/canary_views.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/sft/canary_views.jsonl",
+      "run_id": "dev-preflight-v1",
+      "sha256": "a01acad3bb0647804d791b7a0da4cdb2b035399715da16d63dfca46cb5b457e0"
+    },
+    {
+      "bytes": 21044,
+      "group": "preflight_evidence",
+      "mtime_ns": 1786004563073984527,
+      "path": "out/preflight/sft/canary_views.meta.jsonl",
+      "receipt": {
+        "rows_scanned": 12,
+        "runtime_manifest_sha256": "f3703f775bc286829831b9dfe5aaf20def8222a23bb8ff1bc999ca32890e05ca",
+        "session_id": "preflight_rs-20260806T080543Z-4080388-935237d3",
+        "source": "embedded_provenance"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/sft/canary_views.meta.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft/canary_views.meta.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/sft/canary_views.meta.jsonl",
+      "run_id": "dev-preflight-v1",
+      "sha256": "9a6b4cc2cadac51d1fb79d17eb5d6cb41054009e6a38d8b80671957e2d235edd"
+    },
+    {
+      "bytes": 2769,
+      "group": "preflight_evidence",
+      "mtime_ns": 1786004563073984527,
+      "path": "out/preflight/sft/canary_views.report.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/sft/canary_views.report.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft/canary_views.report.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/sft/canary_views.report.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "d515505cb44bc20a23e46cbb04993d0c024639d5418986d1e829577502b06f2d"
+    },
+    {
+      "bytes": 7565,
+      "group": "preflight_evidence",
+      "mtime_ns": 1786004651986953646,
+      "path": "out/preflight/sft/sft.log",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/sft/sft.log",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/sft/sft.log",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/sft/sft.log",
+      "run_id": "dev-preflight-v1",
+      "sha256": "8eadf15915b322a103a7f2311e816dc7064a9198b4333105e6f5467874ed28cc"
+    },
+    {
+      "bytes": 151076,
+      "group": "preflight_evidence",
+      "mtime_ns": 1786002737032752722,
+      "path": "out/preflight/traces/B0.clean.none.jsonl",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "rows_scanned": 6,
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "1ba7c4a8080cd1379ad6c15cf972e3a35f1f1e40b48fb0b034f5a4e60ddeead0",
+        "session_id": "serve-20260806T075024Z-4076395-f2077575",
+        "source": "embedded_provenance"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/traces/B0.clean.none.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/traces/B0.clean.none.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/traces/B0.clean.none.jsonl",
+      "run_id": "dev-preflight-v1",
+      "sha256": "cc02dd91d6ce0616593ce766d182511693360f39f63325ebacd2103ba033045b"
+    },
+    {
+      "bytes": 22284,
+      "group": "preflight_evidence",
+      "mtime_ns": 1785993986112277502,
+      "path": "out/preflight/traces/B0.clean.none.transport.log",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/traces/B0.clean.none.transport.log",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/traces/B0.clean.none.transport.log",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/traces/B0.clean.none.transport.log",
+      "run_id": "dev-preflight-v1",
+      "sha256": "d402d549eb01209feada4848d745a17d3ca65dd283f8c7fd7bce557b67522e3b"
+    },
+    {
+      "bytes": 173424,
+      "group": "preflight_evidence",
+      "mtime_ns": 1786002787535536678,
+      "path": "out/preflight/traces/B0.faulted.none.jsonl",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "rows_scanned": 6,
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "1ba7c4a8080cd1379ad6c15cf972e3a35f1f1e40b48fb0b034f5a4e60ddeead0",
+        "session_id": "serve-20260806T075024Z-4076395-f2077575",
+        "source": "embedded_provenance"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:55Z",
+      "remote_commit": "a68b706dcdb1ab47bcd2f377a4557bbef65d1406",
+      "remote_path": "dev-preflight-v1/out/preflight/traces/B0.faulted.none.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/out/preflight/traces/B0.faulted.none.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@a68b706dcdb1ab47bcd2f377a4557bbef65d1406/dev-preflight-v1/out/preflight/traces/B0.faulted.none.jsonl",
+      "run_id": "dev-preflight-v1",
+      "sha256": "5c9ef47ce2d298bd4386ed435f226e41a868e8ac169085ca8c3dff2d2f6be208"
+    },
+    {
+      "bytes": 35125,
+      "group": "ledger",
+      "mtime_ns": 1786022573604456231,
+      "path": "results/agentic/gpu_ledger.jsonl",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "rows_scanned": 31,
+        "run_id": [
+          "agentic-v1",
+          "dev-preflight-v1"
+        ],
+        "runtime_manifest_sha256": [
+          "00bffdeebace3ca2e278b5dff6b7aecd9e7fefc897dd5cc9136524e6149c6baa",
+          "162d4cc69a53ad0bb9f035d01bdfe1fe2e9b88cf1e43268571c236c912c0a5fd",
+          "1ba7c4a8080cd1379ad6c15cf972e3a35f1f1e40b48fb0b034f5a4e60ddeead0",
+          "42efd15fa6d6be2c504a7c9bf119bbdeed0c73b2ec7b2a7412e943b8056e044e",
+          "564c8843ae24f4f998c6246b55b4900f6126f161385ca606fb44546f86db80bf",
+          "8ea3aa18b86792f3c2447f9d08b70ee0bb2bdf4f1720770affd72e0fb3fc5407",
+          "b617f629ea7f1dfbf1a5e913d694bd3f513492f86174d5f3328d5f6f558d89a7",
+          "e6784a1df08f1ecd76b6ea58b61d25790f159e8f3703faa515643a6855f75c20",
+          "f3703f775bc286829831b9dfe5aaf20def8222a23bb8ff1bc999ca32890e05ca"
+        ],
+        "session_id": [
+          "multidistill-20260806T114504Z-4137477-38358c17",
+          "preflight_rs-20260806T075827Z-4078936-f68e84ac",
+          "preflight_rs-20260806T080543Z-4080388-935237d3",
+          "rs_sft-20260806T082249Z-4084290-8b089d66",
+          "serve-20260806T051328Z-3969508-ac349b99",
+          "serve-20260806T052056Z-3972164-293434c9",
+          "serve-20260806T052303Z-3973482-c327682c",
+          "serve-20260806T052510Z-3974671-3da337c1",
+          "serve-20260806T075024Z-4076395-f2077575"
+        ],
+        "source": "embedded_provenance"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "6ea934041ce9ac130b0d4e97ce8baecbab6792ce",
+      "remote_path": "agentic-v1/results/agentic/gpu_ledger.jsonl",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/results/agentic/gpu_ledger.jsonl",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@6ea934041ce9ac130b0d4e97ce8baecbab6792ce/agentic-v1/results/agentic/gpu_ledger.jsonl",
+      "run_id": "agentic-v1",
+      "sha256": "2cfaa1647231711c61a7d05b266c70c685cc818373cdc3de4f7ee56688d6efa0"
+    },
+    {
+      "bytes": 399,
+      "group": "hardware",
+      "mtime_ns": 1785993207457029106,
+      "path": "results/agentic/hardware.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "dev-preflight-v1",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:51Z",
+      "remote_commit": "e5535e171bfd218b8be97c52986340efc99fe5bb",
+      "remote_path": "dev-preflight-v1/results/agentic/hardware.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/hardware.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@e5535e171bfd218b8be97c52986340efc99fe5bb/dev-preflight-v1/results/agentic/hardware.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "c2b895a84d96d5a76817424a85abbb084bb8e9b9b98b5089aca2ea36bff9a128"
+    },
+    {
+      "bytes": 1502,
+      "group": "manifests",
+      "mtime_ns": 1786016751589419255,
+      "path": "results/agentic/manifests/multidistill.agentic-v1.multidistill-20260806T114504Z-4137477-38358c17.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "agentic-v1",
+        "runtime_manifest_sha256": "42efd15fa6d6be2c504a7c9bf119bbdeed0c73b2ec7b2a7412e943b8056e044e",
+        "session_id": "multidistill-20260806T114504Z-4137477-38358c17",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "7c281cf46f345a4fcfe302db7ae98f63c40ed8ab",
+      "remote_path": "agentic-v1/results/agentic/manifests/multidistill.agentic-v1.multidistill-20260806T114504Z-4137477-38358c17.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/results/agentic/manifests/multidistill.agentic-v1.multidistill-20260806T114504Z-4137477-38358c17.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@7c281cf46f345a4fcfe302db7ae98f63c40ed8ab/agentic-v1/results/agentic/manifests/multidistill.agentic-v1.multidistill-20260806T114504Z-4137477-38358c17.json",
+      "run_id": "agentic-v1",
+      "sha256": "1c1dccd162a9b90ceb497486fe4ddd8cd8b13e72aa4503b06c0a9bdc201a42b3"
+    },
+    {
+      "bytes": 1490,
+      "group": "manifests",
+      "mtime_ns": 1786002802524363102,
+      "path": "results/agentic/manifests/preflight_rs.dev-preflight-v1.preflight_rs-20260806T075322Z-4077613-cc7529c6.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "fc94c1d37d4b5aae320eef6ceafcc8c56bf5f6b1bf4818ad47d5cea9a5deb2fb",
+        "session_id": "preflight_rs-20260806T075322Z-4077613-cc7529c6",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "7c281cf46f345a4fcfe302db7ae98f63c40ed8ab",
+      "remote_path": "dev-preflight-v1/results/agentic/manifests/preflight_rs.dev-preflight-v1.preflight_rs-20260806T075322Z-4077613-cc7529c6.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/manifests/preflight_rs.dev-preflight-v1.preflight_rs-20260806T075322Z-4077613-cc7529c6.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@7c281cf46f345a4fcfe302db7ae98f63c40ed8ab/dev-preflight-v1/results/agentic/manifests/preflight_rs.dev-preflight-v1.preflight_rs-20260806T075322Z-4077613-cc7529c6.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "248bf4292ce2d172dce34c4e98f4115b79f261f35f26cea565b23fae153fadfe"
+    },
+    {
+      "bytes": 1508,
+      "group": "manifests",
+      "mtime_ns": 1786003153047706608,
+      "path": "results/agentic/manifests/preflight_rs.dev-preflight-v1.preflight_rs-20260806T075827Z-4078936-f68e84ac.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "162d4cc69a53ad0bb9f035d01bdfe1fe2e9b88cf1e43268571c236c912c0a5fd",
+        "session_id": "preflight_rs-20260806T075827Z-4078936-f68e84ac",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "7c281cf46f345a4fcfe302db7ae98f63c40ed8ab",
+      "remote_path": "dev-preflight-v1/results/agentic/manifests/preflight_rs.dev-preflight-v1.preflight_rs-20260806T075827Z-4078936-f68e84ac.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/manifests/preflight_rs.dev-preflight-v1.preflight_rs-20260806T075827Z-4078936-f68e84ac.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@7c281cf46f345a4fcfe302db7ae98f63c40ed8ab/dev-preflight-v1/results/agentic/manifests/preflight_rs.dev-preflight-v1.preflight_rs-20260806T075827Z-4078936-f68e84ac.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "0cfdfa5840f2bc7e0947b4fafb37142b6758f3f92b91bab81e6a64faf07beba4"
+    },
+    {
+      "bytes": 1508,
+      "group": "manifests",
+      "mtime_ns": 1786003589315809994,
+      "path": "results/agentic/manifests/preflight_rs.dev-preflight-v1.preflight_rs-20260806T080543Z-4080388-935237d3.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "f3703f775bc286829831b9dfe5aaf20def8222a23bb8ff1bc999ca32890e05ca",
+        "session_id": "preflight_rs-20260806T080543Z-4080388-935237d3",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "7c281cf46f345a4fcfe302db7ae98f63c40ed8ab",
+      "remote_path": "dev-preflight-v1/results/agentic/manifests/preflight_rs.dev-preflight-v1.preflight_rs-20260806T080543Z-4080388-935237d3.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/manifests/preflight_rs.dev-preflight-v1.preflight_rs-20260806T080543Z-4080388-935237d3.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@7c281cf46f345a4fcfe302db7ae98f63c40ed8ab/dev-preflight-v1/results/agentic/manifests/preflight_rs.dev-preflight-v1.preflight_rs-20260806T080543Z-4080388-935237d3.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "31262b595a05c6da45c8044e7e163a449f5e9f9b03acfae5aa24b39d36439afb"
+    },
+    {
+      "bytes": 1506,
+      "group": "manifests",
+      "mtime_ns": 1786005950471131183,
+      "path": "results/agentic/manifests/rollout_engine.agentic-v1.rollout_engine-20260806T084501Z-4113705-caca3d9a.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "agentic-v1",
+        "runtime_manifest_sha256": "6bd94d5382c07e532bc139fb29c762cfdae8ac46b9e64c3516eca9e70f79f79b",
+        "session_id": "rollout_engine-20260806T084501Z-4113705-caca3d9a",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "7c281cf46f345a4fcfe302db7ae98f63c40ed8ab",
+      "remote_path": "agentic-v1/results/agentic/manifests/rollout_engine.agentic-v1.rollout_engine-20260806T084501Z-4113705-caca3d9a.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/results/agentic/manifests/rollout_engine.agentic-v1.rollout_engine-20260806T084501Z-4113705-caca3d9a.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@7c281cf46f345a4fcfe302db7ae98f63c40ed8ab/agentic-v1/results/agentic/manifests/rollout_engine.agentic-v1.rollout_engine-20260806T084501Z-4113705-caca3d9a.json",
+      "run_id": "agentic-v1",
+      "sha256": "c30a946bd6ed8deb31ce25251b7ab20e121dbd03097bbffada9314603204c57c"
+    },
+    {
+      "bytes": 1506,
+      "group": "manifests",
+      "mtime_ns": 1786013320744283534,
+      "path": "results/agentic/manifests/rollout_engine.agentic-v1.rollout_engine-20260806T104754Z-4129608-29aff05e.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "agentic-v1",
+        "runtime_manifest_sha256": "cbf7f8967d7f0cd3507e76298642d0b07f189f86f4b5035ef27108f4a308089c",
+        "session_id": "rollout_engine-20260806T104754Z-4129608-29aff05e",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "7c281cf46f345a4fcfe302db7ae98f63c40ed8ab",
+      "remote_path": "agentic-v1/results/agentic/manifests/rollout_engine.agentic-v1.rollout_engine-20260806T104754Z-4129608-29aff05e.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/agentic-v1/results/agentic/manifests/rollout_engine.agentic-v1.rollout_engine-20260806T104754Z-4129608-29aff05e.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@7c281cf46f345a4fcfe302db7ae98f63c40ed8ab/agentic-v1/results/agentic/manifests/rollout_engine.agentic-v1.rollout_engine-20260806T104754Z-4129608-29aff05e.json",
+      "run_id": "agentic-v1",
+      "sha256": "15a0dc468b4b3332908f6ad7aa761a4a4f1894b3514f27ac99ab35deb6c8882f"
+    },
+    {
+      "bytes": 1496,
+      "group": "manifests",
+      "mtime_ns": 1786004164427604540,
+      "path": "results/agentic/manifests/rs_sft.dev-preflight-v1.rs_sft-20260806T081604Z-4082601-ba3e7d48.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "20d0be021298030a72b6dbfc85f29a6294ba3ca2197f6b3125523a04962fea9b",
+        "session_id": "rs_sft-20260806T081604Z-4082601-ba3e7d48",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "7c281cf46f345a4fcfe302db7ae98f63c40ed8ab",
+      "remote_path": "dev-preflight-v1/results/agentic/manifests/rs_sft.dev-preflight-v1.rs_sft-20260806T081604Z-4082601-ba3e7d48.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/manifests/rs_sft.dev-preflight-v1.rs_sft-20260806T081604Z-4082601-ba3e7d48.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@7c281cf46f345a4fcfe302db7ae98f63c40ed8ab/dev-preflight-v1/results/agentic/manifests/rs_sft.dev-preflight-v1.rs_sft-20260806T081604Z-4082601-ba3e7d48.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "972049877aedd0340d35a3a37273fb3db49f91e6a72932e6fa964ccbb50a31e0"
+    },
+    {
+      "bytes": 1496,
+      "group": "manifests",
+      "mtime_ns": 1786004298879168533,
+      "path": "results/agentic/manifests/rs_sft.dev-preflight-v1.rs_sft-20260806T081818Z-4083287-6421d9b8.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "eb69cd8476778a47d503a712164c3d2835503495dacefaa7a4a2e209c629407d",
+        "session_id": "rs_sft-20260806T081818Z-4083287-6421d9b8",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "7c281cf46f345a4fcfe302db7ae98f63c40ed8ab",
+      "remote_path": "dev-preflight-v1/results/agentic/manifests/rs_sft.dev-preflight-v1.rs_sft-20260806T081818Z-4083287-6421d9b8.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/manifests/rs_sft.dev-preflight-v1.rs_sft-20260806T081818Z-4083287-6421d9b8.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@7c281cf46f345a4fcfe302db7ae98f63c40ed8ab/dev-preflight-v1/results/agentic/manifests/rs_sft.dev-preflight-v1.rs_sft-20260806T081818Z-4083287-6421d9b8.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "defc9c8f550562e74ae738c829e0b7b2028f3c08e72d95393083de2db45941da"
+    },
+    {
+      "bytes": 1496,
+      "group": "manifests",
+      "mtime_ns": 1786004569166325240,
+      "path": "results/agentic/manifests/rs_sft.dev-preflight-v1.rs_sft-20260806T082249Z-4084290-8b089d66.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "b617f629ea7f1dfbf1a5e913d694bd3f513492f86174d5f3328d5f6f558d89a7",
+        "session_id": "rs_sft-20260806T082249Z-4084290-8b089d66",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "7c281cf46f345a4fcfe302db7ae98f63c40ed8ab",
+      "remote_path": "dev-preflight-v1/results/agentic/manifests/rs_sft.dev-preflight-v1.rs_sft-20260806T082249Z-4084290-8b089d66.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/manifests/rs_sft.dev-preflight-v1.rs_sft-20260806T082249Z-4084290-8b089d66.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@7c281cf46f345a4fcfe302db7ae98f63c40ed8ab/dev-preflight-v1/results/agentic/manifests/rs_sft.dev-preflight-v1.rs_sft-20260806T082249Z-4084290-8b089d66.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "1db11707aa1597c3a874bb149b94479eda2ddb2113208565f9dfa882741f7d9b"
+    },
+    {
+      "bytes": 1513,
+      "group": "manifests",
+      "mtime_ns": 1785993278240961330,
+      "path": "results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T051328Z-3969508-ac349b99.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "00bffdeebace3ca2e278b5dff6b7aecd9e7fefc897dd5cc9136524e6149c6baa",
+        "session_id": "serve-20260806T051328Z-3969508-ac349b99",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "7c281cf46f345a4fcfe302db7ae98f63c40ed8ab",
+      "remote_path": "dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T051328Z-3969508-ac349b99.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T051328Z-3969508-ac349b99.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@7c281cf46f345a4fcfe302db7ae98f63c40ed8ab/dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T051328Z-3969508-ac349b99.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "5d6ca10af9ae3a45117709b129c5362ca96891a36f3aa7ae9b5c48260fd00014"
+    },
+    {
+      "bytes": 1513,
+      "group": "manifests",
+      "mtime_ns": 1785993726637859730,
+      "path": "results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T052056Z-3972164-293434c9.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "e6784a1df08f1ecd76b6ea58b61d25790f159e8f3703faa515643a6855f75c20",
+        "session_id": "serve-20260806T052056Z-3972164-293434c9",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "7c281cf46f345a4fcfe302db7ae98f63c40ed8ab",
+      "remote_path": "dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T052056Z-3972164-293434c9.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T052056Z-3972164-293434c9.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@7c281cf46f345a4fcfe302db7ae98f63c40ed8ab/dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T052056Z-3972164-293434c9.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "f3597b8bb611a1dc321dff4afd294464c854426e9ef2596775a33ec2799cb397"
+    },
+    {
+      "bytes": 1513,
+      "group": "manifests",
+      "mtime_ns": 1785993854016930460,
+      "path": "results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T052303Z-3973482-c327682c.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "8ea3aa18b86792f3c2447f9d08b70ee0bb2bdf4f1720770affd72e0fb3fc5407",
+        "session_id": "serve-20260806T052303Z-3973482-c327682c",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "7c281cf46f345a4fcfe302db7ae98f63c40ed8ab",
+      "remote_path": "dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T052303Z-3973482-c327682c.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T052303Z-3973482-c327682c.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@7c281cf46f345a4fcfe302db7ae98f63c40ed8ab/dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T052303Z-3973482-c327682c.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "b1eb8207226924fea3f9785d0b40a31aca48d396bf5329952984b9af83ea4f61"
+    },
+    {
+      "bytes": 1513,
+      "group": "manifests",
+      "mtime_ns": 1785993980995992017,
+      "path": "results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T052510Z-3974671-3da337c1.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "564c8843ae24f4f998c6246b55b4900f6126f161385ca606fb44546f86db80bf",
+        "session_id": "serve-20260806T052510Z-3974671-3da337c1",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "7c281cf46f345a4fcfe302db7ae98f63c40ed8ab",
+      "remote_path": "dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T052510Z-3974671-3da337c1.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T052510Z-3974671-3da337c1.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@7c281cf46f345a4fcfe302db7ae98f63c40ed8ab/dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T052510Z-3974671-3da337c1.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "ee8481e22d2028930227c82d019a5359057aabdc5f215721da2c71f8ba78e800"
+    },
+    {
+      "bytes": 1513,
+      "group": "manifests",
+      "mtime_ns": 1786002694314398620,
+      "path": "results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T075024Z-4076395-f2077575.json",
+      "receipt": {
+        "gpu_uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567",
+        "run_id": "dev-preflight-v1",
+        "runtime_manifest_sha256": "1ba7c4a8080cd1379ad6c15cf972e3a35f1f1e40b48fb0b034f5a4e60ddeead0",
+        "session_id": "serve-20260806T075024Z-4076395-f2077575",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:53Z",
+      "remote_commit": "7c281cf46f345a4fcfe302db7ae98f63c40ed8ab",
+      "remote_path": "dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T075024Z-4076395-f2077575.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T075024Z-4076395-f2077575.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@7c281cf46f345a4fcfe302db7ae98f63c40ed8ab/dev-preflight-v1/results/agentic/manifests/serve.dev-preflight-v1.serve-20260806T075024Z-4076395-f2077575.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "223931f795c2217eb2702d19176c735a689a6ff737ec297235a9a62e231a5e79"
+    },
+    {
+      "bytes": 2686,
+      "group": "preflight_probes",
+      "mtime_ns": 1785993126600536479,
+      "path": "results/agentic/preflight/manifest.json",
+      "receipt": {
+        "run_id": "dev-preflight-v1",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:54Z",
+      "remote_commit": "bc5a37feb0dcc7cb07e6b600da2a0a4f422052a3",
+      "remote_path": "dev-preflight-v1/results/agentic/preflight/manifest.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/preflight/manifest.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@bc5a37feb0dcc7cb07e6b600da2a0a4f422052a3/dev-preflight-v1/results/agentic/preflight/manifest.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "df3df816d8ea807b859ea563f32653a133f4e7b193383d4f03aae209d51e2fff"
+    },
+    {
+      "bytes": 3543,
+      "group": "preflight_probes",
+      "mtime_ns": 1785993136629093749,
+      "path": "results/agentic/preflight/probe1.json",
+      "receipt": {
+        "run_id": "dev-preflight-v1",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:54Z",
+      "remote_commit": "bc5a37feb0dcc7cb07e6b600da2a0a4f422052a3",
+      "remote_path": "dev-preflight-v1/results/agentic/preflight/probe1.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/preflight/probe1.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@bc5a37feb0dcc7cb07e6b600da2a0a4f422052a3/dev-preflight-v1/results/agentic/preflight/probe1.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "50a20ea0009e7685f4dee4c8a2007a3d5d5a5af56dab6b2734cbbcc73b281538"
+    },
+    {
+      "bytes": 5647,
+      "group": "preflight_probes",
+      "mtime_ns": 1785993153330021758,
+      "path": "results/agentic/preflight/probe2.json",
+      "receipt": {
+        "run_id": "dev-preflight-v1",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:54Z",
+      "remote_commit": "bc5a37feb0dcc7cb07e6b600da2a0a4f422052a3",
+      "remote_path": "dev-preflight-v1/results/agentic/preflight/probe2.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/preflight/probe2.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@bc5a37feb0dcc7cb07e6b600da2a0a4f422052a3/dev-preflight-v1/results/agentic/preflight/probe2.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "3c02a913b86c2fc32d10dc0e0da3fbb462f13aaae7ef2e5c44ac50a6397f30e2"
+    },
+    {
+      "bytes": 8583,
+      "group": "preflight_probes",
+      "mtime_ns": 1786002792003783032,
+      "path": "results/agentic/preflight/probe3.json",
+      "receipt": {
+        "run_id": "dev-preflight-v1",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:54Z",
+      "remote_commit": "bc5a37feb0dcc7cb07e6b600da2a0a4f422052a3",
+      "remote_path": "dev-preflight-v1/results/agentic/preflight/probe3.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/preflight/probe3.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@bc5a37feb0dcc7cb07e6b600da2a0a4f422052a3/dev-preflight-v1/results/agentic/preflight/probe3.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "55484bfce1add0763bd1b6aed1bfe0d4426d6d51970b6715b17dfd783f0eb97e"
+    },
+    {
+      "bytes": 4502,
+      "group": "preflight_probes",
+      "mtime_ns": 1786003855626531034,
+      "path": "results/agentic/preflight/probe4.json",
+      "receipt": {
+        "run_id": "dev-preflight-v1",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:54Z",
+      "remote_commit": "bc5a37feb0dcc7cb07e6b600da2a0a4f422052a3",
+      "remote_path": "dev-preflight-v1/results/agentic/preflight/probe4.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/preflight/probe4.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@bc5a37feb0dcc7cb07e6b600da2a0a4f422052a3/dev-preflight-v1/results/agentic/preflight/probe4.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "2c6859ca2fe86252fa50dea7cb8e609eb90eaac727418547dd9a295aa9f84ca9"
+    },
+    {
+      "bytes": 9501,
+      "group": "preflight_probes",
+      "mtime_ns": 1786004660695439979,
+      "path": "results/agentic/preflight/probe5.json",
+      "receipt": {
+        "run_id": "dev-preflight-v1",
+        "source": "self_describing"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:54Z",
+      "remote_commit": "bc5a37feb0dcc7cb07e6b600da2a0a4f422052a3",
+      "remote_path": "dev-preflight-v1/results/agentic/preflight/probe5.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/preflight/probe5.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@bc5a37feb0dcc7cb07e6b600da2a0a4f422052a3/dev-preflight-v1/results/agentic/preflight/probe5.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "d3256e1076769aab064ac500b56789f5ec2a73fcd43b24fc3968e411e81924c5"
+    },
+    {
+      "bytes": 486866,
+      "group": "census",
+      "mtime_ns": 1785979486605574724,
+      "path": "results/agentic/token_census.json",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:52Z",
+      "remote_commit": "cf1c826a06fdd4b6fcdb5e9f9fb51c4e422ef1ca",
+      "remote_path": "dev-preflight-v1/results/agentic/token_census.json",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/token_census.json",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@cf1c826a06fdd4b6fcdb5e9f9fb51c4e422ef1ca/dev-preflight-v1/results/agentic/token_census.json",
+      "run_id": "dev-preflight-v1",
+      "sha256": "98379c42540a30d7c6c29fea53193a169714351f184f9c58b516484dc5896fa8"
+    },
+    {
+      "bytes": 84,
+      "group": "census",
+      "mtime_ns": 1785979486613575163,
+      "path": "results/agentic/token_census.json.sha256",
+      "receipt": {
+        "source": "unresolved"
+      },
+      "recorded_at_utc": "2026-08-06T13:30:52Z",
+      "remote_commit": "cf1c826a06fdd4b6fcdb5e9f9fb51c4e422ef1ca",
+      "remote_path": "dev-preflight-v1/results/agentic/token_census.json.sha256",
+      "remote_uri": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1/dev-preflight-v1/results/agentic/token_census.json.sha256",
+      "remote_uri_pinned": "hf://datasets/ehzawad/qwen35-agentic-lab-artifacts-agentic-v1@cf1c826a06fdd4b6fcdb5e9f9fb51c4e422ef1ca/dev-preflight-v1/results/agentic/token_census.json.sha256",
+      "run_id": "dev-preflight-v1",
+      "sha256": "3c744305e7c110f30087976355e1347af976ae439aacd16d55e03d53117b3d3c"
+    }
+  ],
+  "generated_by": {
+    "tool": "scripts/hf_artifacts.py",
+    "tool_version": 1
+  },
+  "kind": "agentlab_artifact_index",
+  "refused": [],
+  "remote": {
+    "private": true,
+    "provider": "huggingface",
+    "repo_id": "ehzawad/qwen35-agentic-lab-artifacts-agentic-v1",
+    "repo_type": "dataset"
+  },
+  "run_id": "agentic-v1",
+  "run_secret": {
+    "commitment_file": "results/agentic/run_secret_commitment.json",
+    "encrypted_backup_path": "out/artifacts/run_secret.enc.json",
+    "ordering": "hash commitment committed before L; the encrypted envelope is backed up off-host now; the plaintext secret is published as results/agentic/run_secret_reveal.json only after the verdict, and is then checked against the commitment",
+    "plaintext_published": false
+  },
+  "schema_version": 1,
+  "skipped": [
+    {
+      "detail": "the digest was stable across this file's own upload but moved before the run finished, so its producer is still appending; the remote copy is a snapshot and is deliberately not referenced",
+      "group": "ledger",
+      "observed_at_utc": "2026-08-06T13:36:16Z",
+      "path": "results/agentic/gpu_sessions.jsonl",
+      "reason": "digest_moved_during_run",
+      "sha256_after": "7d9840e62a78dfeb1aec1c2eda9eeffaf7a310dd66fe3bbd548089cfe6f61356",
+      "sha256_before": "32fb9ae762b7dd7570c0e253c3991468b7a50599e36359cbe7eb47916eb71608"
+    }
+  ],
+  "totals": {
+    "bytes": 1083885706,
+    "files": 75
+  },
+  "updated_at_utc": "2026-08-06T13:36:16Z"
+}
