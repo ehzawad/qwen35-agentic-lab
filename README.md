@@ -198,8 +198,11 @@ post-calibration projection does not fit, optional arms are cut in the frozen
 order, and if the mandatory work still does not fit the run STOPS and reports
 INCOMPLETE / INCONCLUSIVE.
 
-The venv is pinned where the constraints genuinely bind (see
-`requirements-lock.txt` for the frozen snapshot):
+The venv is hash-locked: `env/requirements.lock.txt` pins all 213 distributions
+with `==` and SHA-256 hashes on CPython 3.12.13 (`.python-version`), and
+`bash scripts/setup.sh --frozen` installs exactly that with `--require-hashes`.
+`requirements-lock.txt` at the root is the older unhashed snapshot, kept for
+continuity. These four pins are where the constraints genuinely bind:
 
 | Package | Version | Why |
 |---|---|---|
@@ -226,6 +229,23 @@ Three gotchas that will bite you, all found by running this stack:
 
 vLLM startup can sit for minutes at a few hundred MB of VRAM compiling CUDA
 graphs before allocating the KV cache. That is not a hang.
+
+### The apparatus, identified by bytes
+
+The study subject was registered by NAME — `Qwen/Qwen3.5-4B`, no revision — so an
+upstream re-upload would have silently changed what was studied. Three tracked
+records close that, all of them **additive and dated 2026-08-06, written after
+the preregistration was finalized**; none of them amends it:
+
+| record | pins | check |
+|---|---|---|
+| `env/model_revision.json` | Hub revision `851bf6e8…` and the SHA-256 of all 11 snapshot files, both weight shards included | `python scripts/record_model_revision.py verify` |
+| `env/requirements.lock.txt` | 213 distributions, `==` + SHA-256, CPython 3.12.13 | `bash scripts/setup.sh --frozen` |
+| `env/host_apparatus.json` | Ubuntu 22.04.1 / kernel 5.15.0-58 / glibc 2.35, driver 610.43.02, CUDA runtime 13.0, the registered A5000, and the segfault landmine above | `python scripts/record_host_apparatus.py check` |
+
+Clean-clone requirements, disk and RAM figures, the HF cache and auth procedure,
+and the exact command sequence — plus an honest list of what is still *not*
+reproducible — are in [docs/REPRODUCE.md](docs/REPRODUCE.md).
 
 ## Durability: what git does not protect
 
