@@ -178,7 +178,7 @@ python scripts/record_host_apparatus.py check
 python scripts/record_model_revision.py verify
 ```
 
-The recorded suite result at commit `1b07a64` is **1,052 passed, 6 skipped,
+The recorded suite result at commit `1b07a64` is **1,052 passed, 7 skipped,
 0 failed**. That commit removed
 `tests/test_chain.py::test_lock_prompt_refuses_before_P_exists`: its placeholder
 prompt hash always triggered the earlier S16 candidate-hash check, so the test

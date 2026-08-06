@@ -20,12 +20,12 @@ held-out set is derived, generated and evaluated — which cannot happen before
 | prompt winner | **locked under `P`**: `prompts/agentic/p2_plan_state_act.txt`, `sha256 5facfd02997d…`, frozen at commit `4c840e3` | `results/agentic/locks.json` (on disk, deliberately **not** committed yet — `L` must be the dedicated commit adding the *complete* lock) |
 | `L` — checkpoint lock | **does not exist, and was correctly refused**: `status` reports `REFUSED: the lock is INCOMPLETE, so there is nothing for the held-out seed to be a function of` | `python scripts/agentic_locks.py status` |
 | `R` — seed reveal | does not exist; the six held-out generation seeds are a function of `L`, so the held-out set **cannot be generated yet** | `heldout-master-v2` derivation, `configs/agentic_preregister.json` |
-| current stage | **`distill` (rejection sampling) IN PROGRESS** on the pinned A5000. Snapshot at `2026-08-06T17:42:45Z`: 15 of 60 planned shards sealed and receipt-validated, 4,400 verified rollouts. Both counts move while the stage runs | `data/multiface/raw/shard-*.receipt.json` |
-| GPU hours | **non-zero**: **9.249 h** charged at that same instant, and still rising. The ledger is the authority, not this table | `results/agentic/gpu_ledger.jsonl`, `gpu_sessions.jsonl` |
-| CPU test suite | **1,052 passed, 6 skipped, 0 failed** on commit `1b07a64` | `PYTHONPATH=src .venv/bin/python -m pytest -q` |
+| current stage | **STOPPED after `distill`.** 15 shards sealed and receipt-validated (4,400 attempts, 2,753 verified trajectories) and then deliberately halted; training, calibration, `L`, `R`, held-out evaluation and the verdict were **not run**. See **[docs/DEVIATION_2026-08-06.md](docs/DEVIATION_2026-08-06.md)** | `data/multiface/raw/shard-*.receipt.json` |
+| GPU hours | **non-zero and final for this pass**: ~9.25 h charged. The ledger is the authority, not this table | `results/agentic/gpu_ledger.jsonl`, `gpu_sessions.jsonl` |
+| CPU test suite | **1,052 passed, 7 skipped, 0 failed** on commit `1b07a64` | `PYTHONPATH=src .venv/bin/python -m pytest -q` |
 | dev preflight | **five probes green, 87 checks, all pass** | `results/agentic/preflight/probe{1..5}.json` |
 | capability claim | **NONE. No trained checkpoint exists, no held-out bytes exist, no gate has been evaluated.** | — |
-| registered evaluation | the full **7,800**-episode mandatory census **is being completed**, not descoped — projected **~6.4 GPU-h** from a measured 177.6 min per 3,600 episodes | [docs/AMENDED_REPLICATION_NOT_RUN.md](docs/AMENDED_REPLICATION_NOT_RUN.md) |
+| registered evaluation | **NOT COMPLETED.** The 7,800-episode mandatory census was never run, so the study is reported as a deliberate post-registration deviation and partial completion, with **no registered study-level winner** and **no gate status of any kind**. The tripwire fired and this is its notice | **[docs/DEVIATION_2026-08-06.md](docs/DEVIATION_2026-08-06.md)**, [docs/RESULTS.md](docs/RESULTS.md) §4 |
 | dropped work | the **optional cluster-balanced amended replication is not being run**. It was never registered, so this is **not a deviation**, and no deviation notice is due | same file, with the tripwire that would make one mandatory |
 | read before using it | **[docs/USAGE.md](docs/USAGE.md)** — the deep-horizon collapse, what the recovery number is and is not, the exact serving contract, the licence and the pinned base revision | `env/model_revision.json` |
 | results document | **[docs/RESULTS.md](docs/RESULTS.md)** — the verbatim required wording and every gate template, with **all held-out slots UNFILLED** on purpose | — |
@@ -36,7 +36,10 @@ the earlier S16 candidate-hash refusal, so it never reached the no-`P` gate its
 name claimed to exercise. The no-`P` refusal remains covered on the reveal path
 by `test_reveal_always_requires_a_committed_P`, and the non-candidate prompt
 refusal has its own focused test. The recorded run at that commit is green:
-**1,052 passed, 6 skipped, 0 failed**. D5 is closed; the remaining repairs are
+**1,052 passed, 7 skipped, 0 failed** — one more skip than when this branch was
+opened, because `out/preflight/` was removed locally after its receipts were
+committed and its blobs backed up to the private artifact repository, so the test
+that opportunistically replays that run now correctly skips instead of failing. D5 is closed; the remaining repairs are
 tracked, without rewriting the historical diagnosis, in
 [docs/DEFERRED_REPAIRS.md](docs/DEFERRED_REPAIRS.md).
 
