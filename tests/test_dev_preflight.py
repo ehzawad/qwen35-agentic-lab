@@ -12,11 +12,12 @@ they need neither a GPU nor a live run, so they are pinned here as well:
             arguments, budgets, progress and the verdict, in all four fault
             classes, and a BARE RETRY must never be certified
 
-The last test in this module documents an OPEN DEFECT the preflight found (see
-`results/agentic/preflight/probe2.json`) and is `xfail(strict=True)`: it asserts
-the behaviour the harness must have, so the day the seam is repaired the marker
-fires and forces this test to be flipped into a positive assertion rather than
-left behind.
+The last section of this module was an `xfail(strict=True)` recording the OPEN
+DEFECT the preflight found (`results/agentic/preflight/probe2.json`): S17 read a
+legitimate strict refusal as a harness BUG. That seam is now CLOSED and the
+marker is gone -- the tests are positive assertions, and both mechanisms the
+probe reproduced (a blind retry in the fault arm; a fault-free episode that
+batches both hops into one decision) are kept as regression tests.
 """
 
 from __future__ import annotations
@@ -253,7 +254,7 @@ def test_clean_oracle_episodes_are_certified(matrix):
 
 
 # ---------------------------------------------------------------------------
-# the open defect probe 2 found
+# the cross-predicate seam probe 2 found, now closed
 # ---------------------------------------------------------------------------
 
 def test_S17_accepts_the_registered_oracle_episodes(pf, matrix):
@@ -268,36 +269,199 @@ def test_S17_accepts_the_registered_oracle_episodes(pf, matrix):
         pf._analyzer_episodes(traces, specs, secret))
     assert veto["status"] == "OK", veto["detail"]
     assert veto["numbers"]["replayed"] == 12
+    # all twelve certify, so the repaired veto is not passing by leniency
+    assert veto["numbers"]["strict_refusals"] == 0
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "OPEN DEFECT found by the dev-only preflight (probe 2, "
-    "results/agentic/preflight/probe2.json). `provenance.certify_episode` sets "
-    "`verdict_agrees = (verdict.certified_success == ledger_ok)`, an EQUALITY "
-    "between the canonical verdict and a strictly weaker transcript-only "
-    "predicate, and `analyze.veto_s17_trace_summary` turns any inequality into a "
-    "harness BUG -- which vetoes every gate, claim and the winner. So a "
-    "legitimately non-certified episode with a clean transcript (a blind retry "
-    "in the fault arm; both hops batched into one decision in the clean arm) "
-    "reads as a broken harness. When the seam is repaired this xfail turns into "
-    "an unexpected pass and must be flipped into a positive assertion."))
-def test_S17_does_not_read_a_legitimate_non_certified_episode_as_a_bug(pf, matrix):
+@pytest.fixture(scope="module")
+def batched_episode(pf):
+    """Mechanism (b): fault-free, correct, both hops batched into ONE decision."""
+    return pf._same_decision_episode(
+        {r["task_id"]: r for r in pf.manifest_rows()}, pf.dev_bundles(),
+        pf.secret_bytes())
+
+
+def test_S17_does_not_read_a_legitimate_non_certified_episode_as_a_bug(
+        pf, matrix, batched_episode):
+    """The seam probe 2 pinned, in both reproduced mechanisms.
+
+    `certify_episode` used to set `verdict_agrees = (certified_success ==
+    ledger_ok)` -- an EQUALITY between the canonical predicate and a strictly
+    WEAKER transcript-only one -- and S17 turned any inequality into a harness BUG
+    that vetoed every gate, claim and the winner. Both mechanisms below are
+    episodes the strict verifier is SUPPOSED to refuse and whose transcripts have
+    nothing to object to, so the two predicates legitimately differ.
+    """
     from agentlab import analyze
 
     secret = pf.secret_bytes()
     specs = {r["task_id"]: r for r in pf.manifest_rows()}
-    bundles = pf.dev_bundles()
 
+    # (a) the fault arm: a blind retry, 5 of the 6 tasks (the wrong-unit arm
+    #     commits a trapped value, so its transcript IS objectionable -- ER7)
     blind = [c["eval"]["trace"] for c in matrix if c["mode"] == "bare_retry"]
+    assert len(blind) == 6
     blind_veto = analyze.veto_s17_trace_summary(
         pf._analyzer_episodes(blind, specs, secret))
-    batched = pf._same_decision_episode(specs, bundles, secret)
+    # (b) fault-free: a clean episode that batches both hops into one decision
     batched_veto = analyze.veto_s17_trace_summary(
-        pf._analyzer_episodes([batched], specs, secret))
+        pf._analyzer_episodes([batched_episode], specs, secret))
 
-    # every one of these episodes is correctly REFUSED certification, and the
-    # transcript-only recomputation has nothing to object to
-    assert not batched["verdict"]["certified_success"]
-    assert batched["score"]["raw_success"]
+    assert not batched_episode["verdict"]["certified_success"]
+    assert batched_episode["score"]["raw_success"]
     assert blind_veto["status"] != "BUG", blind_veto["detail"]
     assert batched_veto["status"] != "BUG", batched_veto["detail"]
+    # and the veto is positively OK, not merely "not a BUG": the canonical
+    # verdicts were reproduced field-for-field by canonical replay
+    assert blind_veto["status"] == "OK", blind_veto["detail"]
+    assert batched_veto["status"] == "OK", batched_veto["detail"]
+    assert blind_veto["numbers"]["replayed"] == 6
+    assert batched_veto["numbers"]["replayed"] == 1
+    # the disagreement is COUNTED, not erased: 5 of the 6 blind retries and the
+    # one batched episode are strict refusals with clean transcripts
+    assert blind_veto["numbers"]["strict_refusals"] == 5
+    assert batched_veto["numbers"]["strict_refusals"] == 1
+
+
+def test_the_two_predicates_legitimately_disagree_and_are_counted_as_such(
+        pf, matrix, batched_episode):
+    """The disagreement is real, is the right shape, and is REPORTED not vetoed."""
+    from agentlab import provenance
+
+    secret = pf.secret_bytes()
+    blind = [c["eval"]["trace"] for c in matrix if c["mode"] == "bare_retry"]
+    reps = {t["task_id"]: provenance.certify_episode(t, secret)
+            for t in blind if pf.FAULT_OF[t["task_id"]] != "wrong_unit"}
+    reps["batched"] = provenance.certify_episode(batched_episode, secret)
+    assert len(reps) == 6      # the five blind retries plus the batched episode
+
+    for name, rep in reps.items():
+        # the strictly weaker predicate holds; the strict one does not
+        assert rep["ledger_ok"] is True, name
+        assert rep["verdict_certified_success"] is False, name
+        # so the two are NOT equal -- and that is a strict refusal, not a defect
+        assert rep["strict_refusal"] is True, name
+        assert rep["verdict_agrees"] is True, name
+        assert rep["verdict_shared_mismatches"] == [], name
+        assert rep["ledger_contradiction"] is None, name
+        # a refusal must always say why: an unexplained one is the only way a
+        # genuine strict-side defect could hide behind a legitimate refusal
+        assert rep["unexplained_refusal"] is False, name
+        assert rep["strict_refusal_reasons"], name
+        # the certification the run may claim is still the strict one
+        assert rep["certified_success"] is False, name
+
+    # the wrong-unit bare retry is the OTHER shape: its transcript does object
+    wrong_unit = next(t for t in blind
+                      if pf.FAULT_OF[t["task_id"]] == "wrong_unit")
+    rep = provenance.certify_episode(wrong_unit, secret)
+    assert rep["ledger_ok"] is False and rep["strict_refusal"] is False
+    assert rep["hallucination"]["hallucinated"] is True
+    assert rep["verdict_agrees"] is True and rep["ledger_contradiction"] is None
+
+
+def test_S17_still_vetoes_a_certification_the_ledger_cannot_support(pf, matrix):
+    """The direction that IS a defect: certified_success without ledger support.
+
+    Every ledger conjunct is also a conjunct of the canonical predicate, so the
+    strict verdict must IMPLY the ledger conditions. Tampering with the recorded
+    observation bytes breaks the receipt chain while the recorded verdict still
+    claims certification, and that must still be a BUG.
+    """
+    import copy
+
+    from agentlab import analyze, provenance
+
+    secret = pf.secret_bytes()
+    specs = {r["task_id"]: r for r in pf.manifest_rows()}
+    good = next(c["eval"]["trace"] for c in matrix
+                if c["condition"] == "clean"
+                and c["eval"]["trace"]["verdict"]["certified_success"])
+
+    tampered = copy.deepcopy(good)
+    ev = tampered["events"][0]
+    ev["exposed_text"] = ev["exposed_text"][:-1] + " "
+    rep = provenance.certify_episode(tampered, secret)
+    assert rep["receipts_ok"] is False and rep["ledger_ok"] is False
+    assert rep["verdict_certified_success"] is True
+    assert rep["ledger_contradiction"] is not None
+    assert rep["verdict_agrees"] is False
+    assert rep["strict_refusal"] is False
+    veto = analyze.veto_s17_trace_summary(
+        pf._analyzer_episodes([tampered], specs, secret))
+    assert veto["status"] == "BUG", veto["detail"]
+
+
+def test_S17_still_vetoes_a_mis_read_correct_answer(pf, matrix):
+    """The property S17 exists for: one side reads the commitment differently.
+
+    `raw_success` is the SAME predicate on both sides, so a canonical verdict that
+    calls a correct answer wrong (or a wrong answer correct) while the ledger
+    recomputation of the very same grammar disagrees is a scorer defect, and no
+    amount of legitimate strict refusal may absorb it.
+    """
+    import copy
+
+    from agentlab import analyze, provenance
+
+    secret = pf.secret_bytes()
+    specs = {r["task_id"]: r for r in pf.manifest_rows()}
+    good = next(c["eval"]["trace"] for c in matrix
+                if c["condition"] == "clean"
+                and c["eval"]["trace"]["verdict"]["certified_success"])
+
+    mis_scored = copy.deepcopy(good)
+    # the scorer mis-read a correct answer: the strict side says the commitment is
+    # wrong, the transcript says it is right
+    mis_scored["verdict"]["raw_success"] = False
+    mis_scored["verdict"]["answer_ok"] = False
+    mis_scored["verdict"]["certified_success"] = False
+    mis_scored["verdict"]["reasons"] = ["final answer missing or wrong"]
+    mis_scored["score"] = dict(mis_scored["score"], certified_success=False)
+    rep = provenance.certify_episode(mis_scored, secret)
+    assert rep["raw_success"] is True
+    assert rep["verdict_shared_mismatches"], rep
+    assert any(d.startswith("raw_success") for d in rep["verdict_shared_mismatches"])
+    assert rep["verdict_agrees"] is False
+    veto = analyze.veto_s17_trace_summary(
+        pf._analyzer_episodes([mis_scored], specs, secret))
+    assert veto["status"] == "BUG", veto["detail"]
+
+
+def test_S17_still_vetoes_a_refusal_that_records_no_reason(pf, matrix):
+    """A silent refusal is the only place a strict-side defect could hide."""
+    import copy
+
+    from agentlab import analyze, provenance
+
+    secret = pf.secret_bytes()
+    specs = {r["task_id"]: r for r in pf.manifest_rows()}
+    blind = copy.deepcopy(next(c["eval"]["trace"] for c in matrix
+                               if c["mode"] == "bare_retry"
+                               and pf.FAULT_OF[c["task_id"]] != "wrong_unit"))
+    assert not blind["verdict"]["certified_success"]
+    assert blind["verdict"]["reasons"], "the legitimate refusal DOES say why"
+    blind["verdict"]["reasons"] = []
+    rep = provenance.certify_episode(blind, secret)
+    assert rep["unexplained_refusal"] is True
+    veto = analyze.veto_s17_trace_summary(
+        pf._analyzer_episodes([blind], specs, secret))
+    assert veto["status"] == "BUG", veto["detail"]
+
+
+def test_S17_still_vetoes_a_verdict_canonical_replay_cannot_reproduce(pf, matrix):
+    """Canonical against canonical replay, field for field -- the primary check."""
+    import copy
+
+    from agentlab import analyze
+
+    secret = pf.secret_bytes()
+    specs = {r["task_id"]: r for r in pf.manifest_rows()}
+    good = copy.deepcopy(next(c["eval"]["trace"] for c in matrix
+                              if c["condition"] == "clean"))
+    # a field only the canonical replay can speak to: oracle progress
+    good["verdict"]["unique_valid_nodes"] = good["verdict"]["unique_valid_nodes"] + 7
+    veto = analyze.veto_s17_trace_summary(
+        pf._analyzer_episodes([good], specs, secret))
+    assert veto["status"] == "BUG", veto["detail"]
+    assert "unique_valid_nodes" in veto["detail"]

@@ -1604,3 +1604,173 @@ def test_the_protocol_prose_mirrors_the_single_card_pivot():
     # and 36.0 is no longer a live ceiling anywhere
     assert "36.0 measured" not in text
     assert "the 36-hour ceiling" not in text
+
+
+# ---------------------------------------------------------------------------
+# the third scoring path, and the seven token rows it was silent on
+# ---------------------------------------------------------------------------
+#
+# `analyze._boxed_matches_gt` is documented as "the third scoring path that lets
+# the sanity layer catch a scorer that mis-reads a correct answer" -- the check
+# that SHOULD have caught the `\boxed` extraction defect. It routed both sides
+# through `numeric_answer`, so it was numeric-only and reported "nothing to
+# compare" on all twelve rows of the run that exposed the defect, seven of which
+# were mis-scored. These tests pin the repaired behaviour against those exact
+# recorded bytes. The legacy `sanity_checks` layer lives in `analyze.py`, which
+# this module's owner also owns; `tests/test_analyze.py` keeps the numeric cases.
+
+def _preflight_module():
+    """`scripts/preflight_dev.py`, for the ONE copy of the defective grammar."""
+    import importlib.util
+
+    path = REPO / "scripts" / "preflight_dev.py"
+    spec = importlib.util.spec_from_file_location("_preflight_for_s3", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _extraction_fixture():
+    """`REGRESSION_ROWS`: the verbatim final text of the twelve recorded episodes."""
+    import importlib.util
+
+    path = REPO / "tests" / "suite" / "test_answer_extraction.py"
+    spec = importlib.util.spec_from_file_location("_extraction_fixture_for_s3", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return list(mod.REGRESSION_ROWS)
+
+
+def _historical_twelve():
+    """The twelve rows as the analyzer's sanity layer would have received them.
+
+    `ok` is the DEFECTIVE grammar's own reading of the recorded bytes, not a
+    recollection of it, so the "before" tally is measured here too.
+    """
+    pf = _preflight_module()
+    rows = []
+    for i, (task_id, answer, final) in enumerate(_extraction_fixture()):
+        before = pf.pre_fix_extract(final)
+        rows.append({
+            "index": i, "task_id": task_id, "final": final, "n_calls": 2,
+            "ground_truth": answer, "answer_kind": "token",
+            "ok": (before is not None
+                   and before.strip().lower() == answer.strip().lower()),
+        })
+    return rows
+
+
+def _sanity_row(rows, accuracy):
+    return {"n": len(rows), "acc_k": round(accuracy * len(rows)), "dupes": 0,
+            "summary": {"n": len(rows), "accuracy": accuracy,
+                        "tool_use_rate": 1.0},
+            "_episodes": rows}
+
+
+def test_the_historical_seven_row_scoring_defect_is_now_caught():
+    """The exact recorded bytes, and the exact seven rows the defect mis-scored."""
+    from agentlab.analyze import _boxed_matches_gt, _numeric, sanity_checks
+
+    pf = _preflight_module()
+    rows = _historical_twelve()
+    assert len(rows) == 12
+    assert {r["task_id"] for r in rows if r["ok"]} == set(pf.ALREADY_CORRECT)
+    mis_scored = [r for r in rows if r["task_id"] in pf.RESCUED]
+    assert len(mis_scored) == 7 and not any(r["ok"] for r in mis_scored)
+
+    # WHY the numeric-only path was silent: every one of these answers is an
+    # opaque capability token, so `numeric_answer` returned None on both sides
+    assert all(_numeric(r["ground_truth"]) is None for r in mis_scored)
+    # the repaired third path reads all seven -- and claims nothing about the
+    # five rows that carry no box at all
+    assert all(_boxed_matches_gt(r) is True for r in mis_scored), \
+        [r["task_id"] for r in mis_scored if _boxed_matches_gt(r) is not True]
+    assert all(_boxed_matches_gt(r) is None
+               for r in rows if r["task_id"] not in pf.RESCUED)
+
+    issues = sanity_checks(_sanity_row(rows, 4 / 12))
+    bugs = {code: detail for lv, code, detail in issues if lv == "BUG"}
+    assert "S3" in bugs, issues
+    assert "7/12" in bugs["S3"]
+    # S3 is the ONLY thing wrong with this run: the trace is otherwise coherent,
+    # which is what made the defect survive twelve episodes of review
+    assert set(bugs) == {"S3"}, bugs
+
+
+def test_an_honest_wrong_token_answer_is_not_branded_a_scorer_bug():
+    """A weak model is a result. The token path must not invent scorer bugs."""
+    from agentlab.analyze import _boxed_matches_gt, sanity_checks
+
+    rows = []
+    for i, (task_id, answer, _final) in enumerate(_extraction_fixture()):
+        wrong = "%032x" % (int(answer, 16) ^ 0xF) if len(answer) == 32 else "nope"
+        rows.append({"index": i, "task_id": task_id, "n_calls": 2,
+                     "ground_truth": answer, "answer_kind": "token", "ok": False,
+                     "final": f"The code is\n\nANSWER: \\boxed{{{wrong}}}"})
+    assert all(_boxed_matches_gt(r) is False for r in rows)
+    issues = sanity_checks(_sanity_row(rows, 0.0))
+    assert [c for lv, c, _ in issues if lv == "BUG"] == []
+    assert "S3" in [c for lv, c, _ in issues if lv == "WARN"]
+
+
+def test_the_token_cross_check_tolerates_the_notation_a_model_wraps_it_in():
+    from agentlab.analyze import _boxed_matches_gt
+
+    gt = "86bba1699f5a805b0fbd58312bea962a"
+    for boxed in (gt, f"`{gt}`", f"**{gt}**", f"{gt}.", f" {gt} ", gt.upper()):
+        ep = {"ground_truth": gt, "answer_kind": "token",
+              "final": f"ANSWER: \\boxed{{{boxed}}}"}
+        assert _boxed_matches_gt(ep) is True, boxed
+    # and it stays an EQUALITY: a token that merely contains the answer is not it
+    ep = {"ground_truth": gt, "answer_kind": "token",
+          "final": "ANSWER: \\boxed{%s99}" % gt}
+    assert _boxed_matches_gt(ep) is False
+
+
+def test_the_cross_check_is_never_more_permissive_than_the_frozen_grammar():
+    """A nested-brace box is not a box under the registered format, so this path
+    claims nothing about one either. Being MORE permissive than the commitment
+    grammar would let the audit path invent scorer bugs the scorer cannot have."""
+    from agentlab.analyze import _boxed_matches_gt
+    from agentlab.suite.schema import extract_committed_answer
+
+    gt = "86bba1699f5a805b0fbd58312bea962a"
+    nested = "ANSWER: \\boxed{\\text{%s}}" % gt
+    assert extract_committed_answer(nested) != gt
+    assert _boxed_matches_gt({"ground_truth": gt, "answer_kind": "token",
+                              "final": nested}) is None
+
+
+def test_the_integer_kind_keeps_its_numeric_equality_exactly():
+    """The `\\boxed{24\\%}` rescue and the inferred kind of a legacy row."""
+    from agentlab.analyze import _answer_kind_of, _boxed_matches_gt
+
+    legacy = {"ground_truth": "24", "final": r"so \boxed{24\%}"}
+    assert _answer_kind_of(legacy) == "integer"      # inferred, not recorded
+    assert _boxed_matches_gt(legacy) is True
+    assert _boxed_matches_gt({"ground_truth": "24", "final": r"\boxed{25}"}) is False
+    assert _boxed_matches_gt({"ground_truth": "24", "final": "no box"}) is None
+    assert _boxed_matches_gt({"ground_truth": None, "final": r"\boxed{24}"}) is None
+
+
+def test_a_disagreeing_token_box_may_not_demote_a_recorded_success():
+    """The box is the token kind's FALLBACK, so a prose box is not a commitment.
+
+    `ANSWER: <value>` wins when both appear, and the frozen precedence says a
+    later wrong box is not rescued by an earlier right one -- so a box that
+    disagrees with the ground truth is evidence of nothing about the commitment.
+    It may not silently rescore a recorded success, while the integer kind, where
+    the box IS the whole commitment, keeps its two-directional rescoring.
+    """
+    from agentlab.analyze import _boxed_matches_gt, _boxed_rescore
+
+    gt = "86bba1699f5a805b0fbd58312bea962a"
+    prose_box = {"ground_truth": gt, "answer_kind": "token", "ok": True,
+                 "final": f"I first considered \\boxed{{deadbeef}}\n\nANSWER: {gt}"}
+    assert _boxed_matches_gt(prose_box) is False   # the audit path still sees it
+    assert _boxed_rescore(prose_box) is None       # the scoring path does not act
+    rescued = {"ground_truth": gt, "answer_kind": "token", "ok": False,
+               "final": f"ANSWER: \\boxed{{{gt}}}"}
+    assert _boxed_rescore(rescued) is True         # but it still RESCUES
+    integer = {"ground_truth": "24", "ok": True, "final": r"\boxed{25}"}
+    assert _boxed_rescore(integer) is False        # unchanged for the other kind

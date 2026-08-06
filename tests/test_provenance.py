@@ -2,10 +2,23 @@
 
 `certify_episode` is no longer a second definition of success. It recomputes the
 LEDGER-side conditions from the raw trace -- receipt chain, runaway,
-hallucination, the answer's validated source -- and requires them to agree with
-the canonical verdict `suite.verify.verify_episode` emitted. So these tests check
-two things at once: the ledger recomputation has teeth, and the verifier's oracle,
+hallucination, the answer's validated source -- and cross-checks them against the
+canonical verdict `suite.verify.verify_episode` emitted. So these tests check two
+things at once: the ledger recomputation has teeth, and the verifier's oracle,
 final-state, capability-token and budget conditions are inside the same boolean.
+
+The cross-check is ASYMMETRIC, and the last section of this module is why. The
+ledger conditions are a strict SUBSET of the canonical conjuncts, so the two
+booleans are not the same predicate:
+
+  * the five conjuncts both sides compute must be EQUAL, field for field;
+  * `certified_success` must IMPLY `ledger_ok`;
+  * `ledger_ok and not certified_success` is a LEGITIMATE strict refusal for a
+    reason the transcript cannot show, and must not read as a disagreement.
+
+Requiring plain equality was the S17 cross-predicate seam: it turned every blind
+retry, and every clean episode that batched a dependent hop into one decision,
+into a harness BUG that vetoed every gate, claim and the winner.
 """
 
 from agentic_helpers import (SECRET, Guesser, ScriptedOracle, chain_spec,
@@ -50,10 +63,16 @@ def test_certified_success_requires_valid_receipts():
     rep = provenance.certify_episode(trace, SECRET)
     assert not rep["receipts_ok"]
     assert not rep["certified_success"]
-    # and the tamper is VISIBLE as a disagreement with the recorded verdict
+    # and the tamper is VISIBLE as a disagreement with the recorded verdict, in
+    # both of the ways it should be: the two sides read the SAME conjunct
+    # differently, and the strict verdict no longer implies the ledger conditions
     assert rep["verdict_present"]
     assert rep["verdict_certified_success"]
     assert not rep["verdict_agrees"]
+    assert any(d.startswith("receipts_ok") for d in rep["verdict_shared_mismatches"])
+    assert rep["ledger_contradiction"] is not None
+    assert "receipts_ok" in rep["ledger_contradiction"]
+    assert rep["strict_refusal"] is False
 
 
 def test_a_trace_without_a_canonical_verdict_can_never_be_certified():
@@ -393,3 +412,133 @@ def test_non_recovery_precedence_is_frozen_and_the_boolean_is_a_conjunction():
               "no_post_fault_result": "no_post_fault_result"}
     ranks = [order.index(labels.get(v, v)) for v in rec["violations"]]
     assert order.index(labels.get(rec["reason"], rec["reason"])) == min(ranks)
+
+
+# ---------------------------------------------------------------------------
+# the cross-predicate relation between the ledger and the canonical verdict
+# ---------------------------------------------------------------------------
+
+class _BatchedOracle:
+    """Emits the WHOLE oracle path in one decision, then commits the answer.
+
+    The registered crediting rule requires a dependency edge to cross a LATER
+    assistant decision, so the dependent node is never credited and the strict
+    verifier correctly refuses certification -- while the transcript alone (right
+    answer, valid receipts, a validated source, no runaway, no fabrication) has
+    nothing to object to. It is the fault-free member of the same class as a blind
+    retry, and the second mechanism the dev preflight reproduced.
+    """
+
+    def __init__(self, spec: dict):
+        replay = provenance.execute_oracle(spec)
+        self.calls = [{"name": n["tool"], "arguments": dict(n["args"])}
+                      for n in replay["nodes"]]
+        self.answer = replay["answer"]
+        self.sent = False
+
+    def __call__(self, messages, tools):
+        if not self.sent:
+            self.sent = True
+            return {"content": "both hops in one decision",
+                    "tool_calls": [dict(c) for c in self.calls]}
+        return {"content": f"done\nANSWER: {self.answer}", "tool_calls": []}
+
+
+def _strict_refusals():
+    """The two reproduced mechanisms, as (label, trace) pairs."""
+    fault = _fspec(60, horizon=4)
+    clean = chain_spec(61, horizon=2)
+    return [("blind_retry", run(fault, ScriptedOracle(fault, blind_retry=True),
+                                condition="faulted")),
+            ("batched_decision", run(clean, _BatchedOracle(clean)))]
+
+
+def test_a_legitimate_strict_refusal_is_not_a_disagreement():
+    """Both mechanisms: the weaker predicate holds, the strict one does not."""
+    for label, trace in _strict_refusals():
+        rep = provenance.certify_episode(trace, SECRET)
+        assert rep["raw_success"] is True, label
+        assert rep["receipts_ok"] is True, label
+        assert rep["runaway"]["runaway"] is False, label
+        assert rep["hallucination"]["hallucinated"] is False, label
+        assert rep["ledger_ok"] is True, label
+        assert rep["verdict_certified_success"] is False, label
+        # so the two predicates DIFFER -- and that is the strict verifier working
+        assert rep["strict_refusal"] is True, label
+        assert rep["verdict_agrees"] is True, label
+        assert rep["verdict_shared_mismatches"] == [], label
+        assert rep["ledger_contradiction"] is None, label
+        assert rep["unexplained_refusal"] is False, label
+        assert rep["strict_refusal_reasons"], label
+        # the claim-bearing boolean is still the strict one
+        assert rep["certified_success"] is False, label
+        assert trace["score"]["certified_success"] is False, label
+
+
+def test_the_five_shared_conjuncts_are_compared_field_for_field():
+    """A scorer that mis-reads a correct answer moves one side only, and is seen."""
+    spec = chain_spec(62, horizon=2)
+    trace = run(spec, ScriptedOracle(spec))
+    assert trace["score"]["certified_success"]
+    for name, wrong in (("raw_success", False), ("receipts_ok", False),
+                        ("runaway", True), ("hallucinated", True),
+                        ("answer_event_call_id", None)):
+        tampered = dict(trace, verdict=dict(trace["verdict"], **{name: wrong}))
+        rep = provenance.certify_episode(tampered, SECRET)
+        assert any(d.startswith(name) for d in rep["verdict_shared_mismatches"]), \
+            (name, rep["verdict_shared_mismatches"])
+        assert rep["verdict_agrees"] is False, name
+    # every registered shared field is actually checked, and no other one is
+    assert provenance.SHARED_LEDGER_VERDICT_FIELDS == (
+        "raw_success", "receipts_ok", "runaway", "hallucinated",
+        "answer_event_call_id")
+    for name in provenance.SHARED_LEDGER_VERDICT_FIELDS:
+        stripped = dict(trace, verdict={k: v for k, v in trace["verdict"].items()
+                                        if k != name})
+        rep = provenance.certify_episode(stripped, SECRET)
+        assert any(d.startswith(f"{name}: absent")
+                   for d in rep["verdict_shared_mismatches"]), name
+
+
+def test_certified_success_must_imply_the_ledger_conditions():
+    """The one direction that is a defect, over each ledger conjunct in turn."""
+    import copy
+
+    spec = chain_spec(63, horizon=2)
+    good = run(spec, ScriptedOracle(spec))
+    # a verdict that claims certification while the transcript refuses it: build it
+    # by making the ledger side fail and leaving the recorded verdict untouched
+    tampered = copy.deepcopy(good)
+    ev = tampered["events"][0]
+    ev["exposed_text"] = ev["exposed_text"][:-1] + " "
+    rep = provenance.certify_episode(tampered, SECRET)
+    assert rep["verdict_certified_success"] and not rep["ledger_ok"]
+    assert rep["ledger_contradiction"] is not None
+    assert rep["verdict_agrees"] is False
+    # and the implication holds on every honest episode this module builds
+    for label, trace in _strict_refusals() + [("clean", good)]:
+        r = provenance.certify_episode(trace, SECRET)
+        assert (not r["verdict_certified_success"]) or r["ledger_ok"], label
+
+
+def test_a_refusal_that_records_no_reason_is_a_disagreement():
+    """The only place a genuine strict-side defect could hide behind a refusal."""
+    for label, trace in _strict_refusals():
+        assert trace["verdict"]["reasons"], label
+        silent = dict(trace, verdict=dict(trace["verdict"], reasons=[]))
+        rep = provenance.certify_episode(silent, SECRET)
+        assert rep["unexplained_refusal"] is True, label
+        assert rep["strict_refusal"] is True, label
+
+
+def test_the_certifier_no_longer_compares_two_different_predicates():
+    """The seam, stated as source: no equality between the strict and weak booleans."""
+    import pathlib
+    import re
+
+    src = (pathlib.Path(provenance.__file__)).read_text(encoding="utf-8")
+    body = src.split("def certify_episode", 1)[1].split("\ndef ", 1)[0]
+    code = "\n".join(ln for ln in body.splitlines()
+                     if not ln.strip().startswith("#"))
+    assert not re.search(r"verdict_certified\s*==\s*ledger_ok", code)
+    assert not re.search(r"ledger_ok\s*==\s*verdict_certified", code)

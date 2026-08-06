@@ -14,11 +14,35 @@ more:
 
   certify_episode        recomputes the LEDGER-side conditions (receipt chain,
                          runaway, hallucination, answer provenance) from the raw
-                         trace and requires them to agree with the canonical
-                         verdict `suite.verify.verify_episode` emitted. There is
-                         one certified-success predicate and it lives in the
+                         trace and checks them against the canonical verdict
+                         `suite.verify.verify_episode` emitted. There is one
+                         certified-success predicate and it lives in the
                          verifier; this function is the independent cross-check,
                          not a second definition.
+
+                         WHAT "AGREE" MEANS HERE (repaired; see below). The
+                         ledger conditions are a STRICT SUBSET of the canonical
+                         predicate's conjuncts, so the two booleans are not
+                         equal predicates and demanding equality was wrong:
+                         `certified_success` additionally requires ordered
+                         oracle completion, dependency edges that cross a later
+                         decision, the fulfillment final state, capability-token
+                         provenance, the call/decision budget and -- in the fault
+                         arm -- a certified remediation. None of those is visible
+                         in the transcript. So the checks are:
+                           * the five conjuncts BOTH sides compute -- raw_success,
+                             receipts_ok, runaway, hallucinated and the answer's
+                             validated call id -- are the SAME predicate on both
+                             sides and must be EQUAL, field for field;
+                           * the strict verdict must IMPLY the ledger conditions
+                             (certified => ledger_ok). Certification without
+                             ledger support is a defect in one of the two
+                             readings, or a tampered trace;
+                           * a refusal the ledger cannot see (ledger_ok and not
+                             certified) is LEGITIMATE and is reported as such --
+                             it is the ordinary shape of a blind retry, or of a
+                             clean episode that batched a dependent hop into one
+                             decision -- but the verdict must say why it refused.
   certify_recovery       maps the verifier's registered remediation report onto
                          the frozen non-recovery labels.
   certify_orchestration  kb_lookup, unit_convert and calculator all lie on the
@@ -534,8 +558,27 @@ def _final_assistant_text(trace: dict) -> str:
 # certifications
 # ---------------------------------------------------------------------------
 
+# The conjuncts the canonical verifier and this ledger recomputation BOTH derive
+# -- the verifier from canonical events, this function from the serialized trace.
+# They are the SAME predicate computed twice from two different materials, so
+# equality is the right assertion and a difference is a harness defect (or a
+# tampered trace). Everything else in `certified_success` needs the spec, the
+# oracle plan or the environment state, and is deliberately NOT compared here.
+#
+#   raw_success            the commitment grammar's reading of the final text
+#   receipts_ok            every event's receipt covers its own exposed bytes
+#   runaway                the preregistered budget/loop criteria
+#   hallucinated           the frozen ER7 numerator
+#   answer_event_call_id   the last validated event that sourced the commitment
+SHARED_LEDGER_VERDICT_FIELDS = ("raw_success", "receipts_ok", "runaway",
+                                "hallucinated", "answer_event_call_id")
+
+_SHARED_BOOL_FIELDS = frozenset({"raw_success", "receipts_ok", "runaway",
+                                 "hallucinated"})
+
+
 def certify_episode(trace: dict, secret: bytes, verdict: dict | None = None) -> dict:
-    """Recompute the ledger-side conditions and require the canonical verdict to agree.
+    """Recompute the ledger-side conditions and cross-check the canonical verdict.
 
     There is ONE certified-success predicate and it is
     `suite.verify.verify_episode`, which sees the spec, the oracle plan and the
@@ -546,11 +589,42 @@ def certify_episode(trace: dict, secret: bytes, verdict: dict | None = None) -> 
 
     That is deliberately a cross-check, not a second definition: a trace whose
     bytes were tampered with after the fact fails here even though its recorded
-    verdict says success (`verdict_agrees` False), and a trace with no canonical
-    verdict at all cannot be certified, because oracle-node completion, the
-    fulfillment final state, capability-token provenance and the call budget are
-    not recoverable from the transcript. The previous version of this function
-    checked NONE of those four and still called its output `certified_success`.
+    verdict says success, and a trace with no canonical verdict at all cannot be
+    certified, because oracle-node completion, the fulfillment final state,
+    capability-token provenance and the call budget are not recoverable from the
+    transcript. The previous version of this function checked NONE of those four
+    and still called its output `certified_success`.
+
+    THE CROSS-PREDICATE SEAM, REPAIRED. `verdict_agrees` used to be
+    `verdict.certified_success == ledger_ok`: an EQUALITY between the strict
+    predicate and a strictly weaker one. The two are not the same predicate, so
+    they legitimately differ on every episode the strict verifier refuses for a
+    reason the transcript cannot show -- a blind retry, or a clean episode that
+    batched a dependent hop into a single decision -- and S17 read that difference
+    as a broken harness, vetoing every gate, claim and the winner. What is checked
+    now, and what each check is for:
+
+      `verdict_shared_mismatches`   the five conjuncts of
+          `SHARED_LEDGER_VERDICT_FIELDS`, which BOTH sides compute, must be equal
+          field for field. This is the property the veto exists for: a scorer that
+          mis-reads a correct answer moves `raw_success` on one side only, and
+          tampered observation bytes move `receipts_ok` on one side only. Its one
+          honest limit is a mis-reading BOTH sides share -- exactly what the
+          `\\boxed` extraction defect was, since both readers call the same
+          `extract_committed_answer`. That case needs a path that does not read the
+          grammar at all, and `analyze._boxed_matches_gt` is it.
+      `ledger_contradiction`        `certified_success` must IMPLY `ledger_ok`,
+          because every ledger conjunct is also a conjunct of the canonical
+          predicate. Certification without ledger support is a defect.
+      `strict_refusal`              `ledger_ok and not certified_success`: the
+          LEGITIMATE direction. Reported, never a defect.
+      `unexplained_refusal`         a verdict that refuses certification must
+          carry at least one reason. A silent refusal is a defect, and it is the
+          only way a genuine strict-side bug could hide inside `strict_refusal`.
+
+    `verdict_agrees` keeps its name (it is serialized into every trace score) and
+    now means "the two recomputations are CONSISTENT": no shared-field mismatch
+    and no unsupported certification.
     """
     spec_answer = str(trace.get("answer", ""))
     kind = trace.get("answer_kind", "token")
@@ -573,8 +647,38 @@ def certify_episode(trace: dict, secret: bytes, verdict: dict | None = None) -> 
     ledger_ok = (raw_success and receipts_ok and answer_id is not None
                  and not run["runaway"] and not hall["hallucinated"])
     verdict_certified = bool((verdict or {}).get("certified_success"))
-    agrees = bool(verdict) and verdict_certified == ledger_ok
     certified = ledger_ok and verdict_certified
+
+    # -- the two-sided reading of the same five conjuncts --------------------
+    ledger_side = {"raw_success": raw_success, "receipts_ok": receipts_ok,
+                   "runaway": run["runaway"], "hallucinated": hall["hallucinated"],
+                   "answer_event_call_id": answer_id}
+    mismatches: list[str] = []
+    for name in (SHARED_LEDGER_VERDICT_FIELDS if verdict else ()):
+        if name not in verdict:
+            mismatches.append(f"{name}: absent from the canonical verdict")
+            continue
+        mine, theirs = ledger_side[name], verdict[name]
+        differs = (bool(mine) is not bool(theirs) if name in _SHARED_BOOL_FIELDS
+                   else mine != theirs)
+        if differs:
+            mismatches.append(f"{name}: verdict {theirs!r} ledger {mine!r}")
+
+    # -- the one-directional strict/weak relation ---------------------------
+    contradiction = None
+    if verdict and verdict_certified and not ledger_ok:
+        unmet = [n for n, ok in (("raw_success", raw_success),
+                                 ("receipts_ok", receipts_ok),
+                                 ("answer_sourced", answer_id is not None),
+                                 ("not_runaway", not run["runaway"]),
+                                 ("not_hallucinated", not hall["hallucinated"]))
+                 if not ok]
+        contradiction = ("certified_success without ledger support: "
+                         + ",".join(unmet))
+    verdict_reasons = list((verdict or {}).get("reasons") or [])
+    strict_refusal = bool(verdict) and ledger_ok and not verdict_certified
+    unexplained = bool(verdict) and not verdict_certified and not verdict_reasons
+    agrees = bool(verdict) and not mismatches and contradiction is None
 
     n_calls = len(events)
     decisions = {e.get("decision_id") for e in events}
@@ -585,6 +689,13 @@ def certify_episode(trace: dict, secret: bytes, verdict: dict | None = None) -> 
         "verdict_present": bool(verdict),
         "verdict_certified_success": verdict_certified,
         "verdict_agrees": agrees,
+        "verdict_shared_mismatches": mismatches,
+        "ledger_contradiction": contradiction,
+        # ledger_ok and NOT certified: the strict verifier refused for a reason
+        # the transcript cannot show. Legitimate, and never a defect.
+        "strict_refusal": strict_refusal,
+        "strict_refusal_reasons": verdict_reasons if strict_refusal else [],
+        "unexplained_refusal": unexplained,
         "receipts_ok": receipts_ok,
         "n_events": n_calls,
         "n_valid_events": len(valid_events),

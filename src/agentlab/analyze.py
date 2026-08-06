@@ -23,9 +23,12 @@ Design decisions that came out of adversarial review of this module itself:
     which resolves smaller differences than the unpaired z-test at equal n.
     The unpaired test and MDE are still printed, labelled as conservative.
   * The scorer-blind check compares each episode's boxed content against its
-    recorded ground truth -- an independent scoring path -- rather than keying
-    on "accuracy is exactly zero", which both misses partial scorer bugs and
-    falsely brands honest zero-scoring models as broken.
+    recorded ground truth -- an independent scoring path, for BOTH registered
+    answer kinds -- rather than keying on "accuracy is exactly zero", which both
+    misses partial scorer bugs and falsely brands honest zero-scoring models as
+    broken. It was numeric-only until the `\boxed` extraction defect proved that
+    a check which cannot read the token answer kind cannot catch a scorer that
+    mis-reads a token answer.
 
 Stdlib only -- no scipy on the box.
 """
@@ -41,7 +44,15 @@ import re
 Z95 = 1.959964
 Z80 = 0.841621  # power term for MDE
 
+# Deliberately the same shape as the frozen grammar's own `schema.BOXED_RE`,
+# including its refusal to descend into nested braces: this path exists to
+# disagree with the scorer about the VALUE, never to be more permissive than the
+# preregistered commitment format about what counts as a box.
 _BOXED_RE = re.compile(r"\\boxed\{([^{}]*)\}")
+# Decoration a model puts around a token INSIDE the box -- markdown code fences or
+# emphasis, quotes, brackets, a trailing sentence stop, LaTeX-escaped punctuation.
+# Stripping it is not "scraping prose": the box already delimits the value.
+_TOKEN_EDGE_RE = re.compile(r"^[\s`'\"*(\[{]+|[\s`'\"*)\]}.,;:!?]+$")
 
 
 def _numeric(s):
@@ -50,20 +61,87 @@ def _numeric(s):
     return numeric_answer(s)
 
 
+def _answer_kind_of(episode: dict) -> str:
+    """The registered answer kind for one episode row: "token" or "integer".
+
+    Prefers the recorded `answer_kind` the suite writes, and otherwise INFERS it
+    from the recorded ground truth, which is all the legacy non-agentic rows
+    carry: a numeric ground truth is an integer answer, anything else is an opaque
+    token.
+    """
+    kind = str(episode.get("answer_kind") or "").strip().lower()
+    if kind in ("token", "integer"):
+        return kind
+    return "integer" if _numeric(episode.get("ground_truth")) is not None else "token"
+
+
+def _token_value(s) -> str | None:
+    """One opaque token answer, normalized for comparison. None when nothing left.
+
+    Case-insensitive normalized identity, which is what `suite.verify._answer_ok`
+    uses for this answer kind; the LaTeX escapes are the ones a model emits around
+    an underscore or a hyphen inside a capability token.
+    """
+    if s is None:
+        return None
+    t = str(s).replace("\\_", "_").replace("\\-", "-")
+    return _TOKEN_EDGE_RE.sub("", t).strip().lower() or None
+
 
 def _boxed_matches_gt(episode: dict) -> bool | None:
     """Independently re-score one episode: last boxed value vs ground truth.
 
-    Returns None when there is nothing to compare (no box, or no ground truth
-    recorded), True/False otherwise. This is the third scoring path that lets
-    the sanity layer catch a scorer that mis-reads a correct answer.
+    THE THIRD SCORING PATH: the one that lets the sanity layer catch a scorer that
+    mis-reads a correct answer. It therefore shares no code with the scorer -- it
+    finds `\\boxed{...}` with its own regex and compares against the ground truth
+    the run recorded. None when there is nothing to compare (no box, or no ground
+    truth), True/False otherwise.
+
+    IT WAS NUMERIC-ONLY, and that is exactly why it was silent on all seven
+    mis-scored rows of the `verify-a5000` dev run -- the `\\boxed` extraction
+    defect it is described as existing to catch. Those answers are opaque
+    32-hex-character capability tokens (`answer_kind == "token"`, the kind the
+    suite's three families mostly use), so routing BOTH sides through
+    `numeric_answer` returned None on every one of them and the check reported
+    "nothing to compare" twelve times out of twelve. Both registered kinds are now
+    compared, each by its own registered notion of equality: the integer kind
+    numerically -- which is what rescued `\\boxed{24\\%}` against ground truth 24
+    -- and the token kind by normalized string identity, which is what
+    `suite.verify._answer_ok` uses for that kind.
     """
-    gt = _numeric(episode.get("ground_truth"))
+    gt_raw = episode.get("ground_truth")
     hits = _BOXED_RE.findall(str(episode.get("final", "")))
-    if gt is None or not hits:
+    if gt_raw is None or not hits:
         return None
-    got = _numeric(hits[-1])
-    return got is not None and abs(got - gt) < 1e-4
+    if _answer_kind_of(episode) == "integer":
+        gt = _numeric(gt_raw)
+        if gt is None:
+            return None
+        got = _numeric(hits[-1])
+        return got is not None and abs(got - gt) < 1e-4
+    gt_token = _token_value(gt_raw)
+    if gt_token is None:
+        return None
+    return _token_value(hits[-1]) == gt_token
+
+
+def _boxed_rescore(episode: dict) -> bool | None:
+    """`_boxed_matches_gt` restricted to what may legitimately move a RECORDED score.
+
+    The notation rescoring exists so that a right answer in the wrong notation does
+    not score wrong. For the integer kind the box is the whole commitment, so a
+    disagreeing box may demote as well as rescue. For the TOKEN kind the box is
+    only the preregistered FALLBACK -- `ANSWER: <value>` wins when both appear, and
+    a box sitting in the surrounding prose is not a commitment at all -- so a token
+    box that DISAGREES is evidence of nothing and must not demote a recorded
+    success. It still rescues, which is the direction the extraction defect needed.
+    The disagreeing direction stays available to `sanity_checks`, which audits the
+    harness rather than scoring the model.
+    """
+    m = _boxed_matches_gt(episode)
+    if m is False and _answer_kind_of(episode) == "token":
+        return None
+    return m
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +286,7 @@ def load_tag(tag: str, out_dir: pathlib.Path, trace_dirs: list[pathlib.Path]) ->
         # uniform rescoring; the original ok flags are kept for the sanity layer,
         # which audits the harness that wrote the file.
         for e in episodes:
-            m = _boxed_matches_gt(e)
+            m = _boxed_rescore(e)
             e["_ok_rescored"] = bool(e.get("ok")) if m is None else m
         row["rescored_k"] = sum(1 for e in episodes if e["_ok_rescored"])
         row["corrections"] = sum(
@@ -260,6 +338,10 @@ def sanity_checks(row: dict) -> list[tuple[str, str, str]]:
         # S3: independent re-score. An episode whose boxed content EQUALS the
         # recorded ground truth but is marked wrong is a scorer bug at any
         # accuracy level; boxes that are present but wrong are just a weak model.
+        # This reads BOTH registered answer kinds: the seven mis-scored token rows
+        # of the verify-a5000 dev run are precisely what a numeric-only comparison
+        # could not see, and they are the defect this check is described as
+        # existing to catch.
         blind = sum(1 for e in eps if e.get("ok") is False and _boxed_matches_gt(e) is True)
         if blind >= max(2, 0.05 * len(eps)):
             out.append(("BUG", "S3",
@@ -1045,17 +1127,57 @@ S17_VERDICT_EXEMPT: tuple = ()
 
 
 def veto_s17_trace_summary(eps: dict) -> dict:
-    """Emitted scores and canonical verdicts must equal the recomputed ones.
+    """Emitted scores and canonical verdicts must equal an INDEPENDENT recomputation
+    OF THE SAME PREDICATE.
 
-    Two independent recomputations run: the ledger-side certification
-    (`provenance.certify_episode` over the raw trace) and, when the certification
-    specs are available, a full replay of the recorded calls through a fresh
-    canonical `EpisodeRuntime`. The second is compared to the emitted verdict
-    FIELD FOR FIELD; a summary-level comparison would pass while oracle progress,
-    the fault report or the final state diverged.
+    Three comparisons run, and each one compares like with like:
+
+      1. canonical against CANONICAL REPLAY. The claim-bearing comparison: the
+         emitted `verdict` is what the evaluator's runtime said, and
+         `recompute_canonical_verdict` is what a fresh `EpisodeRuntime` built from
+         the committed certification spec says about the same recorded calls.
+         Compared FIELD FOR FIELD -- a summary-level comparison would pass while
+         oracle progress, the fault report or the final state diverged. Without
+         the certspecs there is no independent recomputation of the strict
+         predicate at all, and this veto says INCONCLUSIVE rather than comparing a
+         verdict against itself.
+      2. the recorded score against the ledger recomputation
+         (`provenance.certify_episode` over the raw trace), for the fields both
+         sides compute.
+      3. the five conjuncts the ledger recomputation and the canonical verifier
+         BOTH derive (`provenance.SHARED_LEDGER_VERDICT_FIELDS`), plus the
+         one-directional relation `certified_success => ledger_ok`.
+
+    WHAT THIS VETO NO LONGER DOES, and why. It used to require
+    `verdict.certified_success == ledger_ok` -- an equality between the strict
+    canonical predicate and the strictly WEAKER transcript-only one. The ledger
+    conditions are a subset of the canonical conjuncts, so a legitimate strict
+    refusal whose transcript has nothing to object to (a blind retry; a clean
+    episode that batched a dependent hop into one decision) made the two differ,
+    and the difference was reported as a harness BUG that vetoed every gate, claim
+    and the winner. Those episodes are exactly what the strict verifier is
+    SUPPOSED to refuse. They are now counted (`strict_refusals`) and reported, not
+    vetoed.
+
+    The properties the veto exists for are preserved and are now checked directly.
+    A recorded score that replay cannot reproduce fails check 1. Tampered
+    observation bytes move `receipts_ok` on one side only, and a scorer that
+    mis-reads a correct answer moves `raw_success` on one side only, so both fail
+    check 3 (and check 2 against the recorded score). A strict refusal that carries
+    no reason is still a BUG, which is the only way a genuine strict-side defect
+    could hide behind a legitimate refusal.
+
+    ONE HONEST LIMIT, stated because the `\\boxed` extraction defect lived inside
+    it: a mis-reading BOTH readers share is invisible to every comparison here.
+    All three compare two recomputations of the registered grammar, and the
+    grammar was the thing that was wrong, so all three agreed and stayed silent
+    across twelve episodes. That case is `_boxed_matches_gt`'s job -- a third
+    scoring path that does not read the grammar at all -- and S3 is where it is
+    vetoed.
     """
     problems = []
     n_replayed = 0
+    n_strict_refusals = 0
     for (arm, condition, control), tasks in eps.items():
         for ep in tasks.values():
             trace, rep = ep["trace"], ep["rep"]
@@ -1071,10 +1193,21 @@ def veto_s17_trace_summary(eps: dict) -> dict:
             if not rep["verdict_present"]:
                 problems.append(f"{arm}/{condition}/{ep['task_id']}: no canonical "
                                 f"verdict in the trace")
-            elif not rep["verdict_agrees"]:
-                problems.append(f"{arm}/{condition}/{ep['task_id']}: the recorded "
-                                f"canonical verdict disagrees with the ledger "
-                                f"recomputation")
+            else:
+                for detail in rep["verdict_shared_mismatches"]:
+                    problems.append(f"{arm}/{condition}/{ep['task_id']}: the "
+                                    f"canonical verdict and the ledger "
+                                    f"recomputation read the same conjunct "
+                                    f"differently -- {detail}")
+                if rep["ledger_contradiction"]:
+                    problems.append(f"{arm}/{condition}/{ep['task_id']}: "
+                                    f"{rep['ledger_contradiction']}")
+                if rep["unexplained_refusal"]:
+                    problems.append(f"{arm}/{condition}/{ep['task_id']}: the "
+                                    f"canonical verdict refused certification "
+                                    f"without recording a single reason")
+                if rep["strict_refusal"]:
+                    n_strict_refusals += 1
             if "recovery" in score and "rec" in ep:
                 if bool(score["recovery"].get("certified_recovery")) != bool(
                         ep["rec"]["certified_recovery"]):
@@ -1094,17 +1227,20 @@ def veto_s17_trace_summary(eps: dict) -> dict:
                                 f"{n_calls} != {len(trace.get('events', []))} events")
     if problems:
         return _g("BUG", "; ".join(problems[:4]), disagreements=len(problems),
-                  replayed=n_replayed)
+                  replayed=n_replayed, strict_refusals=n_strict_refusals)
     total = sum(len(t) for t in eps.values())
     if total and not n_replayed:
         return _g("INCONCLUSIVE",
                   "no certification specs supplied, so no canonical verdict could "
                   "be recomputed by replay; the recorded verdict was compared only "
                   "against the ledger recomputation",
-                  replayed=0, episodes=total)
+                  replayed=0, episodes=total, strict_refusals=n_strict_refusals)
     return _g("OK", f"independent recomputation agrees with every recorded score; "
-              f"{n_replayed} verdicts reproduced field-for-field by canonical replay",
-              replayed=n_replayed)
+              f"{n_replayed} verdicts reproduced field-for-field by canonical "
+              f"replay; {n_strict_refusals} episodes were refused certification "
+              f"for a registered reason the transcript alone cannot show, which is "
+              f"the strict verifier working, not a harness defect",
+              replayed=n_replayed, strict_refusals=n_strict_refusals)
 
 
 def _git_in(repo: str | pathlib.Path, *args: str):
