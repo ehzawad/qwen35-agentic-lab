@@ -29,7 +29,7 @@
       "environment_contract": {
         "previous": "two contracts, and no digest existed, so no artifact could say which environment produced it",
         "current_version": "token-bearing-v1",
-        "current_sha256": "SET_BY_CENSUS",
+        "current_sha256": "a904665020ee3ff178d90bc887b36c22493bb468b6ee626802c5138739ec3c95",
         "digest_inputs": [
           "exact tool-schema bytes per family",
           "observation form: canonical envelope plus a receipt line, no event_id, no request_id",
@@ -66,9 +66,9 @@
       ],
       "caps": {
         "token_census_artifact": "out/agentic/token_census.json",
-        "token_census_sha256": "SET_BY_CENSUS",
-        "tokenizer": "SET_BY_CENSUS",
-        "changes": "SET_BY_CENSUS"
+        "token_census_sha256": "98379c42540a30d7c6c29fea53193a169714351f184f9c58b516484dc5896fa8",
+        "tokenizer": "Qwen/Qwen3.5-4B, transformers 5.14.1, tokenizer.json sha256 5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42, chat_template.jinja sha256 a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+        "changes": "Measured EXHAUSTIVELY over the four committed train/dev splits (distill, oracle_sft, grpo_train, dev), all twelve family/horizon cells, the clean case, every eligible fault class, the same-decision rate-limit repeat and the ambiguous malformed mutation: 78,100 episodes, 742,500 model-visible tool observations, 624,800 rendered terminal views across all eight preregistered prompt candidates. (a) scenario.tool_output_max_tokens 208 -> 256; the measured maximum is 231 tokens at oracle_sft-fulfillment-h20-0112 (a clean H20 order query, which must list every line with its capability token). The retired 208 was measured against the SMALLER tokenless payloads. (b) scenario.tool_output_max_chars UNCHANGED at 512; the measured maximum is 474 chars. (c) acceptance.max_view_tokens and sft.max_length 4096 -> 5120 TOGETHER; the measured maximum rendered terminal view is 4,960 tokens at distill-fulfillment-h20-0034 (same-decision rate-limit repeat under p8_combined, the longest prompt). 4096 would structurally EXCLUDE otherwise valid H20 trajectories that fit under the retired tokenless treatment: an operational/training-treatment change, not a statistical threshold change. (d) NOT changed: call budgets, decision budgets, decoding.max_tokens_per_decision 384, eval_decoding.max_tokens_per_decision 1024, GRPO completion caps, and the 8,192-token serving context -- recovery still costs one call and one decision, and tool observations consume INPUT context, not assistant completion tokens. (e) A5000 SFT arithmetic rechecked at 5,120 tokens: one bf16 logit tensor over the 248,320-token vocabulary grows from 2.034 GB (1.895 GiB) to 2.543 GB (2.368 GiB), so train batch 2 peaks at 9.423 + 2 x 2.368 = 14.16 GiB of the 23.5 GiB card (was 13.21 GiB) and eval batch 1 at 11.79 GiB; the Hugging Face default eval batch 8 would need 28.37 GiB and still does not fit, which is why eval_bsz stays 1. tests/test_size_ceilings.py binds every cap to the committed census and fails if one drops below what was measured."
       },
       "affected_modules": [
         "scripts/token_census.py (new)",
@@ -122,7 +122,7 @@
         ],
         "decisive_field": "rendered_prefix_token_ids_by_decision. Observation digests catch a receipt versus an event_id but are blind to a dropped assistant tool-call object or a missing tool name, which is exactly what the real A5000 trace carried.",
         "coverage": "all 12 family/horizon cells, clean plus every eligible fault class plus the ambiguous malformed mutation",
-        "cases": "SET_BY_CENSUS",
+        "cases": "59 cells: 12 family/horizon cells x (clean + every eligible fault class) + the ambiguous malformed mutation in the four fulfillment cells, plus four auxiliary tests (surface non-vacuity, the invalidation rule, the exported canonical runtime inputs, and the self-describing trace)",
         "teeth": "Verified by mutation: flattening the assistant turn back to {role: assistant, content} and dropping the tool name fails the first cell while every observation digest still matches."
       },
       "state_of_the_study": {

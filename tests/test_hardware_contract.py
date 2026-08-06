@@ -930,7 +930,8 @@ def test_the_sft_contract_is_the_registered_one():
     assert kwargs["per_device_eval_batch_size"] == 1
     assert kwargs["eval_accumulation_steps"] == 1
     assert kwargs["prediction_loss_only"] is True
-    assert kwargs["max_length"] == 4096
+    # raised with acceptance.max_view_tokens by the exhaustive token census
+    assert kwargs["max_length"] == 5120
     assert kwargs["gradient_checkpointing"] is True
     assert kwargs["packing"] is False
     assert kwargs["bf16"] is True

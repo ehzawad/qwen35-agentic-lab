@@ -821,3 +821,50 @@ marker absent.
 (`tests/test_environment_parity.py`, all 12 family/horizon cells × clean + every
 eligible fault class + the ambiguous malformed mutation) passes and the
 tokenizer size census below has been recorded.
+
+### Size census and the caps it moved
+
+`scenario.tool_output_max_tokens` was **208 — measured against the smaller
+tokenless payloads** (no recovery token, no remediation text, no receipt line),
+so it was stale the moment the contract was unified. Re-measured **exhaustively**
+by `scripts/token_census.py` with the Qwen3.5-4B tokenizer (`transformers`
+5.14.1, `tokenizer.json` sha256 `5f9e4d49…cb42`, `chat_template.jinja` sha256
+`a4aee8af…8f715`) over the four committed train/dev splits (`distill`,
+`oracle_sft`, `grpo_train`, `dev`), all twelve family/horizon cells, the clean
+case, every eligible fault class, the same-decision rate-limit repeat and the
+ambiguous malformed mutation, crossed with **all eight** preregistered prompt
+candidates:
+
+| stratum | measured | n |
+|---|---|---|
+| model-visible tool result | **231 tokens**, 474 chars (`oracle_sft-fulfillment-h20-0112`, clean H20 order query — it must list every line with its capability token) | 742,500 observations |
+| rendered terminal view | **4,960 tokens** (`distill-fulfillment-h20-0034`, same-decision rate-limit repeat under `p8_combined`, the longest prompt) | 624,800 views |
+| episodes | | 78,100 |
+
+Artifact `results/agentic/token_census.json`, sha256
+`98379c42540a30d7c6c29fea53193a169714351f184f9c58b516484dc5896fa8`, carrying the
+per-stratum maxima and the offending task ids.
+
+| cap | was | now | why |
+|---|---|---|---|
+| `scenario.tool_output_max_tokens` | 208 | **256** | 231 measured; the registered definition says "model-visible tool result", so excluding the receipt would be misleading |
+| `scenario.tool_output_max_chars` | 512 | **512** (unchanged) | 474 measured |
+| `acceptance.max_view_tokens` | 4096 | **5120** | 4,960 measured; 4096 would structurally exclude otherwise valid H20 trajectories that fit under the retired tokenless treatment |
+| `sft.max_length` | 4096 | **5120** | moves with the view budget — a view the builder accepts and the trainer truncates is a silently different training signal |
+
+**Not changed by this census:** call budgets, decision budgets,
+`decoding.max_tokens_per_decision` (384), `eval_decoding.max_tokens_per_decision`
+(1024), the GRPO completion caps, and the **8,192-token serving context**.
+Recovery still costs one call and one decision, and tool observations consume
+*input* context, not assistant completion tokens.
+
+**A5000 SFT arithmetic rechecked at 5,120 tokens.** One bf16 logit tensor over
+the 248,320-token vocabulary grows from 2.034 GB (1.895 GiB) at 4,096 to 2.543 GB
+(2.368 GiB) at 5,120, so train batch 2 peaks at 9.423 + 2 × 2.368 = **14.16 GiB**
+of the 23.5 GiB card (was 13.21 GiB) and eval batch 1 at 11.79 GiB. The Hugging
+Face default eval batch 8 would need 28.37 GiB and still does not fit, which is
+why `eval_bsz` stays 1 with `prediction_loss_only`.
+
+`tests/test_size_ceilings.py` binds every cap to the committed census — including
+its environment-contract digest, so a census taken under a different environment
+is rejected — and fails if a cap ever drops below what was measured.

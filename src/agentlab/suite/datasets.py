@@ -19,9 +19,10 @@ earlier assistant turns and ALL tool outputs, including the injected error --
 is prompt context that TRL's completion-only loss never trains on. The action
 that caused an unscheduled tool error is never a supervised target.
 
-Views that do not fit `acceptance.max_view_tokens` (4096) are REJECTED, never
-truncated: a silently truncated completion is exactly the termination-free
-supervision this pipeline exists to avoid.
+Views that do not fit `acceptance.max_view_tokens` (5,120, set by the exhaustive
+token census in results/agentic/token_census.json) are REJECTED, never truncated:
+a silently truncated completion is exactly the termination-free supervision this
+pipeline exists to avoid.
 """
 
 from __future__ import annotations
@@ -237,7 +238,8 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
             continue
 
         # The terminal view has the longest prompt; if IT does not fit, the
-        # whole trajectory is rejected (universal filter: fit 4096 or reject).
+        # whole trajectory is rejected (universal filter: fit the registered
+        # view budget or reject -- never truncate).
         candidate_rows, over = [], 0
         for item in plan:
             i = item["index"]

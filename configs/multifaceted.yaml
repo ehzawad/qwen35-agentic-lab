@@ -150,15 +150,32 @@ scenario:
   # second source of truth; the earlier H+2/H+4 values here also contradicted
   # the frozen protocol document.
   #
-  # Observation-size ceiling for one model-visible tool result. The council's
-  # training-path section proposed "at most 64 tokens"; that was written for the
-  # two stateless families and is contradicted by the binding env-architect
-  # designs in the same report. MEASURED worst cases over the committed
-  # generators with the Qwen3.5-4B tokenizer: lookup_chain 42, typed_relay 79,
-  # fulfillment 188 (the H20 order query must list every line with its
-  # capability token). The values below are the measured maxima rounded up and
-  # act as a regression guard on the generators, not as a target.
-  tool_output_max_tokens: 208
+  # Observation-size ceiling for ONE MODEL-VISIBLE tool result -- the exact bytes
+  # a tool message carries, which under the unified fault contract means the
+  # canonical envelope PLUS the receipt line, and for a faulted call the
+  # recovery_token and the remediation block as well.
+  #
+  # The previous value, 208, was measured against the SMALLER tokenless payloads
+  # (no token, no remediation text, no receipt), so it was stale the moment the
+  # contract was unified and would have rejected legitimate H20 fulfillment
+  # observations. Re-measured EXHAUSTIVELY by scripts/token_census.py over all
+  # four committed train/dev splits (distill, oracle_sft, grpo_train, dev), all
+  # twelve family/horizon cells, the clean case, every eligible fault class, the
+  # same-decision rate-limit repeat and the ambiguous malformed mutation:
+  # 78,100 episodes, 742,500 model-visible observations.
+  #
+  #   MEASURED MAXIMUM  231 tokens / 474 chars
+  #                     (oracle_sft-fulfillment-h20-0112, clean H20 order query,
+  #                      which must list every line with its capability token)
+  #   artifact          results/agentic/token_census.json
+  #   sha256            98379c42540a30d7c6c29fea53193a169714351f184f9c58b516484dc5896fa8
+  #
+  # Both values are the measured maxima with headroom and act as a regression
+  # guard on the generators, not as a target. `tool_output_max_chars` is
+  # UNCHANGED: the exhaustive census confirms 474 < 512.
+  # tests/test_size_ceilings.py fails if a cap ever drops below what the
+  # committed census measured.
+  tool_output_max_tokens: 256
   tool_output_max_chars: 512      # the CPU-cheap proxy the acceptance filter uses
 
 # ---------------------------------------------------------------------------
@@ -226,7 +243,24 @@ totals:
 # ---------------------------------------------------------------------------
 acceptance:
   per_variant_accepted: 1           # keep at most one trajectory per variant
-  max_view_tokens: 4096             # reject-not-truncate at SFT view level
+  # Reject-not-truncate at the SFT view level. Raised from 4096 to 5120 by the
+  # exhaustive census: the registered wire format (receipts on every observation,
+  # tokens and remediation text on faulted ones) grew the terminal H20 view, and
+  # 4096 would have structurally EXCLUDED otherwise valid H20 trajectories that
+  # fit under the retired tokenless treatment. That is an operational/training
+  # treatment change, recorded in the preregistration amendment, not a
+  # statistical threshold change.
+  #
+  #   MEASURED MAXIMUM  4,960 tokens
+  #                     (distill-fulfillment-h20-0034, rate-limit same-decision
+  #                      repeat, rendered under p8_combined -- the longest prompt)
+  #   measured over     624,800 rendered terminal views: every episode above
+  #                     crossed with all eight preregistered prompt candidates
+  #   H14 maximum       see results/agentic/token_census.json per_stratum
+  #
+  # It must move together with sft.max_length below: a view the builder accepts
+  # and the trainer truncates is a silently different training signal.
+  max_view_tokens: 5120
   numeric_tolerance: 1.0e-4
   call_upper_slack:                 # calls must satisfy H <= calls <= H + slack
     lookup_chain: 1
@@ -266,22 +300,32 @@ sft:
   lr: 5.0e-5
   scheduler: cosine
   warmup_ratio: 0.03
-  max_length: 4096
+  max_length: 5120                  # moves with acceptance.max_view_tokens
   bsz: 2
   accum: 8
   packing: false
   gradient_checkpointing: true
-  # The A5000 training arithmetic. Static training memory is 8.455 GiB (bf16 base
-  # policy) + 0.968 GiB (LoRA fp32 params, grads, two Adam moments) = 9.423 GiB.
-  # One 4,096-token sequence of logits over this 248,320-token vocabulary is
-  # ~2.03 GiB, so train batch 2 peaks around 13.5 GiB and gradient checkpointing
-  # keeps the working peak near 14-15 GiB of 23.3 GiB.
+  # The A5000 training arithmetic, RECHECKED for 5,120 tokens (the census raised
+  # the view budget from 4,096). Static training memory is unchanged: 8.455 GiB
+  # (bf16 base policy) + 0.968 GiB (LoRA fp32 params, grads, two Adam moments)
+  # = 9.423 GiB.
   #
-  # eval_bsz is load-bearing: Hugging Face defaults per_device_eval_batch_size to
-  # 8, which is 8 x 2.03 = 16.24 GiB of logits on top of the 9.423 GiB static
-  # footprint = 25.66 GiB. That CANNOT fit on this card, and it would fail during
-  # the first evaluation rather than at start-up. At batch 1 the peak is ~11.45
-  # GiB. prediction_loss_only stops the trainer from gathering logits at all.
+  # One sequence of bf16 logits over this 248,320-token vocabulary:
+  #     4,096 tokens -> 2.034 GB (1.895 GiB)
+  #     5,120 tokens -> 2.543 GB (2.368 GiB)
+  # so train batch 2 peaks at 9.423 + 2 x 2.368 = 14.16 GiB, up from 13.21 GiB,
+  # and gradient checkpointing keeps the working peak near 15-16 GiB of the
+  # 23.3 GiB card. The longer sequence is affordable; it costs ~1 GiB of headroom.
+  #
+  # eval_bsz stays load-bearing and stays 1: Hugging Face defaults
+  # per_device_eval_batch_size to 8, which at 5,120 tokens is 8 x 2.368 = 18.9
+  # GiB of logits on top of the 9.423 GiB static footprint = 28.37 GiB (it was
+  # 25.66 GiB at 4,096). That CANNOT fit on this card and would fail during the
+  # first evaluation rather than at start-up. At batch 1 the peak is 11.79 GiB.
+  # prediction_loss_only stops the trainer from gathering logits at all.
+  #
+  # The SERVING context is untouched at 8,192: a 4,960-token terminal view plus
+  # one 1,024-token decision is well inside it, so no engine setting moves.
   eval_bsz: 1
   eval_accumulation_steps: 1
   prediction_loss_only: true

@@ -75,7 +75,12 @@ class TestStageConfigs:
         if not torch.cuda.is_available():
             kwargs["use_cpu"] = True
         cfg = SFTConfig(**kwargs)
-        assert cfg.max_length == 4096
+        # 5120, not 4096: the exhaustive token census measured a 4,960-token
+        # terminal H20 view under the unified wire format (receipts on every
+        # observation, tokens and remediation text on faulted ones), so 4096
+        # would structurally exclude valid trajectories. See
+        # tests/test_size_ceilings.py, which binds this to the committed census.
+        assert cfg.max_length == 5120
         assert cfg.per_device_train_batch_size == 2
         assert cfg.gradient_accumulation_steps == 8
         # the default of 8 would need 16.24 GiB of logits on a 23.5 GiB card
