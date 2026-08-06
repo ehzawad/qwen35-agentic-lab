@@ -70,6 +70,16 @@ oldest commit that ever added a preregistration file, which no later edit could
 change). Every gate threshold was committed before held-out results existed, and
 a harness BUG vetoes every model-level gate, floor and claim.
 
+That ordering is only worth something if it is checkable, so
+[`scripts/verify_heldout_release.py`](scripts/verify_heldout_release.py) checks it
+before a card is pinned: `P < L < R <= E` by **git ancestry**, never by
+timestamps, plus the reveal rederiving from the lock commit it names, the held-out
+manifest and checksums committed in that one reveal commit, and every released
+byte hashing to its committed value. It reads no mtime, imports no GPU stack, and
+refuses instead of warning. What it proves, what it refuses, and the exact
+one-line call the `eval` stage still needs are in
+[docs/HELDOUT_RELEASE_GATE.md](docs/HELDOUT_RELEASE_GATE.md).
+
 The `eval` stage runs the registered manifest census, not a hand-written list:
 7,800 mandatory episodes — BP/TP over core clean+faulted (4,800), MT (1,200), H8
 augmentation (400), the absent-information control (1,200) and the counterfactual
