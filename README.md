@@ -6,28 +6,66 @@ machine-checkable: multi-tool composition, dependency depth up to 8 required
 calls, stateful constraints with irreversible commitments, and recovery from
 injected tool failures — all scored by exact verifiers, never by an LLM judge.
 
-**Status: CPU harness complete; preregistration NOT yet finalized; zero GPU
-hours spent.** No capability claim is made here, and none can be: no model has
-been trained or evaluated against this suite. What is verified today is the
-harness — deterministic generation, the strict verifier, the analyzer and its
-vetoes, and 645 passing tests. The training legs (distilled SFT, conditional
-GRPO) are candidates, not predetermined winners: if training does not beat the
-locked elicitation control without harming clean performance, the shipped
+## Status — 2026-08-06
+
+**The preregistration is FINALIZED and pushed. The prompt winner is locked. The
+checkpoint is not, so `L` does not exist. Rejection sampling is running on the
+card right now. NO CAPABILITY RESULT EXISTS YET, and none can until the
+held-out set is derived, generated and evaluated — which cannot happen before
+`L`.**
+
+| fact | state | receipt |
+|---|---|---|
+| `P` — preregistration finalized | **commit `5844a97d2096fb55186e8559f4a4481dc3b75e9d`**, pushed; anchor `finalization-marker`, no drift | `configs/preregistration_final.json` |
+| prompt winner | **locked under `P`**: `prompts/agentic/p2_plan_state_act.txt`, `sha256 5facfd02997d…`, frozen at commit `4c840e3` | `results/agentic/locks.json` (on disk, deliberately **not** committed yet — `L` must be the dedicated commit adding the *complete* lock) |
+| `L` — checkpoint lock | **does not exist, and was correctly refused**: `status` reports `REFUSED: the lock is INCOMPLETE, so there is nothing for the held-out seed to be a function of` | `python scripts/agentic_locks.py status` |
+| `R` — seed reveal | does not exist; the six held-out generation seeds are a function of `L`, so the held-out set **cannot be generated yet** | `heldout-master-v2` derivation, `configs/agentic_preregister.json` |
+| current stage | **`distill` (rejection sampling) IN PROGRESS** on the pinned A5000. Snapshot at `2026-08-06T14:26:33Z`: 10 of 60 planned shards sealed and receipt-validated, 2,800 verified rollouts. Both counts move while the stage runs | `data/multiface/raw/shard-*.receipt.json` |
+| GPU hours | **non-zero**: **5.982 h** charged at that same instant, and still rising. The ledger is the authority, not this table | `results/agentic/gpu_ledger.jsonl`, `gpu_sessions.jsonl` |
+| CPU test suite | **985 passed, 1 failed, 6 skipped** (402.9 s). The one failure is a test-isolation defect, not a harness regression — see below | `PYTHONPATH=src .venv/bin/python -m pytest -q` |
+| dev preflight | **five probes green, 87 checks, all pass** | `results/agentic/preflight/probe{1..5}.json` |
+| capability claim | **NONE. No trained checkpoint exists, no held-out bytes exist, no gate has been evaluated.** | — |
+
+The single failing test is `tests/test_chain.py::test_lock_prompt_refuses_before_P_exists`.
+It asserts *which* refusal `lock-prompt` emits when no preregistration commit
+exists, but it probes the live repository instead of an isolated temporary git
+history — so now that `P` is a real commit the message it expects is
+unreachable, and the observed refusal is the S16 non-candidate check instead.
+`lock-prompt` still refuses; the assertion about which refusal fires is what
+broke. **Current `main` is therefore not green from a fresh clone**, and that
+stays true until the fixture is isolated. The fix and every other repair a live
+producer forbade are in [docs/DEFERRED_REPAIRS.md](docs/DEFERRED_REPAIRS.md).
+
+One of those deferrals is load-bearing: **the prompt-tournament receipt
+`configs/frozen_prompt.json` is malformed and must be corrected before `L`.**
+Its final ranking and `round2_candidates` name `p8` — a candidate with 300
+observations that never ran round two — while the actual round-two finalist was
+`p6` at 900. The **winner is unaffected** (`p2` leads at 0.9367 over 900 against
+`p6` at 0.9178), no GPU work needs rerunning, and the file cannot be touched
+while distill re-reads it between shards.
+
+The earlier S18 defect — "test-set commitment, not test-blindness", because the
+eval seeds were public in `configs/suite_v1.toml` and the held-out answers were
+regenerable from `P` — **is closed**, by the dated amendment of 2026-08-05 that
+moved the derivation onto `L`, split generation into two phases with two
+commitments, renamed the veto **S18 POST-LOCK HELDOUT**, and quarantined the
+stale old-seed bundles with a receipt. That amendment landed before any GPU
+hour, any held-out result and any optimizer step; `P` was finalized after it.
+
+What is verified today is still the harness, not a capability: deterministic
+generation, the strict verifier, the analyzer and its vetoes, the paired engine
+contract, the preflight probes above, and the test suite. The training legs
+(distilled SFT; GRPO is **not run** on this card) are candidates, not
+predetermined winners: if training does not beat the locked elicitation control
+by the registered margin without harming clean performance, the shipped
 pipeline is the prompted base model.
 
-One known defect must close before `agentic_locks.py finalize-prereg` may run,
-and therefore before any GPU stage:
-
-1. **S18 delivers test-set commitment, not test-blindness.** Held-out specs and
-   answers are absent from the repository and their hashes are pinned, so the
-   set cannot be swapped. But the generator is committed and the eval seed is
-   public, so the 1,200 held-out answers are regenerable from this commit. The
-   registered target is real blindness: derive the held-out generation seed from
-   the locks commit so the eval set cannot exist until the prompt and checkpoint
-   are locked. Until that lands, S18's guarantee is commitment only.
-
-Until the finalization marker exists the preregistration is a **draft**, and
-`reveal` says so out loud and refuses under `--require-finalization`.
+**How the two saturated secondary endpoints will be reported is fixed in
+advance**, in [docs/INTERPRETATION.md](docs/INTERPRETATION.md): the required
+pre-results wording, the per-gate reporting template, and the correction to my
+earlier framing — the analyzer produces `FAIL` (not "INCONCLUSIVE by
+saturation") when a computable lower bound does not clear `+0.05`, and a
+saturated *development* endpoint does not establish that training has no effect.
 
 ## The one supported entry point
 
@@ -141,9 +179,16 @@ is reported, not hidden.
 
 ## Results
 
-Pipeline under evaluation — machine verdict pending. This section will carry
-only machine-checked numbers produced by the preregistered analyzer, with the
-paired base-model arm and the elicitation control on every row.
+**None yet.** No trained checkpoint exists, no held-out bytes exist, and no gate
+has been evaluated — the held-out seeds cannot be derived until `L`, which the
+lock refuses while the checkpoint is missing. This section will carry only
+machine-checked numbers produced by the preregistered analyzer, with the paired
+base-model arm and the elicitation control on every row.
+
+When it is filled, it is filled under
+[docs/INTERPRETATION.md](docs/INTERPRETATION.md): the required wording before the
+held-out secondary results, the per-gate template, the machine statuses reported
+as the analyzer emits them, and the four phrases that may not appear.
 
 ## Hardware and stack
 
