@@ -38,6 +38,9 @@ before both locks exist, and `lock-checkpoint` refuses to overwrite a lock that 
 reveal has already been issued against -- locking a different checkpoint after
 seeing held-out data is the exact failure S18 exists to catch.
 
+A checkpoint lock pins the checkpoint's BYTE DIGEST and the trainer's receipt, not
+a mutable path: see `cmd_lock_checkpoint` below.
+
     lock-prompt        --file configs/frozen_prompt.json
     lock-checkpoint    --path out/multiface/rssft-lora --stage rs_sft
     grpo-disposition   [--verify]   the registered stage-disposition receipt
@@ -374,18 +377,146 @@ def cmd_lock_prompt(args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------
+# the checkpoint lock: BYTES, and the chain that produced them
+# --------------------------------------------------------------------------
+#
+# The lock used to record {path, stage, locked_at, commit}. A path is mutable: the
+# adapter behind it can be retrained, overwritten or swapped after the held-out
+# seed is revealed, and the lock would still "hold". Worse, nothing connected the
+# locked adapter to the trajectories, the card or the run that produced it, so
+# S18 blindness and S19 hardware integrity both stopped at this file.
+#
+# A lock now pins the checkpoint's CONTENT DIGEST and the digest of the trainer's
+# receipt, and it refuses to exist without them. `verify_checkpoint_lock` re-hashes
+# the bytes, so a post-lock swap is detected rather than assumed away.
+
+CHECKPOINT_LOCK_FIELDS = ("path", "stage", "locked_at", "commit",
+                          "checkpoint_sha256", "training_manifest",
+                          "training_manifest_sha256", "gpu_uuid",
+                          "environment_contract_sha256", "config_hash",
+                          "views_sha256", "source_provenance")
+
+
+def _sft_module():
+    """The trainer owns the training-manifest grammar; this reads it, never a copy."""
+    sys.path.insert(0, str(ROOT / "src"))
+    from agentlab import sft
+
+    return sft
+
+
 def cmd_lock_checkpoint(args) -> int:
     _refuse_if_revealed("checkpoint")
     p = ROOT / args.path
     if not p.exists():
         raise SystemExit(f"REFUSED: {args.path} does not exist")
+    sft = _sft_module()
+    cfg = _load_cfg()
+    override = getattr(args, "training_manifest", None)
+    manifest_path = (ROOT / override) if override else sft.training_manifest_path(p)
+    # The whole chain, or no lock: the receipt hashes to itself, was written under
+    # this environment contract, the checkpoint bytes still hash to the digest it
+    # recorded, its card is this run's card and the ledger's card, and the corpus
+    # it names was produced by an attested GPU session.
+    rec = sft.require_training_manifest(manifest_path, checkpoint_path=p, cfg=cfg,
+                                        stage=args.stage)
+    inputs = rec["inputs"]
     locks = read_locks()
-    locks["checkpoint"] = {"path": args.path, "stage": args.stage,
-                           "locked_at": now(),
-                           "commit": _git("rev-parse", "HEAD")}
+    locks["checkpoint"] = {
+        "path": args.path,
+        "stage": args.stage,
+        "locked_at": now(),
+        "commit": _git("rev-parse", "HEAD"),
+        # WHAT is locked: the bytes, not the name of the directory holding them.
+        "checkpoint_sha256": rec["checkpoint"]["checkpoint_sha256"],
+        "checkpoint_files": rec["checkpoint"]["files"],
+        # WHO produced them, and from what.
+        "training_manifest": _rel(manifest_path),
+        "training_manifest_sha256": rec[_hash_field()],
+        "trained_at_utc": rec["finished_at_utc"],
+        "optimizer_steps": rec["optimizer_steps"],
+        "gpu_uuid": rec["hardware"]["gpu_uuid"],
+        "gpu_name": rec["hardware"]["gpu_name"],
+        "runtime_manifest_sha256": rec["runtime_manifest_sha256"],
+        "session_id": rec["session_id"],
+        "git_sha_trained": rec["git_sha"],
+        "config_hash": rec["config_hash"],
+        "environment_contract_sha256": rec["environment_contract_sha256"],
+        "views_sha256": inputs["views_sha256"],
+        "views_rows": inputs["views_rows"],
+        "source_provenance": inputs["source_provenance"],
+        "source_runtime_manifests": inputs["source_runtime_manifests"],
+    }
     write_locks(locks)
     print(f"locked checkpoint {args.path} (selected stage: {args.stage})")
+    print(f"  checkpoint sha256   {locks['checkpoint']['checkpoint_sha256']}")
+    print(f"  training manifest   {locks['checkpoint']['training_manifest_sha256']}"
+          f"  ({locks['checkpoint']['training_manifest']})")
+    print(f"  trained on          {locks['checkpoint']['gpu_name']} "
+          f"{locks['checkpoint']['gpu_uuid']}")
+    print(f"  corpus              {inputs['views_rows']} rows, "
+          f"{inputs['source_trajectories']} trajectories, "
+          f"views {inputs['views_sha256'][:12]}")
     return 0
+
+
+def _rel(path: pathlib.Path) -> str:
+    p = pathlib.Path(path)
+    try:
+        return p.relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(p)
+
+
+def _hash_field() -> str:
+    sys.path.insert(0, str(ROOT / "src"))
+    from agentlab.suite.configio import MANIFEST_HASH_FIELD
+
+    return MANIFEST_HASH_FIELD
+
+
+def verify_checkpoint_lock(locks: dict | None = None, *, cfg: dict | None = None,
+                           verify_bytes: bool = True) -> dict:
+    """Re-check a recorded checkpoint lock. Used before any held-out verdict.
+
+    A path-only lock -- the shape this script used to write -- is REFUSED here
+    rather than reported, because a verdict that cites "the locked checkpoint"
+    while the lock names only a mutable directory cites nothing.
+    """
+    locks = read_locks() if locks is None else locks
+    rec = (locks or {}).get("checkpoint")
+    if not rec:
+        raise SystemExit("REFUSED: no checkpoint is locked; that ordering IS S18.")
+    missing = [k for k in CHECKPOINT_LOCK_FIELDS
+               if rec.get(k) is None or rec.get(k) == ""]
+    if missing:
+        raise SystemExit(
+            f"REFUSED: the checkpoint lock is missing {', '.join(missing)}. A lock "
+            f"that records only a PATH pins nothing: the bytes behind that path can "
+            f"be retrained or swapped after the held-out seed is revealed, and "
+            f"nothing ties them to the trajectories, the card or the run that "
+            f"produced them. Re-lock with `agentic_locks.py lock-checkpoint`, which "
+            f"requires the trainer's receipt.")
+    sft = _sft_module()
+    cfg = cfg or _load_cfg()
+    if verify_bytes:
+        sft.require_training_manifest(ROOT / rec["training_manifest"],
+                                      checkpoint_path=ROOT / rec["path"],
+                                      cfg=cfg, stage=rec["stage"])
+        manifest = sft.read_training_manifest(ROOT / rec["training_manifest"])
+        if manifest[_hash_field()] != rec["training_manifest_sha256"]:
+            raise SystemExit(
+                f"REFUSED: the training manifest now hashes "
+                f"{manifest[_hash_field()]} and the lock recorded "
+                f"{rec['training_manifest_sha256']}; the receipt changed after the "
+                f"lock was taken.")
+        if manifest["checkpoint"]["checkpoint_sha256"] != rec["checkpoint_sha256"]:
+            raise SystemExit(
+                f"REFUSED: the locked checkpoint digest {rec['checkpoint_sha256']} "
+                f"is not the digest the receipt records "
+                f"({manifest['checkpoint']['checkpoint_sha256']}).")
+    return rec
 
 
 def cmd_reveal(args) -> int:
@@ -454,6 +585,12 @@ def main() -> int:
     lc = sub.add_parser("lock-checkpoint")
     lc.add_argument("--path", required=True)
     lc.add_argument("--stage", default="rs_sft", choices=("rs_sft", "grpo"))
+    lc.add_argument("--training-manifest", default=None,
+                    help="the trainer's receipt (default: "
+                         "<path>.agentlab_training_manifest.json). A checkpoint "
+                         "with no receipt cannot be locked: the lock pins the "
+                         "checkpoint's BYTE DIGEST and the chain that produced "
+                         "them, never a mutable path.")
     lc.set_defaults(fn=cmd_lock_checkpoint)
     fp = sub.add_parser("finalize-prereg")
     fp.add_argument("--force", action="store_true",

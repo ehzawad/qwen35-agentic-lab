@@ -65,7 +65,7 @@ from agentlab.suite import runtime as rt_mod
 from agentlab.suite.configio import (ROOT, ledger_append, ledger_guard, load_config,
                                      now_utc)
 from agentlab.suite.generate import load_bundles
-from agentlab.suite.schema import canon
+from agentlab.suite.schema import canon, digest_text
 
 MULTIFACE_DIR = ROOT / "data" / "multiface"
 RAW_DIR = MULTIFACE_DIR / "raw"
@@ -116,6 +116,146 @@ def load_frozen_prompt(cfg: dict | None = None) -> str:
 
 
 # --------------------------------------------------------------------------
+# the provenance chain: rollout -> accepted -> SFT view -> trainer -> lock
+# --------------------------------------------------------------------------
+#
+# Every row of every claim-bearing training artifact answers ONE question with a
+# single grammar: *what produced these bytes?* The grammar is the frozen S19
+# fingerprint (configio.FINGERPRINT_FIELDS) plus four fields:
+#
+#   gpu_execution            True only when a process that OWNED the card wrote
+#                            this block. Never inferred, never defaulted.
+#   producer                 who wrote it (a stage name, or the scripted policy)
+#   runtime_manifest_sha256  the producer session's attestation digest
+#   session_id               which producer session
+#
+# The two legal shapes are exhaustive, and `None` is not one of them:
+#
+#   a GPU producer   gpu_execution=True, a COMPLETE fingerprint (no nulls), and a
+#                    runtime manifest digest + session id to point at.
+#   a CPU producer   gpu_execution=False, an explicit `producer`, and the four
+#                    card-identity fields EXPLICITLY null. A CPU transformation
+#                    never inherits a card from an old hardware lock, because
+#                    "there is a lock on disk" is not evidence that this row was
+#                    computed on that card (council: stages with no visible
+#                    device must not appear to have run on a GPU).
+#
+# `provenance: None` -- what rejection sampling used to write on the scripted
+# path, and what the SFT views dropped entirely -- is refused at the WRITE, so an
+# unattributable row never reaches a corpus a trainer could consume.
+
+GPU_EXECUTION = "gpu_execution"
+
+# The card-identity fields a CPU attestation must leave null.
+_CARD_FIELDS = ("gpu_name", "gpu_uuid", "cuda_visible_bytes", "driver_version")
+
+
+def cpu_provenance(producer: str, cfg: dict | None = None,
+                   run_id: str | None = None) -> dict:
+    """An EXPLICIT non-GPU attestation: same field set, card identity nulled.
+
+    The scripted CPU engines the tests inject, and every CPU-only transformation,
+    use this instead of `None`. It keeps the frozen field set (so one reader
+    handles every block) while stating out loud that no card produced the row.
+    """
+    from agentlab.suite.configio import fingerprint
+
+    fp = fingerprint(run_id, cfg)
+    for key in _CARD_FIELDS:
+        fp[key] = None
+    fp[GPU_EXECUTION] = False
+    fp["producer"] = str(producer)
+    fp["runtime_manifest_sha256"] = None
+    fp["session_id"] = None
+    return fp
+
+
+def provenance_gaps(block) -> list[str]:
+    """Why this provenance block is not evidence. Empty means the chain holds."""
+    from agentlab.suite.configio import fingerprint_gaps
+
+    if not isinstance(block, dict) or not block:
+        return ["provenance_absent"]
+    if GPU_EXECUTION not in block:
+        return [GPU_EXECUTION]
+    if block[GPU_EXECUTION]:
+        gaps = list(fingerprint_gaps(block))
+        gaps += [k for k in ("runtime_manifest_sha256", "session_id")
+                 if not block.get(k)]
+        return gaps
+    gaps = [] if block.get("producer") else ["producer"]
+    gaps += [f"{k}_on_a_cpu_attestation" for k in _CARD_FIELDS if block.get(k)]
+    return gaps
+
+
+def require_row_provenance(block, what: str = "a claim-bearing row") -> dict:
+    """Refuse to WRITE a row whose producer is unknown or half-recorded."""
+    gaps = provenance_gaps(block)
+    if gaps:
+        raise SystemExit(
+            f"REFUSED: {what} would carry provenance that is not evidence "
+            f"({', '.join(gaps)}).\n"
+            f"  A GPU producer must write a COMPLETE S19 fingerprint plus the "
+            f"digest and session id of its runtime manifest; a CPU producer must "
+            f"say `{GPU_EXECUTION}: false` and name itself, with the card "
+            f"identity explicitly null. `provenance: null` is neither: it is an "
+            f"artifact nobody can attribute, and it may not enter a corpus a "
+            f"trainer consumes or a checkpoint lock pins.")
+    return block
+
+
+def provenance_identity(block: dict) -> dict:
+    """What must be IDENTICAL across one corpus (session and clock excluded).
+
+    Two rejection-sampling sessions of one run on one card are the resumable
+    design and must pool; two cards, two engine fingerprints or two effective
+    thinking modes inside one corpus are the S19 failure itself.
+    """
+    from agentlab.suite.configio import fingerprint_identity
+
+    block = block or {}
+    ident = {GPU_EXECUTION: bool(block.get(GPU_EXECUTION))}
+    if ident[GPU_EXECUTION]:
+        ident.update(fingerprint_identity(block))
+    else:
+        ident.update({"producer": block.get("producer"),
+                      "run_id": block.get("run_id"),
+                      "config_hash": block.get("config_hash"),
+                      "engine_fingerprint": block.get("engine_fingerprint")})
+    return ident
+
+
+def distinct_producers(rows: list) -> list[dict]:
+    """The distinct producer identities across rows, in first-seen order."""
+    seen, out = set(), []
+    for row in rows:
+        ident = provenance_identity((row or {}).get("provenance"))
+        key = canon(ident)
+        if key not in seen:
+            seen.add(key)
+            out.append(ident)
+    return out
+
+
+def require_one_producer(rows: list, what: str) -> dict:
+    """Refuse a corpus assembled from more than one producer identity."""
+    idents = distinct_producers(rows)
+    if len(idents) > 1:
+        raise SystemExit(
+            f"FATAL: {what} mixes {len(idents)} producer identities:\n"
+            + "\n".join(f"  {canon(i)}" for i in idents)
+            + "\n  One claim may not span two cards, two engine fingerprints or "
+              "two effective thinking modes (S19). A second producer is a NEW "
+              "run with its own run_id, locks, seeds, ledger and declaration.")
+    return idents[0] if idents else {}
+
+
+def row_digest(rec: dict) -> str:
+    """Content digest of one artifact row: what the next layer points back at."""
+    return digest_text(canon(rec))
+
+
+# --------------------------------------------------------------------------
 # rollout engine (generation backend injected; CPU tests script it)
 # --------------------------------------------------------------------------
 
@@ -144,8 +284,20 @@ class RolloutEngine:
                        else contract_mod.load_or_create_secret())
         # The S19 fingerprint of the engine that produced every row this engine
         # emits: which card, which driver, which engine settings, which effective
-        # thinking mode. None on the scripted CPU engines the tests inject.
-        self.provenance = provenance
+        # thinking mode. A scripted CPU engine gets an EXPLICIT non-GPU
+        # attestation rather than the `None` it used to carry: a row whose
+        # producer is unrecorded is indistinguishable from a row produced by an
+        # engine nobody attested, and the SFT corpus, the trainer manifest and
+        # the checkpoint lock all point back at this block.
+        self.provenance = require_row_provenance(
+            provenance if provenance is not None
+            else cpu_provenance("scripted-cpu-policy", cfg),
+            "every rollout this engine records")
+        # Set by `_vllm_engine` for a GPU producer: the session attestation this
+        # engine's provenance was COPIED from, so the ledger row that charges the
+        # session's minutes carries the same identity as its rollouts.
+        self.manifest_path = None
+        self.manifest = None
         self._schemas: dict = {}
         self._names: dict = {}
 
@@ -310,8 +462,9 @@ class RolloutEngine:
                 rt_mod.tool_schema_bytes(spec.family)),
             # Which card and which engine produced this row (S19). Carried on the
             # ROW, not only in a nearby ledger: a row that cannot say what
-            # produced it cannot support a same-card claim.
-            "provenance": self.provenance,
+            # produced it cannot support a same-card claim. Verified at
+            # construction, so an incomplete block cannot be serialized here.
+            "provenance": dict(self.provenance),
         }
 
 
@@ -516,6 +669,13 @@ def accept_record(rec: dict, cfg: dict | None = None, bundles: dict | None = Non
     then replay parity. The verifier is not re-implemented here.
     """
     cfg = cfg or load_config()
+    gaps = provenance_gaps(rec.get("provenance"))
+    if gaps:
+        # An accepted row must retain the EXACT producer snapshot of the rollout
+        # it came from, because the SFT view, the trainer manifest and the
+        # checkpoint lock all inherit it. A row that cannot say what produced it
+        # is dropped here rather than laundered into the corpus.
+        return False, f"missing_provenance:{gaps[0]}"
     if rec["exhausted"]:
         return False, "max_decisions_exhausted"
     if rec["truncated"]:
@@ -606,6 +766,21 @@ def _read_jsonl(path: pathlib.Path) -> list:
             if line.strip()]
 
 
+def write_attested_jsonl(path: pathlib.Path, rows: list, what: str) -> pathlib.Path:
+    """Write claim-bearing rows only after the whole batch is attributable.
+
+    The gate is at the WRITE, not in the row builder alone: an unattributable row
+    on disk is indistinguishable from one produced by an engine nobody checked,
+    and every later layer (acceptance, views, trainer manifest, checkpoint lock)
+    points back at exactly these bytes.
+    """
+    for i, row in enumerate(rows):
+        require_row_provenance(row.get("provenance"), f"{what} row {i}")
+    require_one_producer(rows, what)
+    _write_jsonl(path, rows)
+    return path
+
+
 def shard_is_current(index: int) -> bool:
     """Is this shard's file usable under THIS environment contract?
 
@@ -628,6 +803,17 @@ def shard_is_current(index: int) -> bool:
 # vLLM backend (GPU only; imported lazily)
 # --------------------------------------------------------------------------
 
+def engine_stage(args) -> str:
+    """Which producer stage this engine attests as.
+
+    Read off `args.stage` so the manifest a stage writes carries the stage's own
+    name; a caller that sets nothing gets the generic label rather than another
+    stage's, because a manifest filed under the wrong stage attests the wrong
+    thing.
+    """
+    return str(getattr(args, "stage", None) or "rollout_engine")
+
+
 def _vllm_engine(cfg: dict, args, frozen: str | None,
                  adapter: str | None = None) -> RolloutEngine:
     """Build ONE engine under the registered contract, optionally with an adapter.
@@ -649,10 +835,20 @@ def _vllm_engine(cfg: dict, args, frozen: str | None,
     from vllm import LLM, SamplingParams
 
     from agentlab import env as labenv
-    from agentlab.suite.configio import engine_contract, fingerprint
+    from agentlab.suite import configio
+    from agentlab.suite.configio import engine_contract
 
     contract = engine_contract(cfg)
-    labenv.require_registered_gpu(cfg)
+    stage = engine_stage(args)
+    run_id = getattr(args, "run_id", None)
+    # THE PRODUCER ATTESTATION. This process owns the card, so it -- not a later
+    # consumer, and not the run lock -- is the authority on what produced the
+    # tokens. `capture_runtime_manifest` runs the whole hardware veto (PCI order,
+    # registered index, registered card, exclusivity, the run's UUID binding),
+    # measures the card, records which OS process this is and what it serves, and
+    # hashes the result BEFORE any model work happens.
+    manifest_path, manifest = labenv.capture_runtime_manifest(
+        stage=stage, cfg=cfg, run_id=run_id, model=args.model, adapter=adapter)
     proc = labenv.load_processor(args.model)
     tok = labenv.get_tokenizer(proc)
     kwargs = dict(model=args.model,
@@ -692,15 +888,37 @@ def _vllm_engine(cfg: dict, args, frozen: str | None,
                 else llm.generate(prompts, sp))
         return [(o.outputs[0].text, o.outputs[0].finish_reason) for o in outs]
 
-    fp = fingerprint(getattr(args, "run_id", None), cfg, enable_thinking=thinking)
-    fp["adapter"] = adapter
-    fp["served_model"] = args.model
+    # The engine answered: countersign the attestation, then COPY it. The
+    # fingerprint every row carries is the producer's measurement, never a
+    # re-measurement by a later reader and never the registered A5000
+    # expectation standing in for one.
+    manifest = configio.mark_manifest_ready(manifest_path, run_id=run_id, cfg=cfg,
+                                            stage=stage)
+    fp = configio.fingerprint_from_manifest(manifest, cfg)
+    fp.update({GPU_EXECUTION: True,
+               "producer": stage,
+               "runtime_manifest_sha256": manifest[configio.MANIFEST_HASH_FIELD],
+               "session_id": manifest["session_id"],
+               "producer_pid": manifest["pid"],
+               "adapter": manifest["adapter"],
+               "adapter_sha256": manifest["adapter_sha256"],
+               "served_model": manifest["model"]})
+    if bool(fp["enable_thinking_effective"]) != bool(thinking):
+        raise SystemExit(
+            f"REFUSED: the attested manifest renders with enable_thinking="
+            f"{fp['enable_thinking_effective']!r} and this engine renders with "
+            f"{thinking!r}. The rendered prompt and the recorded policy must be "
+            f"the same policy.")
+    require_row_provenance(fp, f"every rollout of stage {stage}")
     # THE run secret, shared with the prompt tournament, view construction and
     # evaluation: the recovery tokens and receipts the model sees are keyed with
     # it, so two consumers with different secrets are two environments.
-    return RolloutEngine(cfg, render, generate, frozen_prompt=frozen,
-                         provenance=fp,
-                         secret=contract_mod.load_or_create_secret())
+    engine = RolloutEngine(cfg, render, generate, frozen_prompt=frozen,
+                           provenance=fp,
+                           secret=contract_mod.load_or_create_secret())
+    engine.manifest_path = manifest_path
+    engine.manifest = manifest
+    return engine
 
 
 def run_units(engine, units: list, *, run_one, is_done, budget_minutes: float,
@@ -785,6 +1003,7 @@ def cmd_run(args) -> None:
         print("[rs] all shards done")
         return
     ledger_guard("multidistill", args.budget_minutes, cfg)
+    args.stage = "multidistill"
 
     frozen = None if args.no_frozen_prompt else load_frozen_prompt(cfg)
     by_id = {b.spec.task_id: b for b in load_split(split, cfg)}
@@ -794,8 +1013,12 @@ def cmd_run(args) -> None:
     t_engine = time.time()
     engine = _vllm_engine(cfg, args, frozen)
     startup_min = (time.time() - t_engine) / 60.0
+    # The ledger row COPIES the producer session's snapshot, so the receipt that
+    # charges these minutes carries the same UUID, driver, engine fingerprint and
+    # session digest as the rollouts they produced.
     ledger_append("multidistill:engine_start", startup_min, cfg,
                   kind="engine_start", started_at=started,
+                  manifest=engine.manifest_path,
                   work={"unit": "engine", "count": 1, "shards_pending": len(pending)})
     print(f"[rs] engine up in {startup_min:.1f} min; it serves all "
           f"{len(pending)} pending shards")
@@ -807,10 +1030,12 @@ def cmd_run(args) -> None:
         bundles = [by_id[t] for t in shard["task_ids"]]
         t0 = time.time()
         records = engine.run(engine.rollouts_for(bundles, variants=variants))
-        _write_jsonl(_shard_path(shard["index"]), records)
+        write_attested_jsonl(_shard_path(shard["index"]), records,
+                             f"rejection-sampling shard {shard['index']:04d}")
         forced.discard(shard["index"])
         minutes = (time.time() - t0) / 60.0
         cumulative = ledger_append("multidistill", minutes, cfg, kind="shard",
+                                   manifest=engine.manifest_path,
                                    work={"unit": "rollouts", "count": len(records),
                                          "shard": shard["index"],
                                          "variants": len(bundles)})
@@ -831,6 +1056,12 @@ def finalize(records: list, bundles: dict, cfg: dict) -> tuple[list, dict]:
     not resumed: `accept_record` refuses them through
     `contract.require_current`, and they are counted separately so the report
     says out loud that a regeneration is owed rather than reporting a quota miss.
+
+    Rows that cannot say what produced them are dropped the same way
+    (`missing_provenance:*`), and a corpus that mixes two producer identities is
+    fatal: the accepted rows are the source snapshot the SFT views, the trainer
+    manifest and the checkpoint lock all inherit, so an ambiguity here becomes an
+    ambiguity in the locked checkpoint.
     """
     reasons: dict[str, int] = {}
     accepted: dict[str, dict] = {}
@@ -853,6 +1084,11 @@ def finalize(records: list, bundles: dict, cfg: dict) -> tuple[list, dict]:
             accepted[key] = rec
 
     kept = [accepted[k] for k in sorted(accepted)]
+    # The corpus may descend from MANY producer sessions of one run (resumable
+    # shards are the design) but from exactly ONE producer identity. A mixed
+    # corpus is fatal here, not a footnote in the report: it is the S19 failure
+    # itself, and every downstream artifact would inherit the ambiguity.
+    source_provenance = require_one_producer(kept, "the accepted RS corpus")
     per_cell: dict[str, int] = {}
     for rec in kept:
         cell = f"{rec['family']}-h{rec['horizon']}"
@@ -874,6 +1110,14 @@ def finalize(records: list, bundles: dict, cfg: dict) -> tuple[list, dict]:
     summary = {"rollouts": len(records) + len(stale),
                "stale_environment_contract": len(stale),
                contract_mod.STAMP_FIELD: contract_mod.environment_contract_sha256(),
+               # The chain the SFT views, the trainer manifest and the checkpoint
+               # lock inherit: which producer, which sessions, which attestations.
+               "source_provenance": source_provenance,
+               "source_sessions": sorted({r["provenance"]["session_id"] for r in kept
+                                          if r["provenance"].get("session_id")}),
+               "source_runtime_manifests": sorted(
+                   {r["provenance"]["runtime_manifest_sha256"] for r in kept
+                    if r["provenance"].get("runtime_manifest_sha256")}),
                "accepted": len(kept),
                "acceptance_rate": round(len(kept) / max(len(records), 1), 4),
                "per_cell": dict(sorted(per_cell.items())),
@@ -903,7 +1147,7 @@ def cmd_finalize(args) -> None:
     # Horizon strata are structural: acceptance is one-per-variant and each
     # variant's horizon is fixed by the committed spec, so a missing deep-cell
     # quota can never be silently backfilled with easy cells.
-    _write_jsonl(ACCEPTED_PATH, kept)
+    write_attested_jsonl(ACCEPTED_PATH, kept, "the accepted RS corpus")
     SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
     SUMMARY_PATH.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2))

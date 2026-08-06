@@ -23,6 +23,15 @@ Views that do not fit `acceptance.max_view_tokens` (5,120, set by the exhaustive
 token census in results/agentic/token_census.json) are REJECTED, never truncated:
 a silently truncated completion is exactly the termination-free supervision this
 pipeline exists to avoid.
+
+PROVENANCE. Every view also carries the chain back to what produced it: the
+environment contract it was built under, the content digest of the accepted
+trajectory it came from, and that trajectory's producer snapshot (card, driver,
+engine fingerprint, effective thinking mode, runtime-manifest digest, session id)
+copied verbatim. The chain continues into `agentlab.sft`'s training manifest and
+from there into the checkpoint lock, so a locked adapter can name the card behind
+every row it was trained on. A trajectory that cannot say what produced it is
+dropped and counted, never built from.
 """
 
 from __future__ import annotations
@@ -39,6 +48,129 @@ from agentlab.suite.runtime import tool_schemas_for_family
 
 def _stamp() -> str:
     return contract.environment_contract_sha256()
+
+
+# --------------------------------------------------------------------------
+# the view-side link of the provenance chain
+# --------------------------------------------------------------------------
+#
+# The four TRL columns are frozen (prompt, completion, tools,
+# chat_template_kwargs) so the trainer sees no stray columns. Everything that
+# says WHERE a view came from therefore lives in the parallel metadata, one meta
+# row per training row, in the same order. Before this fix the metadata dropped
+# the trajectory's provenance entirely, which broke the chain exactly where it
+# mattered most: the corpus a checkpoint is trained on could not name the card,
+# engine or session that produced it, so the locked checkpoint could not either.
+
+# Must be present AND non-empty on every view.
+VIEW_CHAIN_FIELDS = ("row_id", "task_id", "view", "source_row_sha256",
+                     "source_provenance", contract.STAMP_FIELD)
+
+# Must be PRESENT: their value may legitimately be null (a CPU producer has no
+# session), but the key going missing is how a chain silently stops being one.
+VIEW_CHAIN_OPTIONAL_FIELDS = ("gpu_execution", "runtime_manifest_sha256",
+                              "session_id")
+
+
+def view_row_id(task_id: str, view: str, index: int, copy_index: int) -> str:
+    """A stable identity for one training row: task, view kind, turn, copy."""
+    from agentlab.suite.schema import digest_text
+
+    return digest_text(f"view|{task_id}|{view}|{index}|{copy_index}")[:24]
+
+
+def require_view_chain(meta_row: dict, what: str = "an SFT view") -> dict:
+    """Refuse a view whose chain back to a producer is missing or partial.
+
+    A view that cannot name the environment contract it was built under, the
+    accepted row it came from, or the producer that rolled that row out, is not
+    trainable evidence: the trainer manifest and the checkpoint lock inherit
+    exactly these fields, so a gap here is a gap in the locked checkpoint.
+    """
+    from agentlab.multidistill import provenance_gaps
+
+    missing = [k for k in VIEW_CHAIN_FIELDS
+               if meta_row.get(k) is None or meta_row.get(k) == ""]
+    missing += [k for k in VIEW_CHAIN_OPTIONAL_FIELDS if k not in meta_row]
+    if missing:
+        raise SystemExit(
+            f"REFUSED: {what} is missing {', '.join(missing)}. Every training row "
+            f"must name the environment contract it was built under, the accepted "
+            f"trajectory it came from, and the producer session that rolled that "
+            f"trajectory out. A view without that chain trains a checkpoint no "
+            f"lock can attribute.")
+    if meta_row[contract.STAMP_FIELD] != _stamp():
+        contract.require_current(meta_row, what)
+    gaps = provenance_gaps(meta_row["source_provenance"])
+    if gaps:
+        raise SystemExit(
+            f"REFUSED: {what} carries source provenance that is not evidence "
+            f"({', '.join(gaps)}). The view inherits the producer snapshot of its "
+            f"trajectory verbatim; it never synthesizes one.")
+    return meta_row
+
+
+def require_views_chain(rows: list, meta: list, report: dict | None = None,
+                        *, require_gpu_source: bool = True) -> dict:
+    """The whole-corpus gate a trainer runs BEFORE it touches an optimizer.
+
+    Checks, and terminates on the first failure:
+      the metadata is one-to-one with the training rows and in the same order;
+      every meta row carries the complete chain; every row_id is distinct; the
+      corpus descends from exactly ONE producer identity; and -- unless a caller
+      explicitly asks otherwise -- that producer actually owned a card.
+
+    The GPU requirement is stated separately from the chain requirement on
+    purpose: a CPU-scripted corpus is honest evidence about the harness and a
+    perfectly good test fixture, but it is not a corpus a reportable checkpoint
+    may be trained on, and "the fixture trained fine" is exactly how an
+    unattributable adapter would get locked.
+    """
+    from agentlab.multidistill import require_one_producer
+
+    if len(meta) != len(rows):
+        raise SystemExit(
+            f"REFUSED: {len(rows)} training rows and {len(meta)} metadata rows. "
+            f"The metadata is the only place a view's provenance lives, so a "
+            f"one-to-one correspondence is the chain; unequal counts mean some "
+            f"row is being trained on with nothing recorded about its origin.")
+    for i, meta_row in enumerate(meta):
+        require_view_chain(meta_row, f"SFT view {i}")
+    ids = [m["row_id"] for m in meta]
+    if len(set(ids)) != len(ids):
+        dupes = sorted({r for r in ids if ids.count(r) > 1})
+        raise SystemExit(
+            f"REFUSED: {len(ids) - len(set(ids))} SFT view metadata rows share a "
+            f"row_id ({dupes[:4]}). Two rows with one identity cannot both be "
+            f"traced, so the mapping from checkpoint to trajectory is ambiguous.")
+    ident = require_one_producer(
+        [{"provenance": m["source_provenance"]} for m in meta],
+        "the SFT view corpus")
+    if require_gpu_source and not ident.get("gpu_execution"):
+        raise SystemExit(
+            "REFUSED: this view corpus was produced without a GPU "
+            f"({ident.get('producer')!r}), so no card attested the trajectories "
+            f"it trains on. A scripted or CPU-built corpus is a fixture, not "
+            f"trainable evidence: roll the trajectories out through the attested "
+            f"engine (`python -m agentlab.multidistill run`) first.")
+    if report is not None:
+        contract.require_current(report, "the SFT view report")
+        recorded = report.get("source_provenance")
+        if recorded is not None:
+            from agentlab.suite.schema import canon
+
+            if canon(recorded) != canon(ident):
+                raise SystemExit(
+                    f"REFUSED: the view report names producer {canon(recorded)} "
+                    f"and the metadata names {canon(ident)}. The report is the "
+                    f"summary of these rows or it is a summary of something else.")
+        if report.get("rows") is not None and int(report["rows"]) != len(rows):
+            raise SystemExit(
+                f"REFUSED: the view report counts {report['rows']} rows and the "
+                f"corpus holds {len(rows)}; one of the two describes another "
+                f"build.")
+    return {"rows": len(rows), "source_provenance": ident,
+            "row_ids": len(set(ids))}
 
 _NUM_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 # Opaque identifiers the suite generators mint, all uppercase and high-entropy:
@@ -216,22 +348,40 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
     """Accepted trajectories -> (SFT rows, build report).
 
     Rows carry exactly the four keys TRL's completion-only SFT path consumes
-    (prompt, completion, tools, chat_template_kwargs); provenance goes to the
-    parallel report so the trainer sees no stray columns.
+    (prompt, completion, tools, chat_template_kwargs); the provenance chain goes
+    to the parallel metadata (one row per training row, same order) and its
+    summary to the report, so the trainer sees no stray columns.
     """
+    from agentlab.multidistill import (provenance_gaps, require_one_producer,
+                                       row_digest)
+
     cfg = cfg or load_config()
     max_tokens = cfg["acceptance"]["max_view_tokens"]
     schema_cache: dict[str, list] = {}
     rows, meta = [], []
     counts = {"terminal": 0, "pivot": 0, "recovery": 0}
     rejected = {"over_token_budget": 0, "no_terminal": 0, "trajectory_over_budget": 0,
-                "stale_environment_contract": 0}
+                "stale_environment_contract": 0, "missing_source_provenance": 0}
 
     records, stale = contract.invalidate(records, "accepted trajectory")
     rejected["stale_environment_contract"] = len(stale)
+    # A trajectory that cannot name its producer cannot be trained on: the view
+    # inherits the snapshot, so there is nothing honest to inherit. Dropped and
+    # COUNTED, never quietly built from.
+    attributable, unattributable = [], 0
+    for rec in records:
+        if provenance_gaps(rec.get("provenance")):
+            unattributable += 1
+            continue
+        attributable.append(rec)
+    rejected["missing_source_provenance"] = unattributable
+    records = attributable
+    source_provenance = require_one_producer(records, "the SFT view corpus")
     schema_sha: dict[str, str] = {}
     for rec in records:
         family = rec["family"]
+        source_sha = row_digest(rec)
+        rec_prov = dict(rec["provenance"])
         tools = schema_cache.setdefault(family, tool_schemas_for_family(family))
         if family not in schema_sha:
             from agentlab.suite.runtime import tool_schema_bytes
@@ -262,22 +412,37 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
                 continue
             row = {"prompt": prompt, "completion": completion, "tools": tools,
                    "chat_template_kwargs": {"enable_thinking": False}}
-            for _ in range(item["copies"]):
-                candidate_rows.append((item["view"], row, n_tok))
+            for copy_index in range(item["copies"]):
+                candidate_rows.append((item["view"], row, n_tok, i, copy_index))
 
-        for view, row, n_tok in candidate_rows:
+        for view, row, n_tok, msg_index, copy_index in candidate_rows:
             rows.append(row)
             counts[view] += 1
-            meta.append({"task_id": rec["task_id"], "family": family,
+            meta.append({"row_id": view_row_id(rec["task_id"], view, msg_index,
+                                               copy_index),
+                         "task_id": rec["task_id"], "family": family,
                          "horizon": rec["horizon"],
                          "fault_types": list(rec.get("fault_types") or []),
-                         "view": view, "tokens": n_tok,
+                         "view": view, "msg_index": msg_index,
+                         "copy_index": copy_index, "tokens": n_tok,
                          # Which model-visible environment these prompt bytes
                          # came from (D2): an SFT view built from a tokenless
                          # transcript trains on a different environment from the
                          # one the study evaluates in.
                          contract.STAMP_FIELD: _stamp(),
-                         "tool_schema_sha256": schema_sha[family]})
+                         "tool_schema_sha256": schema_sha[family],
+                         # ... and WHAT PRODUCED them (S19): the accepted row's
+                         # content digest plus that row's producer snapshot,
+                         # copied verbatim. The trainer manifest and the
+                         # checkpoint lock read these three fields, so the
+                         # locked checkpoint can name the card, engine and
+                         # session behind every row it was trained on.
+                         "source_row_sha256": source_sha,
+                         "source_provenance": rec_prov,
+                         "runtime_manifest_sha256":
+                             rec_prov.get("runtime_manifest_sha256"),
+                         "session_id": rec_prov.get("session_id"),
+                         "gpu_execution": bool(rec_prov.get("gpu_execution"))})
 
     total = len(rows)
     terminal_weight = counts["terminal"] / total if total else 0.0
@@ -290,6 +455,16 @@ def build_views(records: list, token_counter, cfg: dict | None = None):
         "terminal_weight_ok": terminal_weight >= cfg["views"]["terminal_weight_min"],
         "expected_rows": cfg["views"]["expected_rows"],
         contract.STAMP_FIELD: _stamp(),
+        # The chain, summarized: which producer, which sessions, which
+        # attestations, and how many trajectories the rows descend from.
+        "source_provenance": source_provenance,
+        "source_trajectories": len(records),
+        "source_row_digests": len({m["source_row_sha256"] for m in meta}),
+        "source_sessions": sorted({m["session_id"] for m in meta if m["session_id"]}),
+        "source_runtime_manifests": sorted(
+            {m["runtime_manifest_sha256"] for m in meta
+             if m["runtime_manifest_sha256"]}),
+        "gpu_execution": bool(source_provenance.get("gpu_execution")),
     }
     return rows, meta, report
 
@@ -324,6 +499,13 @@ def main() -> None:
                                              encoding="utf-8")
     print(f"[views] {report['rows']} rows -> {out}")
     print(f"[views] counts {report['view_counts']}  rejected {report['rejected']}")
+    print(f"[views] provenance: {report['source_trajectories']} trajectories, "
+          f"{len(report['source_sessions'])} producer session(s), "
+          f"gpu_execution={report['gpu_execution']}")
+    # The chain is checked HERE too, not only in the trainer: a corpus written to
+    # disk without it would look finished, and the next stage's refusal would be
+    # read as a trainer bug rather than as a missing rollout attestation.
+    require_views_chain(rows, meta, report, require_gpu_source=False)
     print(f"[views] terminal weight {report['terminal_weight']:.3f} "
           f"(min {report['terminal_weight_min']})")
     if not report["terminal_weight_ok"]:

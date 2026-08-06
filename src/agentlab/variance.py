@@ -311,7 +311,10 @@ def probe_records(engine, bundles: list, generations: int) -> list:
     records = engine.run(convos)
     by_id = {b.spec.task_id: b for b in bundles}
     for rec in records:
-        ok, why = replay_record(rec, by_id[rec["task_id"]])
+        # THE ENGINE's secret, not a fresh one: the recovery tokens and receipts
+        # the model saw were keyed with it, so replaying under another secret
+        # would fail every receipt and label a valid group unreplayable.
+        ok, why = replay_record(rec, by_id[rec["task_id"]], secret=engine.secret)
         rec["replay_ok"] = ok
         rec["replay_reason"] = why
     return records
@@ -393,6 +396,7 @@ def probe_adapter(args, cfg: dict | None = None) -> str:
     about.
     """
     cfg = cfg or load_config()
+    locked_digest = None
     if getattr(args, "adapter", None):
         candidate = pathlib.Path(args.adapter)
     else:
@@ -402,7 +406,20 @@ def probe_adapter(args, cfg: dict | None = None) -> str:
             rec = json.loads(locks.read_text(encoding="utf-8")).get("checkpoint") or {}
             if rec.get("path"):
                 candidate = ROOT / rec["path"]
+                locked_digest = rec.get("checkpoint_sha256")
         candidate = candidate or ROOT / "out" / "multiface" / "rssft-lora"
+    if locked_digest:
+        # The lock pins BYTES. Probing a directory whose contents no longer hash
+        # to the locked digest would report the variance of a different policy
+        # under the locked checkpoint's name.
+        from agentlab.suite.configio import checkpoint_tree_sha256
+
+        got = checkpoint_tree_sha256(candidate)
+        if got != locked_digest:
+            raise SystemExit(
+                f"REFUSED: {candidate} hashes {got} and the checkpoint lock pins "
+                f"{locked_digest}. The locked adapter's bytes changed, so probing "
+                f"it would measure a policy the lock does not describe.")
     if not (candidate / "adapter_model.safetensors").exists():
         raise SystemExit(
             f"REFUSED: no RS-SFT adapter at {candidate}. The probe measures the "
@@ -436,9 +453,11 @@ def cmd_run(args) -> None:
         return
     ledger_guard("variance_probe", args.budget_minutes, cfg)
 
-    from agentlab.multidistill import _vllm_engine, _write_jsonl, run_units
+    from agentlab.multidistill import (_vllm_engine, run_units,
+                                       write_attested_jsonl)
 
     adapter = probe_adapter(args, cfg)
+    args.stage = "variance_probe"
     started = now_utc()
     t_engine = time.time()
     # The RS-SFT adapter, not the base model: this probes the trained policy.
@@ -446,6 +465,7 @@ def cmd_run(args) -> None:
     startup_min = (time.time() - t_engine) / 60.0
     ledger_append("variance_probe:engine_start", startup_min, cfg,
                   kind="engine_start", started_at=started,
+                  manifest=engine.manifest_path,
                   work={"unit": "engine", "count": 1, "adapter": adapter,
                         "cells_pending": len(pending)})
     print(f"[probe] engine up in {startup_min:.1f} min with adapter {adapter}; "
@@ -459,10 +479,12 @@ def cmd_run(args) -> None:
         t0 = time.time()
         records = probe_records(engine, bundles, vp["generations_per_group"])
         rows = [_slim(r) for r in records]
-        _write_jsonl(_cell_path(split, cell), rows)
+        write_attested_jsonl(_cell_path(split, cell), rows,
+                             f"variance probe cell {cell[0]}-h{cell[1]}")
         forced.discard(cell)
         minutes = (time.time() - t0) / 60.0
         cumulative = ledger_append("variance_probe", minutes, cfg, kind="cell",
+                                   manifest=engine.manifest_path,
                                    work={"unit": "rollouts", "count": len(records),
                                          "cell": f"{cell[0]}-h{cell[1]}",
                                          "adapter": adapter})
@@ -497,9 +519,14 @@ def write_disposition_report(cfg: dict | None = None) -> dict:
     and `summary` are explicitly null: there is no probe measurement to report,
     and inventing an empty-but-shaped gate block would let a downstream reader
     treat "not evaluated" as "evaluated and failed".
+
+    Its provenance says `gpu_execution: false` and leaves the card identity NULL.
+    Nothing here ran on a card, and reading the run's hardware lock would have
+    made a short-circuited stage look like a measured one merely because an
+    earlier stage bound a GPU.
     """
     cfg = cfg or load_config()
-    from agentlab.suite.configio import fingerprint
+    from agentlab.multidistill import cpu_provenance
 
     out = {"stage_disposition": registered_disposition(cfg),
            "probe_run": False, "complete": False,
@@ -509,7 +536,7 @@ def write_disposition_report(cfg: dict | None = None) -> dict:
                      "(grpo.stage_disposition = GRPO_NOT_RUN_HARDWARE_INFEASIBLE), "
                      "so the probe that exists to decide GRPO was never "
                      "evaluated. This is NOT the same as a closed variance gate.",
-           "provenance": fingerprint(None, cfg)}
+           "provenance": cpu_provenance("variance-probe-disposition", cfg)}
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({k: out[k] for k in ("stage_disposition", "probe_run",
@@ -530,16 +557,27 @@ def cmd_report(args) -> None:
     gates = gate_report(summary, cfg)
     done = len(summary["per_cell"])
     expected = len(cells_in_probe(cfg))
-    from agentlab.suite.configio import fingerprint
+    from agentlab.multidistill import (provenance_gaps, require_one_producer,
+                                       require_row_provenance)
 
-    # The hardware provenance of the probe rows themselves, not of this reporting
-    # process: a report that says which card measured it is the point of S19.
-    row_fps = [r.get("provenance") for r in rows if r.get("provenance")]
+    # The hardware provenance of the probe ROWS, not of this reporting process: a
+    # report that cannot say which card measured it is not evidence, and a report
+    # that substitutes the reporting process's own fingerprint for the missing one
+    # is worse -- it looks measured. Missing or mixed provenance stops the report.
+    row_fps = [r.get("provenance") for r in rows if not provenance_gaps(
+        r.get("provenance"))]
+    if len(row_fps) != len(rows):
+        require_row_provenance(
+            next(r.get("provenance") for r in rows if provenance_gaps(
+                r.get("provenance"))),
+            f"{len(rows) - len(row_fps)} of {len(rows)} probe rows under {OUT_DIR}")
+    producer = require_one_producer(rows, f"the probe rows under {OUT_DIR}")
     out = {"stage_disposition": "RUN", "probe_run": True,
            "complete": done == expected, "cells_done": done,
            "cells_expected": expected, "rollouts": len(rows),
            "summary": summary, "gates": gates,
-           "provenance": row_fps[0] if row_fps else fingerprint(None, cfg),
+           "provenance": row_fps[0] if row_fps else None,
+           "source_provenance": producer,
            "rows_missing_provenance": len(rows) - len(row_fps)}
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
