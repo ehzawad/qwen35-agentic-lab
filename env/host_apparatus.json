@@ -1,0 +1,99 @@
+{
+  "disclosure": "ADDITIVE, DATED record of the host, written AFTER the preregistration was finalized. It registers nothing and amends nothing; it states what the apparatus was so a later host can be compared to it.",
+  "driver_policy": {
+    "exact_tested_driver": "610.43.02",
+    "for_independent_replication": "Any driver that supports the torch 2.11.0+cu130 wheel on Ampere is acceptable. It is a NEW run: new run_id, new locks, new ledger, new verdict, never an append to the original.",
+    "for_original_replay": "Use driver 610.43.02 with CUDA runtime 13.0. Numbers produced on a different driver are an independent replication, not a replay of the original run."
+  },
+  "forbidden_packages_clean": true,
+  "forbidden_packages_present": [],
+  "host_observation": {
+    "hostname": "user-WS-C621E-SAGE-Series",
+    "note": "Informational; not part of any check.",
+    "repo_path": "/mnt/sdb/arafat/ehz/llm/qwen35-agentic-lab"
+  },
+  "kind": "post_finalization_apparatus_identification",
+  "landmine": {
+    "import_names": [
+      "causal_conv1d",
+      "flash_linear_attention"
+    ],
+    "on_stack": "torch 2.11.0+cu130, transformers 5.14.1, one NVIDIA RTX A5000",
+    "packages_that_must_stay_absent": [
+      "causal-conv1d",
+      "flash-linear-attention"
+    ],
+    "rule": "Neither package may be installed. scripts/setup.sh omits them on purpose, env/requirements.lock.txt does not contain them, and `check` FAILS if either is importable. The torch fallback is slower and correct.",
+    "symptom": "SIGSEGV in the forward pass: exit 139, no Python traceback, no partial output. Not a slowdown and not a numerical regression -- a crash.",
+    "versions_observed_failing": [
+      "flash-linear-attention 0.5.2",
+      "causal-conv1d 1.6.2.post1"
+    ],
+    "why_they_look_required": "transformers advertises them as the Gated DeltaNet fast path for this architecture and will happily use them if importable."
+  },
+  "recorded_at_utc": "2026-08-06T14:05:48Z",
+  "schema": "host_apparatus/1",
+  "tested_apparatus": {
+    "capacity": {
+      "cpu_logical_cores": 40,
+      "cpu_model": "Intel(R) Xeon(R) Silver 4210R CPU @ 2.40GHz",
+      "ram_total_gib": 125.5,
+      "repo_filesystem_free_gib": 10937.7,
+      "repo_filesystem_total_gib": 14783.5
+    },
+    "driver": {
+      "kernel_module_build_string": "NVIDIA UNIX Open Kernel Module for x86_64  610.43.02  Release Build  (dvs-builder@U22-I3-H05-01-2)  Tue May 19 11:24:27 UTC 2026",
+      "nvidia_driver_version": "610.43.02",
+      "read_from": "/proc/driver/nvidia/version"
+    },
+    "gpus_present": [
+      {
+        "index": 0,
+        "memory_total": "24564 MiB",
+        "name": "NVIDIA RTX A5000",
+        "pci_bus_id": "00000000:3B:00.0",
+        "uuid": "GPU-3ce8e4c2-3bae-8744-eeec-70e8a0437567"
+      },
+      {
+        "index": 1,
+        "memory_total": "49140 MiB",
+        "name": "NVIDIA RTX A6000",
+        "pci_bus_id": "00000000:AF:00.0",
+        "uuid": "GPU-4754ca84-fd1d-907b-5c18-7c578d001bda"
+      }
+    ],
+    "os": {
+      "glibc": "2.35",
+      "id": "ubuntu",
+      "kernel_release": "5.15.0-58-generic",
+      "machine": "x86_64",
+      "pretty_name": "Ubuntu 22.04.1 LTS",
+      "version_id": "22.04"
+    },
+    "python_stack": {
+      "accelerate": "1.14.0",
+      "bitsandbytes": "0.50.0",
+      "datasets": "5.0.1",
+      "executable": ".venv/bin/python",
+      "huggingface-hub": "1.26.0",
+      "peft": "0.20.0",
+      "python_compiler": "Clang 22.1.3 ",
+      "python_implementation": "CPython",
+      "python_version": "3.12.13",
+      "safetensors": "0.8.0",
+      "torch_cuda_runtime": "13.0",
+      "torch_cudnn_build": 91900,
+      "torch_version": "2.11.0+cu130",
+      "transformers": "5.14.1",
+      "triton": "3.6.0",
+      "trl": "1.9.2",
+      "uv_version": "0.11.21",
+      "vllm": "0.25.1"
+    },
+    "registered_gpu": {
+      "count": 1,
+      "name": "NVIDIA RTX A5000",
+      "note": "The study is a single-card A5000 study. A second card may be physically present and belong to another tenant; it is not used, not probed and not reserved."
+    }
+  }
+}
