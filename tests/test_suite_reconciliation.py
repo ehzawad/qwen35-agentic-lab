@@ -33,6 +33,10 @@ from agentlab.suite.schema import CELLS, FAMILIES, canon, oracle_plan_digest
 
 SUITE = "agentlab-suite-v1"
 SEED = 0xA61E0002          # the committed distill seed
+# Held-out splits have no seed until L exists; this is the clearly labelled
+# sentinel the suite tests use (tests/suite/conftest.py), and using it validates
+# the MECHANISM, never the designated held-out realization.
+SENTINEL_HELDOUT_SEED = 0x5E4714E1_5E4714E1_5E4714E1_5E4714E1
 CFG = load_config()
 
 # One clean and one of each fault type per cell, plus the ambiguous post-mutation
@@ -310,12 +314,23 @@ def test_certification_specs_carry_the_split_isolation_fields():
     from agentlab.suite.splits import check_split_leakage
 
     groups = {"train": [], "dev": [], "eval": []}
+    # The eval row is built with the labelled SENTINEL held-out seed and a sentinel
+    # release id: after D3 a held-out certspec cannot be exported at all without a
+    # release id, because a row that carries none is an old-seed cached value.
+    sentinel_release = "0" * 64
     for family, horizon in CELLS:
         for split, seed, group in (("distill", 0xA61E0002, "train"),
                                    ("dev", 0xA61E0004, "dev"),
-                                   ("eval", 0xA61E0005, "eval")):
+                                   ("eval", SENTINEL_HELDOUT_SEED, "eval")):
             bundle = build_task(SUITE, seed, split, family, horizon, 0, None)
+            if split == "eval":
+                bundle.release_id = sentinel_release
             groups[group].append(certification_spec(bundle))
+    for spec in groups["eval"]:
+        assert spec["heldout_release_id"] == sentinel_release
+    for group in ("train", "dev"):
+        for spec in groups[group]:
+            assert "heldout_release_id" not in spec
     assert check_split_leakage(groups) == []
     for specs in groups.values():
         for spec in specs:

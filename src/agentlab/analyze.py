@@ -485,7 +485,7 @@ def report(tags: list[str], out_dir: str = "out", trace_dirs: list[str] | None =
 #
 # Everything below implements the preregistered evaluation contract in
 # configs/agentic_preregister.json and docs/AGENTIC_PROTOCOL.md: harness
-# vetoes S8-S18 first, then gates ER1-ER8 / MT1-MT6 / HR1-HR3, launch floors,
+# vetoes S8-S19 first, then gates ER1-ER8 / MT1-MT6 / HR1-HR3, launch floors,
 # and the winner rule. Four outcome states everywhere:
 #
 #   PASS / FAIL      a real model-level result (positive or negative)
@@ -736,7 +736,7 @@ def _crashish(ep: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# harness vetoes S8-S18
+# harness vetoes S8-S19
 # ---------------------------------------------------------------------------
 
 def veto_s8_pairing(eps: dict, arms=("BP", "TP")) -> dict:
@@ -1107,30 +1107,220 @@ def veto_s17_trace_summary(eps: dict) -> dict:
               replayed=n_replayed)
 
 
-def veto_s18_test_blindness(results_dir: str | pathlib.Path) -> dict:
+def _git_in(repo: str | pathlib.Path, *args: str):
+    """Run git inside `repo`. -> CompletedProcess (never raises on exit status)."""
+    import subprocess
+
+    return subprocess.run(["git", *args], cwd=str(repo), capture_output=True,
+                          text=True, timeout=60)
+
+
+def _repo_of(path: str | pathlib.Path) -> str | None:
+    """The git repository that CONTAINS these artifacts, or None.
+
+    Deliberately discovered from the artifacts rather than configured: the ancestry
+    claim is about the repository that holds this run's locks and reveal, so a
+    relocated results directory proves nothing about some other repository.
+    """
+    r = _git_in(pathlib.Path(path).resolve(), "rev-parse", "--show-toplevel")
+    return r.stdout.strip() or None
+
+
+def veto_s18_post_lock_heldout(results_dir: str | pathlib.Path,
+                               eps: dict | None = None) -> dict:
+    """S18 POST-LOCK HELDOUT: P < L < R <= E, by ancestry and hashes.
+
+    RENAMED, deliberately. The unqualified name "TEST-BLINDNESS" claimed something
+    a machine cannot check: what a human saw, whether a private cache existed,
+    whether candidate lock commits were ground and discarded. What this veto
+    verifies is a list of POSITIVE facts:
+
+      1. the reveal receipt's master seed rederives from the locks commit it names,
+         and its release id rederives from that master seed (heldout-master-v2);
+      2. the lock is COMPLETE -- a prompt sha and a checkpoint BYTE digest, not a
+         mutable path -- and hashes to the blob the receipt names;
+      3. P (the commit adding the finalization marker), L (the unique dedicated
+         commit adding locks.json) and R (the commit adding the reveal together
+         with the held-out commitments) exist, are unique, and satisfy P < L < R
+         strictly, by git ancestry -- never by timestamps, which are recorded and
+         never trusted because anyone who can write a file can backdate one;
+      4. L and R are published on the designated public ref;
+      5. every claim-bearing trace's git_sha is R or a descendant of it, and any
+         trace that names a held-out release names THIS one.
+
+    Missing evidence is INCONCLUSIVE (no winner), a violated relation is a BUG.
+    The documentation may call the result "workflow-enforced post-lock test
+    blindness"; this function does not claim more than the five facts above.
+    """
     import hashlib
+
+    from .suite.generate import (GENERATION_PROTOCOL, HELDOUT_DERIVATION,
+                                 REVEAL_SCHEMA, heldout_master_seed,
+                                 heldout_release_id)
 
     d = pathlib.Path(results_dir)
     locks_p, reveal_p = d / "locks.json", d / "seed_reveal.json"
     if not locks_p.exists() or not reveal_p.exists():
         return _g("INCONCLUSIVE", "locks.json / seed_reveal.json not present yet")
-    locks = json.loads(locks_p.read_text())
+    locks_bytes = locks_p.read_bytes()
+    locks = json.loads(locks_bytes)
     reveal = json.loads(reveal_p.read_text())
-    for key in ("checkpoint", "prompt_winner"):
-        if key not in locks or "locked_at" not in locks.get(key, {}):
-            return _g("BUG", f"locks.json missing a timestamped {key} lock")
-    if "revealed_at" not in reveal or "preregistration_commit" not in reveal:
-        return _g("BUG", "seed_reveal.json missing revealed_at/preregistration_commit")
-    latest_lock = max(locks[k]["locked_at"] for k in ("checkpoint", "prompt_winner"))
-    if str(reveal["revealed_at"]) <= str(latest_lock):
-        return _g("BUG", f"seed revealed at {reveal['revealed_at']} before the last "
-                  f"lock at {latest_lock}")
-    want = int.from_bytes(hashlib.sha256(
-        (str(reveal["preregistration_commit"]) + ":agentic-heldout-v1").encode()
-    ).digest()[:8], "big")
-    if int(reveal.get("heldout_seed", -1)) != want:
-        return _g("BUG", "revealed held-out seed does not match the committed derivation")
-    return _g("OK", "winners locked before the held-out seed reveal; derivation verified")
+
+    # ---- 1. the derivation, rederived ------------------------------------
+    if reveal.get("schema") != REVEAL_SCHEMA:
+        return _g("BUG", f"seed_reveal.json schema {reveal.get('schema')!r} is not "
+                  f"{REVEAL_SCHEMA!r}; the retired preregistration-anchored "
+                  f"derivation is not accepted")
+    if reveal.get("derivation_label") != HELDOUT_DERIVATION:
+        return _g("BUG", f"reveal derivation {reveal.get('derivation_label')!r} != "
+                  f"{HELDOUT_DERIVATION!r}")
+    if int(reveal.get("generation_protocol", -1)) != GENERATION_PROTOCOL:
+        return _g("BUG", f"reveal generation_protocol "
+                  f"{reveal.get('generation_protocol')!r} != {GENERATION_PROTOCOL}")
+    claimed_l = str(reveal.get("locks_commit", ""))
+    if len(claimed_l) != 40:
+        return _g("BUG", "the reveal names no full 40-hex locks commit, so the seed "
+                  "is not a function of a specific published lock")
+    try:
+        master = heldout_master_seed(claimed_l)
+    except ValueError as exc:
+        return _g("BUG", f"the reveal's locks commit is unusable: {exc}")
+    if str(reveal.get("master_seed_hex")) != master.hex():
+        return _g("BUG", "the revealed master seed does not rederive from the locks "
+                  "commit it names")
+    release = heldout_release_id(master)
+    if str(reveal.get("heldout_release_id")) != release:
+        return _g("BUG", "the revealed held-out release id does not rederive from "
+                  "the master seed")
+
+    # ---- 2. a complete lock, and the bytes the receipt names -------------
+    prompt = locks.get("prompt_winner") or {}
+    ckpt = locks.get("checkpoint") or {}
+    if len(str(prompt.get("sha256", ""))) != 64:
+        return _g("BUG", "locks.json carries no prompt-winner sha256")
+    if len(str(ckpt.get("checkpoint_sha256", ""))) != 64 or not ckpt.get(
+            "checkpoint_files"):
+        return _g("BUG", "locks.json carries no checkpoint BYTE digest; a lock on a "
+                  "mutable path pins nothing the held-out seed can be a function of")
+    if str(locks.get("preregistration_commit", "")) != str(
+            reveal.get("preregistration_commit", "")):
+        return _g("BUG", "the lock and the reveal name different preregistration "
+                  "commits")
+    blob = hashlib.sha256(locks_bytes).hexdigest()
+    if str(reveal.get("locks_blob_sha256")) != blob:
+        return _g("BUG", "the reveal's locks_blob_sha256 is not the lock in this "
+                  "trace set; the seed derives from a different lock than the one "
+                  "the run reports")
+
+    # ---- 3+4. ancestry and publication ----------------------------------
+    repo = _repo_of(d)
+    if not repo:
+        return _g("INCONCLUSIVE",
+                  "the artifacts are not inside a git repository, so P < L < R "
+                  "cannot be established; S18 is an ancestry claim and there is "
+                  "nothing here to read it from")
+
+    def adds(rel: str) -> list[str]:
+        out = _git_in(repo, "log", "--all", "--diff-filter=A", "--format=%H",
+                      "--", rel).stdout
+        return [ln for ln in out.splitlines() if ln]
+
+    def ancestor(a: str, b: str) -> bool:
+        return _git_in(repo, "merge-base", "--is-ancestor", a, b).returncode == 0
+
+    # The lock and reveal are looked up WHERE THEY ACTUALLY ARE: the history of
+    # this run's artifacts, not of similarly-named files elsewhere in the tree.
+    try:
+        rel_dir = pathlib.PurePath(str(d.resolve())).relative_to(repo).as_posix()
+    except ValueError:
+        return _g("INCONCLUSIVE",
+                  f"{d} does not resolve inside the repository git reports "
+                  f"({repo}), so the artifacts' history cannot be read")
+    prefix = "" if rel_dir in (".", "") else f"{rel_dir}/"
+    locks_rel, reveal_rel = f"{prefix}locks.json", f"{prefix}seed_reveal.json"
+    heldout_rels = ("data/suite/v1/manifest.heldout.json",
+                    "data/suite/v1/SHA256SUMS.heldout")
+    p_adds = adds("configs/preregistration_final.json")
+    l_adds = adds(locks_rel)
+    r_adds = adds(reveal_rel)
+    for name, got in (("P", p_adds), ("L", l_adds), ("R", r_adds)):
+        if not got:
+            return _g("INCONCLUSIVE", f"{name} does not exist as a commit in "
+                      f"{repo}; the three-commit chain is incomplete")
+        if len(got) > 1:
+            return _g("BUG", f"{len(got)} commits add {name}'s artifact; each of "
+                      f"P, L and R must be unique or 'the lock commit' names two "
+                      f"trees")
+    P, L, R = p_adds[0], l_adds[0], r_adds[0]
+    if L != claimed_l:
+        return _g("BUG", f"the reveal derives its seed from {claimed_l[:12]} but the "
+                  f"repository's unique locks commit is {L[:12]}")
+    if not ancestor(P, L) or P == L:
+        return _g("BUG", f"L ({L[:12]}) is not a strict descendant of P ({P[:12]})")
+    if not ancestor(L, R) or L == R:
+        return _g("BUG", f"R ({R[:12]}) is not a strict descendant of L ({L[:12]}): "
+                  f"the held-out release would not be post-lock")
+    l_files = sorted(
+        f for f in _git_in(repo, "diff-tree", "--no-commit-id", "--name-only", "-r",
+                           "--root", L).stdout.splitlines() if f)
+    if l_files != [locks_rel]:
+        return _g("BUG", f"L changes {l_files}; a lock commit must be dedicated, so "
+                  f"that nothing else can be tuned in the same breath")
+    r_files = set(f for f in _git_in(repo, "diff-tree", "--no-commit-id",
+                                     "--name-only", "-r", "--root",
+                                     R).stdout.splitlines() if f)
+    must = {reveal_rel, *heldout_rels}
+    if not must <= r_files:
+        return _g("BUG", f"R adds {sorted(r_files)}; the receipt and the held-out "
+                  f"manifest/checksums must be committed together, or the evaluated "
+                  f"bytes can still be chosen afterwards")
+    public = "refs/remotes/origin/main"
+    if _git_in(repo, "rev-parse", "--verify", "--quiet", public).returncode != 0:
+        return _g("INCONCLUSIVE", f"{public} does not exist in {repo}, so the "
+                  f"publication of L and R cannot be verified")
+    unpublished = [n for n, sha in (("L", L), ("R", R)) if not ancestor(sha, public)]
+    if unpublished:
+        return _g("BUG", f"{', '.join(unpublished)} is not published on {public}; an "
+                  f"unpublished lock or reveal leaves no evidence of what was "
+                  f"public when")
+
+    # ---- 5. the traces are bound to R and to this release ---------------
+    n_traces = 0
+    unbound: list[str] = []
+    wrong_release: list[str] = []
+    unresolved: list[str] = []
+    for key, tasks in (eps or {}).items():
+        for tid, ep in tasks.items():
+            prov = (ep.get("trace") or {}).get("provenance") or {}
+            sha = str(prov.get("git_sha") or "")
+            n_traces += 1
+            rid = prov.get("heldout_release_id")
+            if rid is not None and str(rid) != release:
+                wrong_release.append(f"{key}/{tid}")
+            if not sha:
+                unbound.append(f"{key}/{tid}")
+            elif _git_in(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode != 0:
+                unresolved.append(f"{key}/{tid}:{sha[:12]}")
+            elif not ancestor(R, sha):
+                return _g("BUG", f"trace {key}/{tid} was produced at {sha[:12]}, "
+                          f"which is not R ({R[:12]}) or a descendant: it did not "
+                          f"run on the revealed release")
+    if wrong_release:
+        return _g("BUG", f"{len(wrong_release)} trace(s) name another held-out "
+                  f"release, e.g. {wrong_release[:2]}")
+    if n_traces and (unbound or unresolved):
+        return _g("INCONCLUSIVE",
+                  f"{len(unbound) + len(unresolved)} of {n_traces} traces cannot be "
+                  f"placed in this repository's history (missing git_sha: "
+                  f"{len(unbound)}, unknown commit: {len(unresolved)}), so E >= R "
+                  f"is unverified", traces=n_traces)
+    return _g("OK",
+              f"P {P[:12]} < L {L[:12]} < R {R[:12]}, all published on {public}; the "
+              f"held-out seed rederives from L, the lock pins the checkpoint bytes, "
+              f"and {n_traces} trace(s) ran at R or a descendant. This is "
+              f"workflow-enforced post-lock derivation, not a claim about what any "
+              f"person saw.",
+              traces=n_traces)
 
 
 # ---------------------------------------------------------------------------
@@ -2188,7 +2378,7 @@ def agentic_verdict(traces_dir: str, preregister: str, secret_path: str,
         "S15": veto_s15_attrition(eps, specs_by_id),
         "S16": veto_s16_control_integrity(eps, prereg, locks),
         "S17": veto_s17_trace_summary(eps),
-        "S18": veto_s18_test_blindness(rdir),
+        "S18": veto_s18_post_lock_heldout(rdir, eps),
         "S19": veto_s19_hardware_integrity(eps, prereg),
     }
     # The one-locked-checkpoint veto also owns the missing-GRPO-checkpoint rule:

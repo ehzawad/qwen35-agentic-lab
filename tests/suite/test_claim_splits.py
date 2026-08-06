@@ -10,6 +10,8 @@ turned out "INCONCLUSIVE" after the GPU time was spent.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from agentlab.suite.envs.typed_relay import MT_COMBOS, MT_PATTERNS
@@ -18,7 +20,7 @@ from agentlab.suite.generate import (CLEAN_SPLITS, EVAL_FAULT_GROUPS,
                                      REGISTERED_DEV_PER_AXIS,
                                      REGISTERED_H8_PER_FAMILY,
                                      REGISTERED_H8_TOTAL, REGISTERED_TOTALS,
-                                     SPLIT_SEED_KEY, SPLITS,
+                                     SPLITS,
                                      absent_information_problems,
                                      assert_suite_cardinalities, build_split,
                                      build_task, cells_of, cluster_census,
@@ -26,14 +28,14 @@ from agentlab.suite.generate import (CLEAN_SPLITS, EVAL_FAULT_GROUPS,
 from agentlab.suite.runtime import run_oracle
 from agentlab.suite.schema import template_cluster_id, tool_pattern
 
-from .conftest import SECRET, SEEDS, SUITE
+from .conftest import SECRET, SUITE, seed_for
 
 
 def _split(split: str, per_cell: int | None = None):
     from agentlab.suite.generate import DEFAULT_SIZES
 
     size = DEFAULT_SIZES[split] if per_cell is None else per_cell
-    return build_split(SUITE, split, SEEDS[SPLIT_SEED_KEY[split]], size)
+    return build_split(SUITE, split, seed_for(split), size)
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +52,8 @@ def test_every_scored_task_carries_a_structural_cluster_id():
 
 def test_cluster_id_is_structural_not_the_paraphrase_id():
     """Same structure, different drawn values and wording -> same cluster."""
-    a = build_task(SUITE, SEEDS["eval"], "eval", "lookup_chain", 2, 0, None)
-    b = build_task(SUITE, SEEDS["eval"], "eval", "lookup_chain", 2, 1, None)
+    a = build_task(SUITE, seed_for("eval"), "eval", "lookup_chain", 2, 0, None)
+    b = build_task(SUITE, seed_for("eval"), "eval", "lookup_chain", 2, 1, None)
     assert a.spec.answer != b.spec.answer          # different instantiations
     same_shape = ([sorted(n.expect["record"]) for n in a.nodes]
                   == [sorted(n.expect["record"]) for n in b.nodes])
@@ -59,7 +61,7 @@ def test_cluster_id_is_structural_not_the_paraphrase_id():
 
 
 def test_cluster_id_separates_horizons_and_families():
-    ids = {build_task(SUITE, SEEDS["eval"], "eval", f, h, 0, None
+    ids = {build_task(SUITE, seed_for("eval"), "eval", f, h, 0, None
                       ).spec.template_cluster_id
            for f, h in (("lookup_chain", 2), ("lookup_chain", 4),
                         ("typed_relay", 2), ("fulfillment", 4),
@@ -232,7 +234,7 @@ def test_absent_redaction_is_family_specific_and_effective(family):
     the unredacted twin rather than against the descriptor's own claim.
     """
     cell = {c.family: c for c in cells_of("eval_absent")}[family]
-    seed = SEEDS[SPLIT_SEED_KEY["eval_absent"]]
+    seed = seed_for("eval_absent")
     for index in range(4):
         bundle = build_task(SUITE, seed, "eval_absent", cell.family,
                             cell.horizon, index, None, variant=cell.variant)
@@ -357,22 +359,78 @@ def test_registered_tables_are_self_consistent():
     assert groups == EVAL_FAULT_GROUPS
 
 
-def test_manifest_records_the_registered_numbers(tmp_path):
-    from agentlab.suite.generate import generate_all, load_suite_config
+def _tiny_cfg():
+    from agentlab.suite.generate import load_suite_config
 
     cfg = load_suite_config(str(__import__("pathlib").Path(
         __file__).resolve().parents[2] / "configs" / "suite_v1.toml"))
-    cfg = dict(cfg, sizes={k: 2 for k in cfg["sizes"]})
-    manifest = generate_all(cfg, str(tmp_path / "v1"))
+    return dict(cfg, sizes={k: 2 for k in cfg["sizes"]})
+
+
+def _sentinel_reveal():
+    """A reveal receipt for the SENTINEL derivation, built the honest way.
+
+    Derived from a fake 40-hex "locks commit" through the registered functions, so
+    the mechanism is exercised end to end without pretending to be the designated
+    release. `heldout_master_seed` refuses anything that is not a full commit id,
+    which is itself part of what this checks.
+    """
+    from agentlab.suite.generate import (HELDOUT_SPLITS, heldout_master_seed,
+                                         heldout_release_id, heldout_split_seed)
+
+    fake_l = "1" * 40
+    master = heldout_master_seed(fake_l)
+    return {"locks_commit": fake_l, "preregistration_commit": "0" * 40,
+            "master_seed": master,
+            "heldout_release_id": heldout_release_id(master),
+            "split_seeds": {s: heldout_split_seed(master, s)
+                            for s in HELDOUT_SPLITS}}
+
+
+def test_train_dev_manifest_records_the_registered_numbers(tmp_path):
+    from agentlab.suite.generate import PHASES, generate_phase
+
+    cfg = _tiny_cfg()
+    manifest = generate_phase(cfg, str(tmp_path / "v1"), "train-dev")
     assert manifest["registered_totals"] == REGISTERED_TOTALS
     assert manifest["registered_fault_groups"] == EVAL_FAULT_GROUPS
     assert manifest["registered_h8_pairs"] == REGISTERED_H8_TOTAL
     assert manifest["registered_mt_clusters"] == {
         "min_clusters": MT_MIN_CLUSTERS, "max_per_cluster": MT_MAX_PER_CLUSTER}
+    assert manifest["config"]["sha256"] == cfg["config_sha256"]
+    assert all("/" in rel for rel in manifest["files"])
+    for split in PHASES["train-dev"]:
+        assert f"specs/{split}.jsonl" in manifest["files"]
+    # and NOT a single held-out payload, hash or realized value
+    for split in PHASES["heldout"]:
+        assert f"specs/{split}.jsonl" not in manifest["files"]
+        assert split not in manifest["splits"]
+    assert manifest["heldout_acceptance"] == "DEFERRED_UNTIL_POST_LOCK_REVEAL"
+    plan = manifest["heldout_plan"]
+    assert plan["splits"] == list(PHASES["heldout"])
+    assert plan["registered_totals"]["eval_mt"] == REGISTERED_TOTALS["eval_mt"]
+    # the PLAN, never a realized value: it may name the seed SOURCE (a rule) but
+    # may not contain a seed, a digest or a census
+    import re
+
+    flat = json.dumps(plan)
+    assert not re.search(r"\b[0-9a-f]{40,64}\b", flat), "a digest leaked into the plan"
+    assert "derangement" not in flat and "template_clusters" not in flat
+    for key in plan:
+        assert not key.endswith(("_seed", "_sha256", "_census")), key
+    assert plan["seed_source"].startswith("L, the dedicated commit")
+
+
+def test_heldout_manifest_records_the_registered_numbers(tmp_path):
+    from agentlab.suite.generate import PHASES, generate_phase
+
+    cfg, reveal = _tiny_cfg(), _sentinel_reveal()
+    manifest = generate_phase(cfg, str(tmp_path / "v1"), "heldout", reveal=reveal)
     assert manifest["splits"]["eval_mt"]["patterns"] == {
         str(p): MT_PATTERNS[p] for p in range(6)}
-    assert manifest["config"]["sha256"] == cfg["config_sha256"]
-    # every split's payload is listed, with POSIX separators
-    assert all("/" in rel or rel == "manifest.json" for rel in manifest["files"])
-    for split in SPLITS:
+    assert manifest["heldout_release_id"] == reveal["heldout_release_id"]
+    assert manifest["locks_commit"] == reveal["locks_commit"]
+    for split in PHASES["heldout"]:
         assert f"specs/{split}.jsonl" in manifest["files"]
+    for split in PHASES["train-dev"]:
+        assert f"specs/{split}.jsonl" not in manifest["files"]

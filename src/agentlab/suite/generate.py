@@ -58,13 +58,37 @@ Fault mixture (binding):
   * 25% of malformed fulfillment cases target a mutation (the ambiguous
     truncated-reserve case), assigned deterministically by malformed ordinal.
 
-Everything is derived from configs/suite_v1.toml committed seeds through the
-SHA-256 counter RNG; regeneration is byte-identical.
+TWO PHASES, TWO COMMITMENTS (D3, the post-lock held-out state machine).
+
+Generation is no longer one pass over ten splits. It is two phases with two
+different seed sources, and the second one cannot run early:
+
+  train-dev  oracle_sft, distill, grpo_train, dev -- seeded from the PUBLIC
+             committed seeds in configs/suite_v1.toml, because prompt selection
+             and training must be able to generate them before anything is
+             locked. Pinned at P (the commit adding configs/preregistration_final.json)
+             by manifest.train-dev.json + SHA256SUMS.train-dev.
+  heldout    eval, eval_stress, eval_mt, eval_h8, eval_absent, eval_perm --
+             seeded from L, the dedicated commit that adds the COMPLETE
+             results/agentic/locks.json. There is no held-out seed in the config,
+             no --seed flag, no environment seed and no fallback: without a
+             verified reveal receipt these six splits cannot be generated at all.
+             Pinned at R (the reveal commit) by manifest.heldout.json +
+             SHA256SUMS.heldout.
+
+`generate_all` no longer exists as a working entry point -- it REFUSES, because
+emitting every split in one pass is exactly the behaviour that made the held-out
+answers derivable from the preregistration commit alone.
+
+Everything is still derived through the SHA-256 counter RNG and regeneration is
+byte-identical WITHIN a phase: train/dev from the committed seeds, held-out from
+the seed the locks commit determines.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import os
 import shutil
 
@@ -84,13 +108,103 @@ SPLIT_KIND = {"oracle_sft": "train", "distill": "train", "grpo_train": "train",
               "dev": "dev", "eval": "eval", "eval_stress": "eval",
               "eval_mt": "eval", "eval_h8": "eval", "eval_absent": "eval",
               "eval_perm": "eval"}
-SPLIT_SEED_KEY = {"oracle_sft": "oracle_sft", "distill": "distill",
-                  "grpo_train": "grpo_train", "dev": "dev", "eval": "eval",
-                  "eval_stress": "stress", "eval_mt": "mt", "eval_h8": "h8",
-                  "eval_absent": "absent", "eval_perm": "perm"}
 DEFAULT_SIZES = {"oracle_sft": 400, "distill": 200, "grpo_train": 200,
                  "dev": 300, "eval": 100, "eval_stress": 40, "eval_mt": 100,
                  "eval_h8": 100, "eval_absent": 200, "eval_perm": 50}
+
+# ---------------------------------------------------------------------------
+# generation phases (D3)
+# ---------------------------------------------------------------------------
+# The two phases are disjoint, exhaustive over SPLITS, and they have DIFFERENT
+# seed sources. `PHASE_OF` is the single authority every consumer asks -- the
+# validator, the loader, the certification adapter and the exporter -- so a
+# newly registered split cannot end up in neither phase and therefore in neither
+# commitment.
+TRAIN_DEV_PHASE = "train-dev"
+HELDOUT_PHASE = "heldout"
+TRAIN_DEV_SPLITS = ("oracle_sft", "distill", "grpo_train", "dev")
+HELDOUT_SPLITS = ("eval", "eval_stress", "eval_mt", "eval_h8", "eval_absent",
+                  "eval_perm")
+PHASES = {TRAIN_DEV_PHASE: TRAIN_DEV_SPLITS, HELDOUT_PHASE: HELDOUT_SPLITS}
+PHASE_OF = {s: phase for phase, splits in PHASES.items() for s in splits}
+assert tuple(sorted(PHASE_OF)) == tuple(sorted(SPLITS))
+
+# Per-phase commitments. The old GLOBAL manifest.json / SHA256SUMS pair is gone:
+# it disclosed held-out hashes and claimed the whole suite was pinned at a commit
+# where the held-out bytes did not (and must not) exist yet.
+PHASE_MANIFEST = {TRAIN_DEV_PHASE: "manifest.train-dev.json",
+                  HELDOUT_PHASE: "manifest.heldout.json"}
+PHASE_SUMS = {TRAIN_DEV_PHASE: "SHA256SUMS.train-dev",
+              HELDOUT_PHASE: "SHA256SUMS.heldout"}
+# Refused on sight: a tree carrying these is a tree pinned by the retired
+# whole-suite commitment.
+LEGACY_COMMITMENTS = ("manifest.json", "SHA256SUMS")
+
+# The held-out derivation, frozen. `heldout-master-v2` is the version label: the
+# retired v1 derivation hung off the PREREGISTRATION commit, which exists before
+# any lock, so every held-out answer was derivable before the prompt winner and
+# the checkpoint were frozen. v2 hangs off L.
+HELDOUT_DERIVATION = "heldout-master-v2"
+HELDOUT_MASTER_LABEL_PARTS = ("qwen35-agentic-lab", "agentlab-suite-v1",
+                              "heldout-master-v2")
+HELDOUT_SPLIT_LABEL = "agentlab-heldout-split-v2"
+HELDOUT_RELEASE_LABEL = "agentlab-heldout-release-v2"
+REVEAL_SCHEMA = "agentic-heldout-reveal-v2"
+GENERATION_PROTOCOL = 2
+STUDY_ID = "agentic-v1"
+_HEX = set("0123456789abcdef")
+
+
+def _commit_bytes(commit: str, what: str) -> bytes:
+    """A full 40-hex commit id, or a refusal. No prefixes, ever.
+
+    A shortened prefix would let two different commits derive the same suite, and
+    "the seed came from some commit starting with a1b2c3" is not a commitment.
+    """
+    raw = str(commit or "").strip().lower()
+    if len(raw) != 40 or not set(raw) <= _HEX:
+        raise ValueError(
+            f"REFUSED: {what} must be a full 40-hex git commit id, got "
+            f"{commit!r}. A shortened prefix or a symbolic name is not a "
+            f"commitment.")
+    return bytes.fromhex(raw)
+
+
+def heldout_master_seed(locks_commit: str) -> bytes:
+    """The 256-bit master seed, a pure function of L.
+
+    L is the dedicated commit that adds the complete results/agentic/locks.json.
+    Because the seed is a function of L, the held-out realization cannot exist
+    before the prompt winner and the checkpoint digest are published -- which is
+    the entire mechanism. It is NOT a randomness beacon: a commit id is
+    author-influenceable, and docs/AGENTIC_PROTOCOL.md says so out loud.
+    """
+    label = "\0".join(HELDOUT_MASTER_LABEL_PARTS) + "\0"
+    return hashlib.sha256(label.encode("ascii")
+                          + _commit_bytes(locks_commit, "the locks commit L")).digest()
+
+
+def heldout_split_seed(master: bytes, split: str) -> int:
+    """One independent 256-bit seed per held-out split, derived from the master."""
+    if split not in HELDOUT_SPLITS:
+        raise ValueError(f"{split!r} is not a held-out split: {HELDOUT_SPLITS}")
+    if not isinstance(master, bytes) or len(master) != 32:
+        raise ValueError("the master seed must be exactly 32 bytes")
+    return int.from_bytes(
+        hashlib.sha256((HELDOUT_SPLIT_LABEL + "\0").encode("ascii") + master
+                       + b"\0" + split.encode("ascii")).digest(), "big")
+
+
+def heldout_release_id(master: bytes) -> str:
+    """The full 256-bit release id every held-out spec and certspec carries.
+
+    Task ids and file names do not encode their seed, so a stale old-seed file
+    looks superficially valid. The release id is what makes it fail.
+    """
+    if not isinstance(master, bytes) or len(master) != 32:
+        raise ValueError("the master seed must be exactly 32 bytes")
+    return hashlib.sha256((HELDOUT_RELEASE_LABEL + "\0").encode("ascii")
+                          + master).hexdigest()
 # Splits whose specs carry no scheduled fault at all.
 CLEAN_SPLITS = ("eval_mt", "eval_h8", "eval_absent", "eval_perm")
 # Splits that are one of the registered controls rather than a measurement.
@@ -188,23 +302,167 @@ SPLIT_CELLS = {"eval_stress": STRESS_CELLS, "eval_mt": MT_CELLS,
                "eval_perm": PERM_CELLS}
 
 
+# The legacy key names the retired whole-suite config used for the six held-out
+# seeds. Their PRESENCE is refused, not ignored: a config that still carries them
+# is a config from which the held-out set is derivable before any lock.
+_RETIRED_HELDOUT_SEED_KEYS = ("eval", "stress", "mt", "h8", "absent", "perm",
+                              "eval_stress", "eval_mt", "eval_h8",
+                              "eval_absent", "eval_perm")
+
+
 def load_suite_config(path: str) -> dict:
+    """The committed train/dev seeds plus the frozen held-out PLAN.
+
+    The loader no longer requires -- and now actively refuses -- a held-out seed
+    value anywhere in the file. There is no fallback: `cfg["seeds"]` holds four
+    train/dev seeds and nothing else, so a consumer that wants a held-out split
+    has to come with a verified reveal receipt.
+    """
     import tomllib
 
     with open(path, "rb") as fh:
         raw = tomllib.load(fh)
-    seeds = {key: int(raw[key]) for key in
-             ("oracle_sft", "distill", "grpo_train", "dev", "eval", "stress",
-              "mt", "h8", "absent", "perm")}
+
+    seeds_block = raw.get("seeds")
+    if isinstance(seeds_block, dict) and "train_dev" in seeds_block:
+        train_dev = seeds_block["train_dev"]
+    else:                                    # a flat file, i.e. the retired shape
+        train_dev = raw
+    offenders = sorted(
+        k for k in _RETIRED_HELDOUT_SEED_KEYS
+        if k in (train_dev if isinstance(train_dev, dict) else {})
+        or k in (seeds_block if isinstance(seeds_block, dict) else {})
+        or (k in raw and not isinstance(raw[k], dict) and k != "suite"))
+    if offenders:
+        raise SystemExit(
+            f"REFUSED: {path} carries held-out seed value(s) {offenders}. The six "
+            f"held-out seeds derive from L (the commit that adds the complete "
+            f"results/agentic/locks.json) through {HELDOUT_DERIVATION}; a value in "
+            f"the config would make the held-out set derivable before the prompt "
+            f"winner and the checkpoint are frozen, which is the defect this "
+            f"phase split exists to close.")
+    missing = [s for s in TRAIN_DEV_SPLITS if s not in train_dev]
+    if missing:
+        raise SystemExit(f"REFUSED: {path} is missing train/dev seed(s) {missing}")
+    seeds = {s: int(train_dev[s]) for s in TRAIN_DEV_SPLITS}
+
     sizes = dict(DEFAULT_SIZES)
-    for split in SPLITS:
-        key = SPLIT_SEED_KEY[split]
-        if key in raw.get("sizes", {}):
-            sizes[split] = int(raw["sizes"][key])
+    for split, value in (raw.get("sizes") or {}).items():
+        if split not in DEFAULT_SIZES:
+            raise SystemExit(f"REFUSED: {path} sizes an unregistered split "
+                             f"{split!r}; the registered splits are "
+                             f"{sorted(DEFAULT_SIZES)}")
+        sizes[split] = int(value)
+
+    heldout = dict(raw.get("heldout") or {})
+    # The derivation is FROZEN: the file and the code must agree, in both
+    # directions, or the commitment means whichever one you happened to read.
+    frozen = {
+        "derivation": HELDOUT_DERIVATION,
+        "master_label_parts": list(HELDOUT_MASTER_LABEL_PARTS),
+        "split_label": HELDOUT_SPLIT_LABEL,
+        "release_label": HELDOUT_RELEASE_LABEL,
+        "splits": list(HELDOUT_SPLITS),
+        "generation_protocol": GENERATION_PROTOCOL,
+    }
+    for key, want in frozen.items():
+        got = heldout.get(key)
+        if got is None:
+            raise SystemExit(f"REFUSED: {path} does not register the frozen "
+                             f"held-out derivation field {key!r}")
+        if (list(got) if isinstance(want, list) else got) != want:
+            raise SystemExit(f"REFUSED: {path} registers {key}={got!r}; the "
+                             f"generator implements {want!r}. The derivation is "
+                             f"frozen -- change both together in a dated "
+                             f"AMENDMENT or neither.")
+    phases = {k.replace("_", "-"): list(v)
+              for k, v in (raw.get("phases") or {}).items()}
+    for phase, splits in PHASES.items():
+        if phases.get(phase) != list(splits):
+            raise SystemExit(f"REFUSED: {path} registers phase {phase} as "
+                             f"{phases.get(phase)!r}; the generator implements "
+                             f"{list(splits)!r}")
     return {"suite": raw.get("suite", SUITE_NAME), "seeds": seeds,
-            "sizes": sizes,
+            "sizes": sizes, "heldout": heldout, "phases": phases,
             "out_dir": raw.get("layout", {}).get("out_dir", "data/suite/v1"),
             "config_path": path, "config_sha256": file_sha256(path)}
+
+
+def split_seed(cfg: dict, split: str, reveal: dict | None = None) -> int:
+    """The ONE seed lookup. Train/dev from the config, held-out from the reveal."""
+    if PHASE_OF[split] == TRAIN_DEV_PHASE:
+        return int(cfg["seeds"][split])
+    if not reveal:
+        raise RuntimeError(
+            f"REFUSED: {split} is a held-out split and there is no reveal "
+            f"receipt. Its seed derives from L (the commit adding the complete "
+            f"results/agentic/locks.json); it is not in the config, there is no "
+            f"--seed flag and there is no fallback.")
+    return int(reveal["split_seeds"][split])
+
+
+def load_reveal(path: str, *, study_id: str = STUDY_ID) -> dict:
+    """Read a reveal receipt and REDERIVE everything it claims.
+
+    Nothing in the receipt is taken on trust: the master seed is recomputed from
+    the locks commit it names, the release id is recomputed from the master seed,
+    and the six split seeds are derived here rather than read. A receipt that
+    carries a seed value of its own -- a supplied held-out seed -- is refused
+    outright.
+    """
+    receipt = read_json(path)
+    if not isinstance(receipt, dict):
+        raise SystemExit(f"REFUSED: {path} is not a reveal receipt object")
+
+    def need(key: str):
+        if key not in receipt:
+            raise SystemExit(f"REFUSED: {path} has no {key!r}; an incomplete "
+                             f"receipt reveals nothing")
+        return receipt[key]
+
+    if need("schema") != REVEAL_SCHEMA:
+        raise SystemExit(f"REFUSED: {path} schema {receipt['schema']!r} != "
+                         f"{REVEAL_SCHEMA!r}")
+    if need("study_id") != study_id:
+        raise SystemExit(f"REFUSED: {path} belongs to study "
+                         f"{receipt['study_id']!r}, not {study_id!r}")
+    if int(need("generation_protocol")) != GENERATION_PROTOCOL:
+        raise SystemExit(f"REFUSED: {path} generation_protocol "
+                         f"{receipt['generation_protocol']!r} != "
+                         f"{GENERATION_PROTOCOL}")
+    if need("derivation_label") != HELDOUT_DERIVATION:
+        raise SystemExit(f"REFUSED: {path} derivation_label "
+                         f"{receipt['derivation_label']!r} != "
+                         f"{HELDOUT_DERIVATION!r}")
+    stray = sorted(k for k in receipt
+                   if "seed" in k.lower() and k != "master_seed_hex")
+    if stray:
+        raise SystemExit(
+            f"REFUSED: {path} carries seed field(s) {stray}. The only seed in a "
+            f"receipt is the master seed REDERIVED from L; a supplied seed is "
+            f"exactly what this mechanism forbids.")
+    locks_commit = str(need("locks_commit")).strip().lower()
+    prereg_commit = str(need("preregistration_commit")).strip().lower()
+    _commit_bytes(prereg_commit, "the preregistration commit P")
+    master = heldout_master_seed(locks_commit)
+    claimed = str(need("master_seed_hex")).strip()
+    if claimed != master.hex():
+        raise SystemExit(
+            f"REFUSED: {path} claims master seed {claimed[:16]}..., but "
+            f"{HELDOUT_DERIVATION} over locks commit {locks_commit[:12]} gives "
+            f"{master.hex()[:16]}.... The seed is derived, never supplied.")
+    rid = heldout_release_id(master)
+    if str(need("heldout_release_id")) != rid:
+        raise SystemExit(f"REFUSED: {path} claims release id "
+                         f"{receipt['heldout_release_id']!r}, derivation gives "
+                         f"{rid!r}")
+    out = dict(receipt)
+    out["master_seed"] = master
+    out["heldout_release_id"] = rid
+    out["split_seeds"] = {s: heldout_split_seed(master, s) for s in HELDOUT_SPLITS}
+    out["reveal_path"] = path
+    out["reveal_sha256"] = file_sha256(path)
+    return out
 
 
 def apportion(n: int, weights) -> list[int]:
@@ -355,9 +613,17 @@ class TaskBundle:
     spec: TaskSpec
     kb: dict
     nodes: list
+    # Which held-out RELEASE these bytes belong to, or None for train/dev. Set by
+    # the generator from the reveal receipt and by `load_bundles` from the
+    # verified release on disk -- never guessed. The certification adapter refuses
+    # a held-out bundle without it, so a stale old-seed file cannot be exported.
+    release_id: str | None = None
 
     def rows(self) -> tuple[dict, dict, dict]:
-        return (self.spec.to_row(), self.kb,
+        srow = self.spec.to_row()
+        if self.release_id is not None:
+            srow["heldout_release_id"] = self.release_id
+        return (srow, self.kb,
                 {"task_id": self.spec.task_id,
                  "nodes": [n.to_row() for n in self.nodes]})
 
@@ -497,8 +763,8 @@ def apply_derangement(suite: str, seed_value: int, split: str,
     return mapping
 
 
-def build_split(suite: str, split: str, seed_value: int,
-                per_cell: int) -> dict:
+def build_split(suite: str, split: str, seed_value: int, per_cell: int, *,
+                release_id: str | None = None) -> dict:
     cells = SPLIT_CELLS.get(split, PRIMARY_CELLS)
     specs: list[dict] = []
     kb: dict = {}
@@ -512,6 +778,7 @@ def build_split(suite: str, split: str, seed_value: int,
             bundle = build_task(suite, seed_value, split, cell.family,
                                 cell.horizon, index, entries,
                                 variant=cell.variant)
+            bundle.release_id = release_id
             bundles.append(bundle)
             if not entries:
                 mix["clean"] += 1
@@ -838,23 +1105,129 @@ def split_paths(out_dir: str, split: str) -> dict:
             "oracles": os.path.join(out_dir, "oracles", f"{split}.jsonl")}
 
 
+def split_rels(split: str) -> tuple[str, str, str]:
+    """The three POSIX-relative payload paths of one split, in commitment order."""
+    return (f"kb/{split}.json", f"oracles/{split}.jsonl", f"specs/{split}.jsonl")
+
+
+def phase_manifest_path(out_dir: str, phase: str) -> str:
+    return os.path.join(out_dir, PHASE_MANIFEST[phase])
+
+
+def phase_sums_path(out_dir: str, phase: str) -> str:
+    return os.path.join(out_dir, PHASE_SUMS[phase])
+
+
+def read_phase_manifest(out_dir: str, phase: str) -> dict | None:
+    p = phase_manifest_path(out_dir, phase)
+    return read_json(p) if os.path.exists(p) else None
+
+
+def read_sums(path: str) -> dict:
+    """`SHA256SUMS`-format text -> {relpath: digest}, refusing hostile paths."""
+    listed: dict[str, str] = {}
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        digest, _, rel = line.partition("  ")
+        if len(digest) != 64 or set(digest) - _HEX or not rel:
+            raise ValueError(f"{path}: malformed line {line!r}")
+        if rel in listed:
+            raise ValueError(f"{path}: duplicate entry {rel}")
+        if os.path.isabs(rel) or "\\" in rel or ".." in rel.split("/"):
+            raise ValueError(f"{path}: unsafe path {rel!r}")
+        listed[rel] = digest
+    return listed
+
+
+def heldout_release(out_dir: str) -> dict | None:
+    """The VERIFIED held-out release on disk, or None if there is no reveal yet.
+
+    Verified means: a sealed manifest.heldout.json, a SHA256SUMS.heldout that
+    lists it, and a release id that rederives from the master seed the manifest
+    records. Anything less is not a release and this returns None rather than a
+    half-trusted dict.
+    """
+    manifest = read_phase_manifest(out_dir, HELDOUT_PHASE)
+    if not manifest:
+        return None
+    rel = manifest.get("heldout_release_id")
+    master_hex = str(manifest.get("master_seed_hex", ""))
+    if len(master_hex) != 64 or set(master_hex) - _HEX:
+        raise RuntimeError(f"{PHASE_MANIFEST[HELDOUT_PHASE]} carries no full "
+                           f"master seed; it is not a release manifest")
+    if rel != heldout_release_id(bytes.fromhex(master_hex)):
+        raise RuntimeError(f"{PHASE_MANIFEST[HELDOUT_PHASE]}: release id does not "
+                           f"rederive from its own master seed")
+    sums_p = phase_sums_path(out_dir, HELDOUT_PHASE)
+    if not os.path.exists(sums_p):
+        raise RuntimeError(f"REFUSED: {PHASE_MANIFEST[HELDOUT_PHASE]} exists but "
+                           f"{PHASE_SUMS[HELDOUT_PHASE]} does not; the reveal "
+                           f"commit R must add both")
+    return manifest
+
+
+def _verify_listed(out_dir: str, listed: dict, rels) -> None:
+    for rel in rels:
+        if rel not in listed:
+            raise RuntimeError(
+                f"REFUSED: {rel} is not covered by "
+                f"{PHASE_SUMS[HELDOUT_PHASE]}; a held-out file outside the "
+                f"release commitment is a cached early value, not evidence.")
+        path = os.path.join(out_dir, rel)
+        if not os.path.exists(path):
+            raise RuntimeError(f"REFUSED: {rel} is listed in the release but "
+                               f"missing on disk")
+        if file_sha256(path) != listed[rel]:
+            raise RuntimeError(
+                f"REFUSED: {rel} does not hash to its committed release value. "
+                f"These bytes are not the revealed held-out set.")
+
+
 def load_bundles(out_dir: str, split: str, task_ids=None) -> list:
     """Rebuild TaskBundles from the committed specs/kb/oracles of one split.
 
     This is the only way any consumer obtains suite tasks: there is no second
     manifest format and no second seed-derivation path. `task_ids`, when given,
     selects a subset in the order it lists.
+
+    A HELD-OUT split additionally has to prove it belongs to the revealed
+    release: the three payload files must hash to their committed values in
+    SHA256SUMS.heldout, and every spec row must carry that release's id. The
+    old-seed bundles that used to sit in this tree carry no release id and hash
+    to nothing, so they cannot be loaded at all -- which is what "invalidated"
+    has to mean for a file whose name and task ids look exactly right.
     """
     paths = split_paths(out_dir, split)
+    release_id = None
+    if PHASE_OF[split] == HELDOUT_PHASE:
+        manifest = heldout_release(out_dir)
+        if manifest is None:
+            raise RuntimeError(
+                f"REFUSED: {split} is a held-out split and this tree carries no "
+                f"revealed release ({PHASE_MANIFEST[HELDOUT_PHASE]} is absent). "
+                f"Held-out data exists only after L is published and "
+                f"`agentic_locks.py reveal` has written the receipt.")
+        release_id = manifest["heldout_release_id"]
+        listed = read_sums(phase_sums_path(out_dir, HELDOUT_PHASE))
+        _verify_listed(out_dir, listed, split_rels(split))
     kb_all = read_json(paths["kb"])
     oracles = {row["task_id"]: row["nodes"] for row in read_jsonl(paths["oracles"])}
     bundles = {}
     order = []
     for row in read_jsonl(paths["specs"]):
+        if release_id is not None and row.get("heldout_release_id") != release_id:
+            raise RuntimeError(
+                f"REFUSED: {paths['specs']} row {row.get('task_id')!r} carries "
+                f"heldout_release_id {row.get('heldout_release_id')!r}, not the "
+                f"revealed {release_id!r}")
         spec = TaskSpec.from_row(row)
         nodes = [OracleNode.from_row(n) for n in oracles[spec.task_id]]
         kb = kb_all[spec.task_id]
-        bundles[spec.task_id] = TaskBundle(spec=spec, kb=kb, nodes=nodes)
+        bundles[spec.task_id] = TaskBundle(spec=spec, kb=kb, nodes=nodes,
+                                          release_id=release_id)
         order.append(spec.task_id)
     if task_ids is None:
         return [bundles[t] for t in order]
@@ -937,6 +1310,12 @@ def certification_spec(bundle: TaskBundle) -> dict:
     environment these bytes describe, so a resume can never mix contracts.
     """
     spec, nodes = bundle.spec, bundle.nodes
+    if PHASE_OF[spec.split] == HELDOUT_PHASE and not bundle.release_id:
+        raise RuntimeError(
+            f"REFUSED: {spec.task_id} is a held-out task with no "
+            f"heldout_release_id. Held-out certspecs may only be exported from a "
+            f"verified release (load_bundles supplies the id); a row without one "
+            f"is an old-seed cached value and the evaluator must reject it.")
     mod = family_module(spec.family)
     node_pos = {n.node_id: i for i, n in enumerate(nodes)}
     template = mod.template_text(spec.template_id, _template_fields(spec, mod))
@@ -993,6 +1372,11 @@ def certification_spec(bundle: TaskBundle) -> dict:
         "max_decisions": spec.max_decisions, "max_calls": spec.max_calls,
         "secret_tokens": list(spec.secret_tokens),
     }
+    if bundle.release_id is not None:
+        # Which reveal these evaluator-facing bytes belong to. Task ids and file
+        # names do not encode their seed, so this is the only field that
+        # distinguishes the revealed set from a stale one.
+        row["heldout_release_id"] = bundle.release_id
     if spec.control is not None:
         meta = dict(spec.control_meta or {})
         # The control is already APPLIED in the committed row -- the KB record is
@@ -1008,75 +1392,160 @@ def certification_spec(bundle: TaskBundle) -> dict:
 
     return stamp(row)
 
+# ---------------------------------------------------------------------------
+# phase generation, the two commitments, and the release seal
+# ---------------------------------------------------------------------------
+# The old whole-suite writer emitted ten splits, one manifest and one SHA256SUMS
+# in a single pass. That is the mechanism D3 removes: the held-out bytes cannot
+# be written in the same pass as the train/dev bytes, because at that moment the
+# seed they need does not exist yet.
 
-def _generate_into(cfg: dict, out_dir: str) -> dict:
-    suite = cfg["suite"]
-    manifest_splits: dict = {}
+def _split_meta(split: str, result: dict, per_cell: int, seed_value: int) -> dict:
+    census = cluster_census(result["bundles"])
+    meta = {
+        "count": len(result["specs"]),
+        "per_cell": per_cell,
+        "registered_count": REGISTERED_TOTALS[split],
+        "cells": [c.label for c in cells_of(split)],
+        "seed": f"{seed_value:#x}",
+        "template_ids": list(TEMPLATE_RANGES[SPLIT_KIND[split]]),
+        "fault_mix": result["fault_mix"],
+        "template_clusters": census["clusters"],
+        "max_per_template_cluster": census["max_per_cluster"],
+    }
+    if split == "eval":
+        meta["fault_groups"] = fault_group_census(result["bundles"])
+    if split == "eval_mt":
+        meta["patterns"] = {str(p): MT_PATTERNS[p]
+                            for p in range(len(MT_PATTERNS))}
+        meta["per_pattern"] = {
+            str(p): sum(1 for b in result["bundles"] if b.spec.pattern_id == p)
+            for p in range(len(MT_PATTERNS))}
+    if split in CONTROL_SPLITS:
+        meta["control"] = CONTROL_SPLITS[split]
+        meta["control_kinds"] = sorted({
+            (b.spec.control_meta or {}).get("kind", "?")
+            for b in result["bundles"]})
+        if CONTROL_SPLITS[split] == "redacted":
+            # Only the absent-information control has a hidden-entropy budget;
+            # reporting 0 for a permutation would read as a defect.
+            meta["min_hidden_entropy_bits"] = min(
+                int((b.spec.control_meta or {}).get("hidden_entropy_bits", 0))
+                for b in result["bundles"])
+    if split == "eval_perm":
+        meta["derangement"] = result["permutation"]
+    return meta
+
+
+def heldout_plan(cfg: dict) -> dict:
+    """The registered held-out PLAN: names, counts, cells, allocation, derivation.
+
+    This is what the train/dev commitment at P is allowed to contain. It fixes
+    what the held-out sample WILL be without disclosing a single realized value:
+    no seeds, no hashes, no cluster census, no derangement, no file metadata.
+    """
+    return {
+        "splits": list(HELDOUT_SPLITS),
+        "per_cell": {s: cfg["sizes"][s] for s in HELDOUT_SPLITS},
+        "registered_totals": {s: REGISTERED_TOTALS[s] for s in HELDOUT_SPLITS},
+        "cells": {s: [c.label for c in cells_of(s)] for s in HELDOUT_SPLITS},
+        "template_ids": {s: list(TEMPLATE_RANGES[SPLIT_KIND[s]])
+                         for s in HELDOUT_SPLITS},
+        "core_eval_fault_allocation": {f"{f}-h{h}": list(w)
+                                       for (f, h), w in
+                                       sorted(EVAL_FAULT_WEIGHTS.items())},
+        "core_eval_fault_order": list(EVAL_FAULT_ORDER),
+        "registered_fault_groups": dict(EVAL_FAULT_GROUPS),
+        "clean_splits": list(CLEAN_SPLITS),
+        "control_splits": dict(CONTROL_SPLITS),
+        "derivation": HELDOUT_DERIVATION,
+        "master_label_parts": list(HELDOUT_MASTER_LABEL_PARTS),
+        "split_label": HELDOUT_SPLIT_LABEL,
+        "release_label": HELDOUT_RELEASE_LABEL,
+        "seed_source": "L, the dedicated commit that adds the complete "
+                       "results/agentic/locks.json",
+        "realized_values_disclosed_here": "none, by construction: this block is "
+                                          "committed at P, before L exists",
+    }
+
+
+def certspec_rels(phase: str) -> tuple[str, ...]:
+    """The derived certspec files a phase's commitment must cover.
+
+    Six evaluation spec manifests plus the merged eval group manifest S10 reads;
+    four train/dev manifests plus the train and dev group manifests. The exporter
+    (scripts/export_eval_specs.py) writes them; this says which ones belong to
+    which commitment, so neither phase can seal the other's bytes.
+    """
+    splits = PHASES[phase]
+    groups = sorted({SPLIT_KIND[s] for s in splits})
+    return tuple([f"certspecs/{s}.jsonl" for s in splits]
+                 + [f"certspecs/groups/{g}.jsonl" for g in groups])
+
+
+def _hash_files(out_dir: str, rels) -> dict:
     files: dict = {}
+    for rel in rels:
+        path = os.path.join(out_dir, rel)
+        files[rel] = {"sha256": file_sha256(path),
+                      "bytes": os.path.getsize(path)}
+    return files
+
+
+def _write_commitment(out_dir: str, phase: str, body: dict, source_rels,
+                      certspecs: dict | None) -> dict:
+    """Write manifest.<phase>.json and SHA256SUMS.<phase> for one phase.
+
+    `sealed` is False until the derived certspecs exist and have been hashed in.
+    The validator refuses an unsealed phase, because "the suite is pinned" must
+    not be claimed for the bytes the evaluator actually reads.
+    """
+    files = _hash_files(out_dir, source_rels)
+    manifest = dict(body)
+    manifest["phase"] = phase
+    manifest["files"] = files
+    manifest["sealed"] = certspecs is not None
+    manifest["certspecs"] = certspecs if certspecs is not None else "PENDING_EXPORT"
+    mpath = phase_manifest_path(out_dir, phase)
+    write_json(mpath, manifest)
+    listed = {rel: meta["sha256"] for rel, meta in files.items()}
+    for rel, meta in (certspecs or {}).items():
+        listed[rel] = meta["sha256"]
+    listed[PHASE_MANIFEST[phase]] = file_sha256(mpath)
+    write_text(phase_sums_path(out_dir, phase),
+               "".join(f"{digest}  {rel}\n" for rel, digest in sorted(listed.items())))
+    return manifest
+
+
+def _generate_phase_into(cfg: dict, out_dir: str, phase: str,
+                         reveal: dict | None) -> dict:
+    suite = cfg["suite"]
+    splits = PHASES[phase]
+    release = reveal["heldout_release_id"] if phase == HELDOUT_PHASE else None
+    manifest_splits: dict = {}
     all_bundles: dict = {}
+    source_rels: list[str] = []
 
-    for split in SPLITS:
-        seed_value = cfg["seeds"][SPLIT_SEED_KEY[split]]
+    for split in splits:
+        seed_value = split_seed(cfg, split, reveal)
         per_cell = cfg["sizes"][split]
-        result = build_split(suite, split, seed_value, per_cell)
+        result = build_split(suite, split, seed_value, per_cell,
+                             release_id=release)
         all_bundles[split] = result["bundles"]
-
-        spec_path = os.path.join(out_dir, "specs", f"{split}.jsonl")
-        kb_path = os.path.join(out_dir, "kb", f"{split}.json")
-        oracle_path = os.path.join(out_dir, "oracles", f"{split}.jsonl")
-        write_jsonl(spec_path, result["specs"])
-        write_json(kb_path, result["kb"])
-        write_jsonl(oracle_path, result["oracles"])
-
-        for path, rows in ((spec_path, len(result["specs"])),
-                           (kb_path, len(result["kb"])),
-                           (oracle_path, len(result["oracles"]))):
-            # POSIX separators: SHA256SUMS must read the same on every platform.
-            rel = os.path.relpath(path, out_dir).replace(os.sep, "/")
-            files[rel] = {"sha256": file_sha256(path),
-                          "bytes": os.path.getsize(path), "rows": rows}
-
-        census = cluster_census(result["bundles"])
-        meta = {
-            "count": len(result["specs"]),
-            "per_cell": per_cell,
-            "registered_count": REGISTERED_TOTALS[split],
-            "cells": [c.label for c in cells_of(split)],
-            "seed": f"{seed_value:#010x}",
-            "template_ids": list(TEMPLATE_RANGES[SPLIT_KIND[split]]),
-            "fault_mix": result["fault_mix"],
-            "template_clusters": census["clusters"],
-            "max_per_template_cluster": census["max_per_cluster"],
-        }
-        if split == "eval":
-            meta["fault_groups"] = fault_group_census(result["bundles"])
-        if split == "eval_mt":
-            meta["patterns"] = {str(p): MT_PATTERNS[p]
-                               for p in range(len(MT_PATTERNS))}
-            meta["per_pattern"] = {
-                str(p): sum(1 for b in result["bundles"] if b.spec.pattern_id == p)
-                for p in range(len(MT_PATTERNS))}
-        if split in CONTROL_SPLITS:
-            meta["control"] = CONTROL_SPLITS[split]
-            meta["control_kinds"] = sorted({
-                (b.spec.control_meta or {}).get("kind", "?")
-                for b in result["bundles"]})
-            if CONTROL_SPLITS[split] == "redacted":
-                # Only the absent-information control has a hidden-entropy
-                # budget; reporting 0 for a permutation would read as a defect.
-                meta["min_hidden_entropy_bits"] = min(
-                    int((b.spec.control_meta or {}).get("hidden_entropy_bits", 0))
-                    for b in result["bundles"])
-        if split == "eval_perm":
-            meta["derangement"] = result["permutation"]
-        manifest_splits[split] = meta
+        paths = split_paths(out_dir, split)
+        write_jsonl(paths["specs"], result["specs"])
+        write_json(paths["kb"], result["kb"])
+        write_jsonl(paths["oracles"], result["oracles"])
+        source_rels.extend(split_rels(split))
+        manifest_splits[split] = _split_meta(split, result, per_cell, seed_value)
 
     suite_census = assert_suite_cardinalities(all_bundles)
 
-    manifest = {
+    body = {
         "suite": suite,
         "version": SUITE_VERSION,
         "generator": "agentlab.suite.generate",
+        "generation_protocol": GENERATION_PROTOCOL,
         "config": {"path": os.path.basename(cfg.get("config_path", "")),
                    "sha256": cfg.get("config_sha256", "")},
         "cells": [f"{f}-h{h}" for f, h in CELLS],
@@ -1089,51 +1558,240 @@ def _generate_into(cfg: dict, out_dir: str) -> dict:
         "registered_dev_per_axis": REGISTERED_DEV_PER_AXIS,
         "realized": suite_census,
         "splits": manifest_splits,
-        "files": files,
     }
-    write_json(os.path.join(out_dir, "manifest.json"), manifest)
+    if phase == TRAIN_DEV_PHASE:
+        body["heldout_plan"] = heldout_plan(cfg)
+        body["heldout_acceptance"] = "DEFERRED_UNTIL_POST_LOCK_REVEAL"
+    else:
+        body["heldout_release_id"] = release
+        body["master_seed_hex"] = reveal["master_seed"].hex()
+        body["derivation_label"] = HELDOUT_DERIVATION
+        body["locks_commit"] = reveal["locks_commit"]
+        body["preregistration_commit"] = reveal["preregistration_commit"]
+        if reveal.get("reveal_sha256"):
+            body["reveal_sha256"] = reveal["reveal_sha256"]
+    return _write_commitment(out_dir, phase, body, source_rels, None)
 
-    files["manifest.json"] = {
-        "sha256": file_sha256(os.path.join(out_dir, "manifest.json")),
-        "bytes": os.path.getsize(os.path.join(out_dir, "manifest.json")),
-        "rows": 1}
-    # Forced LF, POSIX paths: `sha256sum -c SHA256SUMS` must pass as written.
-    write_text(os.path.join(out_dir, "SHA256SUMS"),
-               "".join(f"{meta['sha256']}  {rel}\n"
-                       for rel, meta in sorted(files.items())))
-    return manifest
 
+def _commit_phase(staging: str, dest: str, phase: str) -> None:
+    """Move one phase's freshly generated files into place, and nothing else.
 
-def generate_all(cfg: dict, out_dir: str, *, atomic: bool = True) -> dict:
-    """Generate every split into out_dir; returns the manifest dict.
-
-    Atomic by default: the tree is built in a staging directory beside the
-    destination and swapped in only after every split, every cardinality
-    assertion, the manifest and SHA256SUMS have succeeded. A crashed run
-    previously left five complete-looking splits with no manifest, which is
-    exactly the shape a half-generated suite must never have. Derived outputs
-    under the destination (certspecs/) are replaced, not merged -- they are
-    regenerated from the new bytes by scripts/export_eval_specs.py.
+    SELECTIVE replacement, not a whole-directory swap: the two phases live in one
+    tree, so swapping the directory would destroy the other phase's payload and
+    the derived certspecs. Every byte is generated and every cardinality assertion
+    has already passed before the first destination path is touched, so a failed
+    run leaves the destination exactly as it was.
     """
-    if not atomic:
-        return _generate_into(cfg, out_dir)
+    rels = [PHASE_MANIFEST[phase], PHASE_SUMS[phase]]
+    for split in PHASES[phase]:
+        rels.extend(split_rels(split))
+    for rel in rels:
+        src = os.path.join(staging, rel)
+        dst = os.path.join(dest, rel)
+        os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+        os.replace(src, dst)
+
+
+def generate_phase(cfg: dict, out_dir: str, phase: str, *,
+                   reveal: dict | None = None, atomic: bool = True) -> dict:
+    """Generate exactly one phase. The held-out phase needs a verified reveal.
+
+    The refusal happens BEFORE a staging directory exists, so a failed receipt
+    check emits no partial held-out files at all.
+    """
+    if phase not in PHASES:
+        raise ValueError(f"unknown phase {phase!r}; registered: {sorted(PHASES)}")
+    if phase == HELDOUT_PHASE:
+        if not reveal:
+            raise RuntimeError(
+                "REFUSED: the held-out phase needs a verified reveal receipt "
+                "(agentic_locks.py reveal). Its six seeds derive from L, the "
+                "commit that adds the complete results/agentic/locks.json -- they "
+                "are not in the config, there is no --seed flag, no environment "
+                "seed and no fallback.")
+        for key in ("heldout_release_id", "master_seed", "split_seeds",
+                    "locks_commit", "preregistration_commit"):
+            if not reveal.get(key):
+                raise RuntimeError(f"REFUSED: the reveal receipt has no {key!r}; "
+                                   f"load it through load_reveal()")
+    else:
+        if reveal:
+            raise RuntimeError("REFUSED: the train/dev phase takes no reveal; its "
+                               "seeds are the public committed ones")
+        assert_no_stale_heldout(out_dir)
     dest = os.path.abspath(out_dir)
+    if not atomic:
+        os.makedirs(dest, exist_ok=True)
+        return _generate_phase_into(cfg, dest, phase, reveal)
     parent = os.path.dirname(dest) or "."
     os.makedirs(parent, exist_ok=True)
-    staging = f"{dest}.staging-{os.getpid()}"
-    previous = f"{dest}.previous-{os.getpid()}"
+    staging = f"{dest}.staging-{phase}-{os.getpid()}"
     shutil.rmtree(staging, ignore_errors=True)
     try:
-        manifest = _generate_into(cfg, staging)
-        if os.path.exists(dest):
-            os.rename(dest, previous)
-        try:
-            os.rename(staging, dest)
-        except OSError:
-            if os.path.exists(previous):
-                os.rename(previous, dest)
-            raise
-        shutil.rmtree(previous, ignore_errors=True)
+        manifest = _generate_phase_into(cfg, staging, phase, reveal)
+        _commit_phase(staging, dest, phase)
         return manifest
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+
+def seal_phase(cfg: dict, out_dir: str, phase: str, *,
+               reveal: dict | None = None) -> dict:
+    """Extend a phase commitment to the derived certspecs the evaluator reads.
+
+    Two writers, one commitment: this generator writes the source bundles, and
+    scripts/export_eval_specs.py writes the certification-layer manifests from
+    them. The phase is not pinned until the certspecs are hashed in, so the seal
+    is a separate, idempotent step that runs after the export and refuses if a
+    certspec belongs to another phase or another release.
+    """
+    manifest = read_phase_manifest(out_dir, phase)
+    if not manifest:
+        raise RuntimeError(f"REFUSED: {PHASE_MANIFEST[phase]} does not exist; "
+                           f"generate the phase before sealing it")
+    rels = certspec_rels(phase)
+    missing = [r for r in rels if not os.path.exists(os.path.join(out_dir, r))]
+    if missing:
+        raise RuntimeError(
+            f"REFUSED: cannot seal {phase}: the derived certspecs {missing} are "
+            f"absent. Run scripts/export_eval_specs.py for exactly this phase's "
+            f"splits ({' '.join(PHASES[phase])}), then seal.")
+    want_splits = set(PHASES[phase])
+    release = manifest.get("heldout_release_id") if phase == HELDOUT_PHASE else None
+    if phase == HELDOUT_PHASE and not release:
+        raise RuntimeError(f"REFUSED: {PHASE_MANIFEST[phase]} carries no release id")
+    for rel in rels:
+        for row in read_jsonl(os.path.join(out_dir, rel)):
+            split = row.get("split")
+            if split not in want_splits:
+                raise RuntimeError(
+                    f"REFUSED: {rel} carries split {split!r}, which is not in "
+                    f"phase {phase}. A group manifest that mixes phases would "
+                    f"pin held-out bytes into the train/dev commitment.")
+            if release and row.get("heldout_release_id") != release:
+                raise RuntimeError(
+                    f"REFUSED: {rel} row {row.get('task_id')!r} carries release "
+                    f"{row.get('heldout_release_id')!r}, not {release!r}; it was "
+                    f"exported from other bytes than the revealed release.")
+    body = {k: v for k, v in manifest.items()
+            if k not in ("files", "sealed", "certspecs", "phase")}
+    source_rels = list(manifest["files"])
+    return _write_commitment(out_dir, phase, body, source_rels,
+                             _hash_files(out_dir, rels))
+
+
+def generate_all(cfg: dict, out_dir: str, *, atomic: bool = True) -> dict:
+    """REFUSED. Held-out generation is post-lock; there is no one-pass suite.
+
+    This used to emit every split from the committed config seeds, which made all
+    1,200 held-out answers derivable from the preregistration commit alone --
+    before any prompt winner or checkpoint existed. Keeping the name as a loud
+    refusal is deliberate: a caller that still expects one pass gets an error that
+    names the two phases, not a suite with a quietly re-derived held-out set.
+    """
+    raise RuntimeError(
+        "REFUSED: generate_all() no longer exists as a behaviour. Generation is "
+        "two phases with two seed sources:\n"
+        "  generate_phase(cfg, out_dir, 'train-dev')\n"
+        "  generate_phase(cfg, out_dir, 'heldout', reveal=load_reveal(path))\n"
+        "The held-out seeds derive from L (the commit that adds the complete "
+        "results/agentic/locks.json), so the held-out splits cannot be emitted in "
+        "the same pass as train/dev.")
+
+
+# ---------------------------------------------------------------------------
+# invalidating the old-seed held-out bytes
+# ---------------------------------------------------------------------------
+# The tree really did contain held-out payloads and certspecs generated from the
+# retired public seeds. They were never evaluated, but they are cached early
+# values, and a migration that leaves them where a consumer can read them has not
+# invalidated anything.
+
+QUARANTINE_DEFAULT = os.path.join("out", "quarantine", "stale-heldout-v1")
+
+
+def stale_heldout_paths(out_dir: str) -> list[str]:
+    """Every canonical held-out payload/certspec path present but not released.
+
+    "Not released" is decided by the release commitment, not by a file name: with
+    a verified release the files must hash to their committed values and carry the
+    release id, and with no release ANY held-out file present is stale.
+    """
+    present: list[str] = []
+    rels: list[str] = []
+    for split in HELDOUT_SPLITS:
+        rels.extend(split_rels(split))
+    rels.extend(certspec_rels(HELDOUT_PHASE))
+    for rel in rels:
+        if os.path.exists(os.path.join(out_dir, rel)):
+            present.append(rel)
+    if not present:
+        return []
+    try:
+        manifest = heldout_release(out_dir)
+    except RuntimeError:
+        return present
+    if manifest is None:
+        return present
+    listed = read_sums(phase_sums_path(out_dir, HELDOUT_PHASE))
+    stale = []
+    for rel in present:
+        path = os.path.join(out_dir, rel)
+        if listed.get(rel) != file_sha256(path):
+            stale.append(rel)
+    return stale
+
+
+def assert_no_stale_heldout(out_dir: str) -> None:
+    stale = stale_heldout_paths(out_dir)
+    if not stale:
+        return
+    raise RuntimeError(
+        f"REFUSED: {out_dir} still holds {len(stale)} held-out file(s) that do "
+        f"not belong to a verified release, e.g. {stale[:4]}. These are cached "
+        f"values from the retired public-seed derivation and no consumer may read "
+        f"them.\n  Quarantine them explicitly:\n"
+        f"    scripts/generate_suite.py --quarantine-stale-heldout")
+
+
+def quarantine_stale_heldout(out_dir: str, dest: str = QUARANTINE_DEFAULT) -> dict:
+    """Move the stale held-out bytes out of the consumed tree, with a receipt.
+
+    Moved rather than silently deleted so the receipt can say what existed, how
+    big it was and what it hashed to -- an honest record that obsolete values were
+    once visible, which is a fact the protocol states rather than hides.
+    """
+    stale = stale_heldout_paths(out_dir)
+    receipt = {
+        "kind": "stale-heldout-quarantine",
+        "why": "generated from the retired public held-out seeds (derivation v1, "
+               "anchored on the preregistration commit). The registered "
+               "derivation is now heldout-master-v2 over L, so these bytes are "
+               "not the designated held-out set and cannot become it.",
+        "retired_derivation": "heldout-v1 (preregistration-commit anchored)",
+        "current_derivation": HELDOUT_DERIVATION,
+        "source_dir": os.path.abspath(out_dir),
+        "quarantined_to": os.path.abspath(dest),
+        "files": {},
+    }
+    os.makedirs(dest, exist_ok=True)
+    for rel in stale:
+        src = os.path.join(out_dir, rel)
+        receipt["files"][rel] = {"sha256": file_sha256(src),
+                                 "bytes": os.path.getsize(src)}
+        dst = os.path.join(dest, rel)
+        os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+        os.replace(src, dst)
+    # The retired whole-suite commitment goes with them: it listed held-out hashes
+    # and claimed the entire suite was pinned at a commit where the held-out bytes
+    # must not exist.
+    for rel in LEGACY_COMMITMENTS:
+        src = os.path.join(out_dir, rel)
+        if os.path.exists(src):
+            receipt["files"][rel] = {"sha256": file_sha256(src),
+                                     "bytes": os.path.getsize(src)}
+            dst = os.path.join(dest, rel)
+            os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+            os.replace(src, dst)
+    write_json(os.path.join(dest, "QUARANTINE.json"), receipt)
+    return receipt

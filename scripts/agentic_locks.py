@@ -1,52 +1,61 @@
 #!/usr/bin/env python
-"""Write the S16/S18 lock and reveal receipts. CPU only, no GPU, no network.
+"""The P -> L -> R state machine. CPU only, no GPU, no network.
 
-The verdict analyzer refuses to certify test-blindness (S18) unless two files
-exist and are ordered:
+S18 POST-LOCK HELDOUT is a relation between three commits, proved by GIT
+ANCESTRY AND ARTIFACT HASHES and never by timestamps:
 
-  results/agentic/locks.json        the prompt winner and the trained checkpoint,
-                                    each with a timestamp and the commit that
-                                    locked it
-  results/agentic/seed_reveal.json  written strictly AFTER the last lock, and
-                                    carrying the held-out seed derived from the
-                                    preregistration commit:
-                                      SHA256(<prereg commit> + ':agentic-heldout-v1')[:8]
+    P   the unique commit adding configs/preregistration_final.json
+        (the finalization marker: it hash-pins the COMPLETED preregistration and
+        the train/dev commitment)
+          |  prompt selection and training, on train/dev only
+    L   a unique DEDICATED commit adding the complete results/agentic/locks.json
+        (prompt winner + checkpoint byte digest + the trainer's receipt digest);
+        it changes nothing else, carries no reveal, and is published
+          |  the held-out seed becomes derivable HERE, and not before
+    R   a dedicated commit adding results/agentic/seed_reveal.json together with
+        data/suite/v1/manifest.heldout.json and SHA256SUMS.heldout
+          |
+    E   evaluation traces whose git_sha is R or a descendant
 
-The derivation is the point: changing any frozen content changes the anchor sha,
-so the seed cannot be chosen to favour an arm. This script DERIVES that commit
-from git history rather than accepting it as an argument.
+    P < L < R <= E
 
-THE ANCHOR, AND WHY IT NEEDED FIXING. The anchor used to be the OLDEST commit
-that added configs/agentic_preregister.json. That commit is fixed forever, so
-every later edit to the preregistration -- including the whole A5000 hardware
-pivot -- left the commitment untouched while the documentation claimed the
-opposite. The fix is a FINALIZATION MARKER, not a history rewrite:
+THE SEED. The six held-out generation seeds are `heldout-master-v2` over L:
 
-    finalize-prereg   hash every frozen preregistration file into
-                      configs/preregistration_final.json; the operator commits
-                      that file, and its ADDING commit becomes the anchor
-    verify-prereg     re-hash and refuse if any frozen file drifted afterwards
+    master        = SHA256("qwen35-agentic-lab\\0agentlab-suite-v1\\0"
+                           "heldout-master-v2\\0" || bytes.fromhex(L))
+    split_seed(s) = int(SHA256("agentlab-heldout-split-v2\\0" || master
+                              || "\\0" || s), "big")
 
-So the anchor is the commit that pins the COMPLETED preregistration, forward
-edits after finalization are detected rather than ignored, and no commit is ever
-rewritten. Until the marker exists the old oldest-addition anchor is used and
-`reveal` says so out loud (and refuses under --require-finalization, which the
-chain passes).
+implemented once, in `agentlab.suite.generate`, and imported here rather than
+copied. Because the seed is a function of L, the held-out realization CANNOT be
+generated until the prompt winner and the exact checkpoint bytes are frozen and
+published. The retired v1 derivation hung off the preregistration commit, which
+exists before any lock -- so every held-out answer was derivable in advance and
+the generator never consumed the "seed" it published.
 
-Ordering is enforced here, not just checked later: `reveal` refuses to run
-before both locks exist, and `lock-checkpoint` refuses to overwrite a lock that a
-reveal has already been issued against -- locking a different checkpoint after
-seeing held-out data is the exact failure S18 exists to catch.
+WHAT THIS DOES NOT CLAIM. A git commit id is author-influenceable (timestamps,
+parents, message), so L is not a randomness beacon: an operator could construct
+unpublished candidate lock commits, derive their held-out sets and publish the
+preferred one. Requiring L to be published before the reveal makes that visible
+in ordinary use, and nothing here can prove a negative about private caches or
+what a human saw. docs/AGENTIC_PROTOCOL.md states the exact list of what a reader
+may and may not conclude.
+
+Ordering is ENFORCED here, not merely checked later: `reveal` refuses until L
+exists as a valid dedicated published commit, `finalize-prereg` refuses unless
+train/dev acceptance is closed and no held-out byte exists anywhere, and both
+locks refuse to change after a reveal.
 
 A checkpoint lock pins the checkpoint's BYTE DIGEST and the trainer's receipt, not
 a mutable path: see `cmd_lock_checkpoint` below.
 
-    lock-prompt        --file configs/frozen_prompt.json
-    lock-checkpoint    --path out/multiface/rssft-lora --stage rs_sft
-    grpo-disposition   [--verify]   the registered stage-disposition receipt
-    finalize-prereg
+    lock-prompt              --file configs/frozen_prompt.json
+    lock-checkpoint          --path out/multiface/rssft-lora --stage rs_sft
+    grpo-disposition         [--verify]   the registered stage-disposition receipt
+    finalize-prereg          the P gate: train/dev acceptance + no held-out byte
     verify-prereg
-    reveal [--require-finalization]
+    reveal                   the R receipt; refuses without a valid published L
+    verify-heldout-release   the R gate the evaluation stage must pass
     status
 """
 
@@ -56,7 +65,9 @@ import argparse
 import datetime
 import hashlib
 import json
+import os
 import pathlib
+import platform
 import subprocess
 import sys
 
@@ -66,7 +77,43 @@ LOCKS = RESULTS / "locks.json"
 REVEAL = RESULTS / "seed_reveal.json"
 PREREG = ROOT / "configs" / "agentic_preregister.json"
 FINAL_MARKER = ROOT / "configs" / "preregistration_final.json"
-HELDOUT_LABEL = ":agentic-heldout-v1"
+
+# The state machine's paths, POSIX-relative, because git speaks in those.
+LOCKS_REL = "results/agentic/locks.json"
+REVEAL_REL = "results/agentic/seed_reveal.json"
+MARKER_REL = "configs/preregistration_final.json"
+SUITE_DIR_REL = "data/suite/v1"
+HELDOUT_MANIFEST_REL = f"{SUITE_DIR_REL}/manifest.heldout.json"
+HELDOUT_SUMS_REL = f"{SUITE_DIR_REL}/SHA256SUMS.heldout"
+TRAIN_DEV_MANIFEST_REL = f"{SUITE_DIR_REL}/manifest.train-dev.json"
+TRAIN_DEV_SUMS_REL = f"{SUITE_DIR_REL}/SHA256SUMS.train-dev"
+SUITE_RELEASE_REL = f"{SUITE_DIR_REL}/suite_release.json"
+# The study's output root: the chain's MULTIFACE_OUT. Everything the registered
+# study writes lands under it, so "no trained checkpoint exists yet" is a question
+# about this directory and not about disclosed pre-pivot history.
+STUDY_OUT_REL = "out/multiface"
+# Exactly what the reveal commit R may add, and nothing else. R must not touch the
+# preregistration, the generator, the prompt, the locks or the evaluation code.
+R_ALLOWED = (REVEAL_REL, HELDOUT_MANIFEST_REL, HELDOUT_SUMS_REL, SUITE_RELEASE_REL)
+
+STUDY_ID = "agentic-v1"
+LOCKS_SCHEMA = "agentic-locks-v2"
+# Publication: the designated public ref is the remote branch; what a clone can
+# VERIFY locally is the remote-tracking ref that follows it.
+PUBLIC_BRANCH = "refs/heads/main"
+PUBLIC_REF = "refs/remotes/origin/main"
+
+# The registered gates finalization refuses without. The observational-equivalence
+# test and the token census belong to the fault-contract layer (D1/D2); this reads
+# their registered locations out of the preregistration rather than hardcoding a
+# second copy of them.
+PARITY_TEST_KEY = ("fault_contract_reconciliation_receipt",
+                   "observational_equivalence_test", "path")
+CENSUS_ARTIFACT_KEY = ("fault_contract_reconciliation_receipt", "caps",
+                       "token_census_artifact")
+CENSUS_SHA_KEY = ("fault_contract_reconciliation_receipt", "caps",
+                  "token_census_sha256")
+CENSUS_COMMITTED_REL = "results/agentic/token_census.json"
 
 # The frozen set the marker hash-pins. Everything a claim depends on and nothing
 # that a normal day's work touches: the preregistration, the protocol, the
@@ -107,6 +154,57 @@ def _added_commit(rel: str) -> str | None:
     return shas[-1] if shas else None
 
 
+# ---------------------------------------------------------------------------
+# git facts: the ONLY thing that establishes order
+# ---------------------------------------------------------------------------
+# Timestamps are recorded and never trusted. A timestamp can be backdated by
+# anyone who can write a file; an ancestry relation cannot be, because changing a
+# parent changes every descendant's id.
+
+def _git_ok(*args: str) -> bool:
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
+                          text=True, timeout=30).returncode == 0
+
+
+def _git_bytes(*args: str) -> bytes:
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
+                          timeout=60, check=True).stdout
+
+
+def adding_commits(rel: str) -> list[str]:
+    """Every commit that ADDS `rel`, newest first."""
+    out = _git("log", "--all", "--diff-filter=A", "--format=%H", "--", rel)
+    return [line for line in out.splitlines() if line]
+
+
+def touching_commits(rel: str) -> list[str]:
+    """Every commit that changes `rel` in any way, newest first."""
+    out = _git("log", "--all", "--format=%H", "--", rel)
+    return [line for line in out.splitlines() if line]
+
+
+def is_ancestor(a: str, b: str) -> bool:
+    return _git_ok("merge-base", "--is-ancestor", a, b)
+
+
+def commit_changed_files(sha: str) -> list[str]:
+    out = _git("diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha)
+    return sorted(line for line in out.splitlines() if line)
+
+
+def tree_has(sha: str, rel: str) -> bool:
+    return _git_ok("cat-file", "-e", f"{sha}:{rel}")
+
+
+def blob_sha256(sha: str, rel: str) -> str:
+    """SHA-256 of the file's CONTENT as committed (not the git blob id)."""
+    return hashlib.sha256(_git_bytes("show", f"{sha}:{rel}")).hexdigest()
+
+
+def ref_exists(ref: str) -> bool:
+    return _git_ok("rev-parse", "--verify", "--quiet", ref)
+
+
 def finalization() -> dict | None:
     """The committed finalization marker, or None."""
     if not FINAL_MARKER.exists():
@@ -143,37 +241,281 @@ def verify_finalization(strict: bool = True) -> dict:
 
 
 def preregistration_commit() -> str:
-    """The commit this run's held-out seed derives from.
+    """P: the UNIQUE commit adding configs/preregistration_final.json. No fallback.
 
-    Preference: the commit that ADDED configs/preregistration_final.json, which
-    hash-pins the COMPLETED preregistration. Fallback: the oldest commit that
-    added configs/agentic_preregister.json -- historically the only anchor, and
-    the reason forward edits did not change the commitment.
+    The old oldest-addition fallback is gone. It anchored on the first commit that
+    ever added a preregistration FILE, which is fixed forever, so every later edit
+    -- including the whole hardware pivot -- left the commitment untouched while
+    the documentation claimed the opposite. P is now the commit that pins the
+    COMPLETED preregistration and the train/dev commitment, and if it does not
+    exist the answer is a refusal rather than a weaker anchor.
     """
-    state = verify_finalization()
-    if state["present"] and state.get("commit"):
-        return state["commit"]
-    rel = PREREG.relative_to(ROOT).as_posix()
-    sha = _added_commit(rel)
-    if not sha:
-        raise SystemExit(f"cannot find the commit that added {rel}; "
-                         f"the preregistration must be committed before locking")
-    return sha
+    verify_finalization()                     # refuses on drift
+    adds = adding_commits(MARKER_REL)
+    if not adds:
+        raise SystemExit(
+            f"REFUSED: no commit adds {MARKER_REL}, so P does not exist. Run "
+            f"`agentic_locks.py finalize-prereg` and commit the marker: until it "
+            f"is in a commit it anchors nothing.")
+    if len(adds) > 1:
+        raise SystemExit(
+            f"REFUSED: {len(adds)} commits add {MARKER_REL} ({[c[:12] for c in adds]}). "
+            f"P must be unique -- 'the preregistration commit' cannot name two "
+            f"different trees.")
+    P = adds[0]
+    on_disk = _sha256_file(FINAL_MARKER)
+    if blob_sha256(P, MARKER_REL) != on_disk:
+        raise SystemExit(
+            f"REFUSED: {MARKER_REL} on disk does not match the bytes committed in "
+            f"P ({P[:12]}). An edited marker anchors a tree that was never "
+            f"committed.")
+    return P
+
+
+def _generate():
+    """The suite generator: the ONE implementation of the held-out derivation."""
+    sys.path.insert(0, str(ROOT / "src"))
+    from agentlab.suite import generate
+
+    return generate
+
+
+def _registered(prereg: dict, keys) -> object:
+    node = prereg
+    for k in keys:
+        if not isinstance(node, dict) or k not in node:
+            raise SystemExit(f"REFUSED: the preregistration does not register "
+                             f"{'.'.join(keys)}")
+        node = node[k]
+    return node
+
+
+# ---------------------------------------------------------------------------
+# the P gate
+# ---------------------------------------------------------------------------
+# finalize-prereg belongs BEFORE the first study GPU stage: P has to pin the
+# train/dev realization and the held-out derivation RULE before the prompt
+# tournament runs, or the tournament happens under an unpinned commitment. Every
+# gate below is a positive fact about the tree, and every one of them refuses
+# rather than warns.
+
+def _run(cmd: list[str], *, timeout: int = 1800) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
+                          timeout=timeout, env=env)
+
+
+def _py() -> str:
+    return sys.executable
+
+
+def gate_sibling_acceptance(prereg: dict) -> list[str]:
+    """D1/D2's CPU acceptance: the parity test passes and the census is pinned.
+
+    The observational-equivalence test is the decisive one for the fault-contract
+    unification (it compares rendered prefix token ids per decision, not just
+    observation digests), and the size caps are only meaningful against the
+    committed tokenizer census. Neither is re-implemented here: the registered path
+    is read out of the preregistration and executed.
+    """
+    problems: list[str] = []
+    rel = str(_registered(prereg, PARITY_TEST_KEY))
+    path = ROOT / rel
+    if not path.exists():
+        return [f"the registered observational-equivalence test {rel} is absent"]
+    r = _run([_py(), "-m", "pytest", "-q", rel])
+    if r.returncode != 0:
+        tail = (r.stdout + r.stderr).strip().splitlines()[-6:]
+        problems.append(f"the observational-equivalence test {rel} FAILS: {tail}")
+
+    census_rel = str(_registered(prereg, CENSUS_ARTIFACT_KEY))
+    want_sha = str(_registered(prereg, CENSUS_SHA_KEY))
+    found = None
+    for candidate in (census_rel, CENSUS_COMMITTED_REL):
+        if (ROOT / candidate).exists():
+            found = candidate
+            break
+    if not found:
+        return problems + [
+            f"the tokenizer size census is absent ({census_rel} and "
+            f"{CENSUS_COMMITTED_REL}); the caps in configs/multifaceted.yaml are "
+            f"only meaningful against a recorded measurement"]
+    got = _sha256_file(ROOT / found)
+    if got != want_sha:
+        problems.append(f"{found} hashes {got[:12]} and the preregistration pins "
+                        f"{want_sha[:12]}: the census on disk is not the one the "
+                        f"caps were registered against")
+    if not _git_ok("ls-files", "--error-unmatch", CENSUS_COMMITTED_REL):
+        problems.append(f"{CENSUS_COMMITTED_REL} is not committed; an uncommitted "
+                        f"census pins nothing")
+    census = json.loads((ROOT / found).read_text(encoding="utf-8"))
+    want_env = _registered(prereg, ("fault_contract_reconciliation_receipt",
+                                    "environment_contract", "current_sha256"))
+    if census.get("environment_contract_sha256") != want_env:
+        problems.append("the census was measured under a different environment "
+                        "contract than the registered one")
+    return problems
+
+
+def gate_train_dev_acceptance() -> list[str]:
+    """The train/dev half of the acceptance criteria, run for real."""
+    r = _run([_py(), "scripts/validate_suite.py", "--require-phase", "train-dev"])
+    if r.returncode != 0:
+        tail = (r.stdout + r.stderr).strip().splitlines()[-12:]
+        return [f"scripts/validate_suite.py --require-phase train-dev FAILS: {tail}"]
+    if "train_dev_acceptance: PASS" not in r.stdout:
+        return ["the validator did not report train_dev_acceptance: PASS"]
+    if "heldout_acceptance:   DEFERRED_UNTIL_POST_LOCK_REVEAL" not in r.stdout:
+        return ["the validator did not defer held-out acceptance; a run that claims "
+                "held-out validation before the reveal is claiming nonexistent bytes"]
+    return []
+
+
+def gate_heldout_generator_refuses(data_dir: str) -> list[str]:
+    """The refusal is TESTED, not documented: no reveal, no held-out byte."""
+    generate = _generate()
+    before = set(generate.stale_heldout_paths(data_dir))
+    r = _run([_py(), "scripts/generate_suite.py", "--phase", "heldout"])
+    problems = []
+    if r.returncode == 0:
+        problems.append("scripts/generate_suite.py --phase heldout SUCCEEDED "
+                        "without a reveal receipt")
+    if "REFUSED" not in (r.stdout + r.stderr):
+        problems.append("the held-out generator did not refuse out loud")
+    after = set(generate.stale_heldout_paths(data_dir))
+    if after - before:
+        problems.append(f"the refused run left files behind: {sorted(after - before)}")
+    if (ROOT / HELDOUT_MANIFEST_REL).exists():
+        problems.append(f"{HELDOUT_MANIFEST_REL} exists before any reveal")
+    return problems
+
+
+def gate_no_heldout_bytes(data_dir: str) -> list[str]:
+    generate = _generate()
+    problems = []
+    stale = generate.stale_heldout_paths(data_dir)
+    if stale:
+        problems.append(
+            f"{len(stale)} held-out file(s) are present in the consumed tree, e.g. "
+            f"{stale[:3]}. Before the reveal there must be none: quarantine them "
+            f"(scripts/generate_suite.py --quarantine-stale-heldout).")
+    for rel in generate.LEGACY_COMMITMENTS:
+        if (ROOT / SUITE_DIR_REL / rel).exists():
+            problems.append(f"{SUITE_DIR_REL}/{rel} is the retired whole-suite "
+                            f"commitment and discloses held-out hashes")
+    for rel in (HELDOUT_MANIFEST_REL, HELDOUT_SUMS_REL, REVEAL_REL):
+        if _git_ok("ls-files", "--error-unmatch", rel):
+            problems.append(f"{rel} is TRACKED at P; the held-out commitments belong "
+                            f"to R, which does not exist yet")
+    for rel in (TRAIN_DEV_MANIFEST_REL, TRAIN_DEV_SUMS_REL):
+        if not (ROOT / rel).exists():
+            problems.append(f"{rel} is missing: P must pin the train/dev realization")
+    return problems
+
+
+def gate_nothing_has_run(cfg: dict) -> list[str]:
+    """No GPU-hour, no checkpoint, no lock, no reveal, no held-out trace.
+
+    finalize-prereg runs before the tournament, so a lock or a ledger row here
+    means the ordering already went wrong and the marker would be pinning a
+    commitment the study has partly executed against.
+    """
+    problems = []
+    ledger = ROOT / str(cfg.get("budget", {}).get("ledger",
+                                                  "results/agentic/gpu_ledger.jsonl"))
+    if ledger.exists():
+        rows = [ln for ln in ledger.read_text(encoding="utf-8").splitlines()
+                if ln.strip()]
+        if rows:
+            problems.append(f"{_rel(ledger)} already has {len(rows)} row(s): study "
+                            f"GPU work has run, so this is not a pre-run "
+                            f"finalization")
+    # The STUDY's output root (the chain's MULTIFACE_OUT). Adapters elsewhere under
+    # out/ are the pre-pivot artifacts the preregistration already discloses as
+    # excluded prior evidence -- they are reported, not gated on, because gating on
+    # them would demand deleting disclosed history.
+    study_adapters = sorted(
+        str(p.relative_to(ROOT))
+        for p in (ROOT / STUDY_OUT_REL).glob("**/adapter_model.safetensors"))
+    if study_adapters:
+        problems.append(f"trained checkpoint(s) already exist under "
+                        f"{STUDY_OUT_REL}: {study_adapters[:2]}")
+    other = sorted(str(p.relative_to(ROOT))
+                   for p in (ROOT / "out").glob("**/adapter_model.safetensors")
+                   if STUDY_OUT_REL not in str(p))
+    if other:
+        print(f"  disclosed (not gated): {len(other)} pre-pivot adapter(s) outside "
+              f"{STUDY_OUT_REL}, e.g. {other[:2]} -- registered as excluded prior "
+              f"evidence, refused by the invalidation rule rather than re-certified")
+    if LOCKS.exists():
+        problems.append(
+            f"{LOCKS_REL} already exists. finalize-prereg belongs BEFORE the prompt "
+            f"tournament: P must pin the commitment the tournament and the training "
+            f"run under, and L must be a strict DESCENDANT of P.")
+    if REVEAL.exists():
+        problems.append(f"{REVEAL_REL} exists, so held-out results are already "
+                        f"unblinded; finalizing now would move P after the fact")
+    return problems
+
+
+def generation_closure(cfg: dict) -> dict:
+    """Every byte that decides what the held-out realization will be.
+
+    Frozen at P so that "the same L gives the same held-out set" is checkable: the
+    generator, the loader, the family grammars, the serialization rules, the
+    config, and the exact Python runtime.
+    """
+    rels = ["scripts/generate_suite.py", "scripts/validate_suite.py",
+            "scripts/export_eval_specs.py", "configs/suite_v1.toml",
+            "src/agentlab/tools.py"]
+    suite_dir = ROOT / "src" / "agentlab" / "suite"
+    rels += sorted(str(p.relative_to(ROOT)) for p in suite_dir.glob("**/*.py"))
+    closure = {rel: _sha256_file(ROOT / rel) for rel in rels
+               if (ROOT / rel).exists()}
+    return {
+        "files": closure,
+        "digest": hashlib.sha256(
+            json.dumps(closure, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "python": f"{platform.python_implementation()} "
+                  f"{platform.python_version()}",
+        "stdlib_only": "generation imports nothing outside the standard library",
+    }
 
 
 def cmd_finalize_prereg(args) -> int:
-    """Write the finalization marker. The OPERATOR commits it; that is the anchor."""
-    if REVEAL.exists():
-        raise SystemExit(
-            f"REFUSED: {REVEAL.relative_to(ROOT)} exists, so held-out results are "
-            f"already unblinded. Finalizing the preregistration now would move the "
-            f"anchor -- and the seed -- after the fact.")
+    """The P gate, then the marker. The OPERATOR commits it; that commit is P."""
+    generate = _generate()
+    prereg = json.loads(PREREG.read_text(encoding="utf-8"))
+    cfg_suite = generate.load_suite_config(str(ROOT / "configs" / "suite_v1.toml"))
+    data_dir = str(ROOT / cfg_suite["out_dir"])
     existing = finalization()
     if existing and not args.force:
         state = verify_finalization()
         print(json.dumps(state, indent=2, sort_keys=True))
         print(f"already finalized: {FINAL_MARKER.relative_to(ROOT)}")
         return 0
+
+    gates = {
+        "no_heldout_bytes_anywhere": gate_no_heldout_bytes(data_dir),
+        "nothing_has_run_yet": gate_nothing_has_run(_load_cfg()),
+        "heldout_generator_refuses_without_a_reveal":
+            gate_heldout_generator_refuses(data_dir),
+        "sibling_cpu_acceptance_d1_d2": gate_sibling_acceptance(prereg),
+        "train_dev_acceptance": gate_train_dev_acceptance(),
+    }
+    print("the P gate:")
+    for name, problems in gates.items():
+        print(f"  [{'PASS' if not problems else 'FAIL'}] {name}")
+        for p in problems:
+            print(f"        {p}")
+    if any(gates.values()):
+        raise SystemExit(
+            "REFUSED: finalization is the moment the commitment becomes binding, so "
+            "every gate above has to be closed FIRST. Nothing here is a threshold "
+            "that can be relaxed: fix the mechanism, then finalize.")
+
     hashes = frozen_hashes()
     missing = [rel for rel in FROZEN_SET if rel not in hashes]
     payload = {
@@ -181,22 +523,57 @@ def cmd_finalize_prereg(args) -> int:
         "head_at_finalization": _git("rev-parse", "HEAD"),
         "files": hashes,
         "absent": missing,
-        "note": "The commit that ADDS this file is the preregistration anchor: "
-                "the held-out seed derives from it, so it pins the COMPLETED "
-                "preregistration rather than the first commit that happened to "
-                "introduce a preregistration file. No history is rewritten.",
-        "seed_derivation": f"int.from_bytes(SHA256(<this file's adding commit> + "
-                           f"'{HELDOUT_LABEL}')[:8], 'big')",
+        "study_id": STUDY_ID,
+        "train_dev_acceptance": "PASS",
+        "heldout_acceptance": "DEFERRED_UNTIL_POST_LOCK_REVEAL",
+        "heldout_acceptance_note":
+            "No held-out byte exists at P and none may. This marker does NOT claim "
+            "that held-out hashes, cardinalities, controls, the core cluster census "
+            "or train/dev/eval cross-isolation were validated: they are established "
+            "at R, over the release the locks commit determines.",
+        "train_dev_commitment": {
+            "manifest": TRAIN_DEV_MANIFEST_REL,
+            "manifest_sha256": _sha256_file(ROOT / TRAIN_DEV_MANIFEST_REL),
+            "sums": TRAIN_DEV_SUMS_REL,
+            "sums_sha256": _sha256_file(ROOT / TRAIN_DEV_SUMS_REL),
+        },
+        "heldout_derivation": {
+            "label": generate.HELDOUT_DERIVATION,
+            "master_label_parts": list(generate.HELDOUT_MASTER_LABEL_PARTS),
+            "split_label": generate.HELDOUT_SPLIT_LABEL,
+            "release_label": generate.HELDOUT_RELEASE_LABEL,
+            "generation_protocol": generate.GENERATION_PROTOCOL,
+            "seed_source": "L: the unique dedicated commit adding "
+                           + LOCKS_REL,
+            "splits": list(generate.HELDOUT_SPLITS),
+        },
+        "heldout_plan_digest": hashlib.sha256(
+            json.dumps(generate.heldout_plan(cfg_suite), sort_keys=True,
+                       separators=(",", ":")).encode()).hexdigest(),
+        "generation_closure": generation_closure(cfg_suite),
+        "gates": {name: "PASS" for name in gates},
+        "note": "The commit that ADDS this file is P. It pins the COMPLETED "
+                "preregistration, the train/dev realization and the held-out "
+                "derivation RULE -- not a held-out seed value, which cannot exist "
+                "before L. No history is rewritten.",
+        "seed_derivation": "master = SHA256('qwen35-agentic-lab\\0agentlab-suite-v1"
+                           "\\0heldout-master-v2\\0' || bytes.fromhex(L)); "
+                           "split_seed(s) = int(SHA256('agentlab-heldout-split-v2\\0'"
+                           " || master || '\\0' || s), 'big')",
     }
     FINAL_MARKER.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
                             encoding="utf-8")
-    print(f"wrote {FINAL_MARKER.relative_to(ROOT)} pinning {len(hashes)} frozen files")
+    print(f"\nwrote {FINAL_MARKER.relative_to(ROOT)} pinning {len(hashes)} frozen files")
     for rel, sha in sorted(hashes.items()):
         print(f"  {sha[:12]}  {rel}")
-    print("\nCOMMIT IT -- an uncommitted marker anchors nothing:")
-    print(f"  git add {FINAL_MARKER.relative_to(ROOT)}")
-    print('  git commit -m "Finalize the preregistration: hash-pin the completed '
-          'commitment"')
+    print(f"  generation closure {payload['generation_closure']['digest'][:12]} "
+          f"({len(payload['generation_closure']['files'])} files, "
+          f"{payload['generation_closure']['python']})")
+    print("\nCOMMIT IT -- an uncommitted marker anchors nothing, and its commit is P:")
+    print(f"  git add {FINAL_MARKER.relative_to(ROOT)} {TRAIN_DEV_MANIFEST_REL} "
+          f"{TRAIN_DEV_SUMS_REL}")
+    print('  git commit -m "Finalize the preregistration: pin the completed '
+          'commitment and the train/dev realization"')
     return 0
 
 
@@ -322,9 +699,114 @@ def cmd_verify_prereg(args) -> int:
     return 0
 
 
-def heldout_seed(commit: str) -> int:
-    return int.from_bytes(
-        hashlib.sha256((str(commit) + HELDOUT_LABEL).encode()).digest()[:8], "big")
+def locks_payload_problems(locks: dict, prereg_commit: str) -> list[str]:
+    """Is this a COMPLETE lock? -> problems.
+
+    Structure only: the checkpoint's byte-level verification belongs to
+    `verify_checkpoint_lock`, which owns the trainer-receipt grammar, and is
+    called by the reveal rather than reimplemented here.
+    """
+    problems = []
+    if locks.get("schema") != LOCKS_SCHEMA:
+        problems.append(f"schema is {locks.get('schema')!r}, not {LOCKS_SCHEMA!r}")
+    if locks.get("study_id") != STUDY_ID:
+        problems.append(f"study_id is {locks.get('study_id')!r}, not {STUDY_ID!r}")
+    if str(locks.get("preregistration_commit")) != prereg_commit:
+        problems.append(f"preregistration_commit is "
+                        f"{locks.get('preregistration_commit')!r}, and P is "
+                        f"{prereg_commit}")
+    prompt = locks.get("prompt_winner") or {}
+    if not prompt.get("file") or len(str(prompt.get("sha256", ""))) != 64:
+        problems.append("prompt_winner carries no file + sha256")
+    ckpt = locks.get("checkpoint") or {}
+    if len(str(ckpt.get("checkpoint_sha256", ""))) != 64:
+        problems.append("checkpoint carries no 64-hex checkpoint_sha256: a lock on "
+                        "a mutable PATH pins nothing")
+    if not ckpt.get("checkpoint_files"):
+        problems.append("checkpoint carries no per-file digest manifest")
+    if ckpt.get("stage") not in ("rs_sft", "grpo"):
+        problems.append(f"checkpoint stage {ckpt.get('stage')!r} is not one of "
+                        f"rs_sft/grpo")
+    if not locks.get("selection"):
+        problems.append("no selection receipt: a lock must say whether the "
+                        "checkpoint won a dev comparison or was the sole candidate")
+    return problems
+
+
+def locks_commit(*, prereg_commit: str | None = None) -> dict:
+    """L, with every condition it has to satisfy, or a refusal that says which.
+
+    L is identified EXTERNALLY -- as the unique commit that adds the locks blob --
+    so `locks.json` never has to contain a field pretending to hold its own commit
+    sha, which is impossible.
+    """
+    P = prereg_commit or preregistration_commit()
+    if not LOCKS.exists():
+        raise SystemExit(f"REFUSED: {LOCKS_REL} does not exist. Lock the prompt "
+                         f"winner and the checkpoint first; that ordering IS S18.")
+    locks = read_locks()
+    problems = locks_payload_problems(locks, P)
+    if problems:
+        raise SystemExit(
+            "REFUSED: the lock is INCOMPLETE, so there is nothing for the held-out "
+            "seed to be a function of:\n  - " + "\n  - ".join(problems))
+    adds = adding_commits(LOCKS_REL)
+    if not adds:
+        raise SystemExit(
+            f"REFUSED: {LOCKS_REL} exists on disk but no commit adds it. L must be "
+            f"a real commit: the seed derives from its sha, and an uncommitted file "
+            f"has none. Commit it ALONE:\n"
+            f"    git add {LOCKS_REL}\n"
+            f'    git commit -m "Lock the prompt winner and the trained checkpoint"')
+    if len(adds) > 1:
+        raise SystemExit(f"REFUSED: {len(adds)} commits add {LOCKS_REL} "
+                         f"({[c[:12] for c in adds]}); L must be unique")
+    L = adds[0]
+    touching = touching_commits(LOCKS_REL)
+    facts = {}
+    problems = []
+    if len(touching) != 1 or touching[0] != L:
+        problems.append(
+            f"{len(touching)} commits change {LOCKS_REL}; a later edit means the "
+            f"published lock is not the lock in the tree, and the seed would "
+            f"derive from a superseded one")
+    changed = commit_changed_files(L)
+    if changed != [LOCKS_REL]:
+        problems.append(f"L changes {changed}; it must be a DEDICATED commit that "
+                        f"changes only {LOCKS_REL}")
+    if not is_ancestor(P, L) or P == L:
+        problems.append(f"L ({L[:12]}) is not a strict descendant of P ({P[:12]}): "
+                        f"the relation P < L is what makes the lock post-"
+                        f"preregistration")
+    for rel in (REVEAL_REL, HELDOUT_MANIFEST_REL, HELDOUT_SUMS_REL):
+        if tree_has(L, rel):
+            problems.append(f"L already carries {rel}: a lock commit that contains "
+                            f"a reveal or a held-out commitment is not a lock, it "
+                            f"is the reveal")
+    on_disk = _sha256_file(LOCKS)
+    committed = blob_sha256(L, LOCKS_REL)
+    if committed != on_disk:
+        problems.append(f"{LOCKS_REL} on disk hashes {on_disk[:12]} and L committed "
+                        f"{committed[:12]}: the seed must derive from the PUBLISHED "
+                        f"lock, not from an edited copy")
+    if not ref_exists(PUBLIC_REF):
+        problems.append(f"the designated public ref {PUBLIC_REF} does not exist "
+                        f"here, so publication cannot be verified")
+    elif not is_ancestor(L, PUBLIC_REF):
+        problems.append(
+            f"L ({L[:12]}) is not published on {PUBLIC_REF}. Push it BEFORE "
+            f"revealing: an unpublished lock leaves no evidence that candidate lock "
+            f"commits were not ground and discarded until a favourable held-out "
+            f"seed appeared.")
+    if problems:
+        raise SystemExit("REFUSED: L is not a valid lock commit:\n  - "
+                         + "\n  - ".join(problems))
+    facts.update({"commit": L, "preregistration_commit": P,
+                  "locks_blob_sha256": on_disk,
+                  "changed_files": changed,
+                  "published_on": PUBLIC_REF,
+                  "public_branch": PUBLIC_BRANCH})
+    return facts
 
 
 def read_locks() -> dict:
@@ -338,7 +820,7 @@ def write_locks(locks: dict) -> None:
 
 
 def _refuse_if_revealed(what: str) -> None:
-    if REVEAL.exists():
+    if REVEAL.exists() or (ROOT / HELDOUT_MANIFEST_REL).exists():
         raise SystemExit(
             f"REFUSED: {REVEAL.relative_to(ROOT)} already exists, so held-out "
             f"results have been unblinded. Changing the {what} lock now is the "
@@ -346,8 +828,28 @@ def _refuse_if_revealed(what: str) -> None:
             f"candidate needs a dated AMENDMENT and fresh held-out seeds.")
 
 
+def _stamp_locks_header(locks: dict, prereg_commit: str) -> dict:
+    """The lock's own identity: schema, study, and the P it descends from.
+
+    Deliberately NOT its own commit sha -- a file cannot contain the hash of the
+    commit that adds it. L is identified externally, as the unique commit adding
+    this blob.
+    """
+    locks["schema"] = LOCKS_SCHEMA
+    locks["study_id"] = STUDY_ID
+    locks["preregistration_commit"] = prereg_commit
+    locks["note"] = ("L is the unique DEDICATED commit that adds this file; the six "
+                     "held-out generation seeds are heldout-master-v2 over that "
+                     "commit sha. Timestamps here are informational: order is "
+                     "established by git ancestry, never by them.")
+    return locks
+
+
 def cmd_lock_prompt(args) -> int:
     _refuse_if_revealed("prompt_winner")
+    # Every prompt/training stage requires a committed, clean P: the tournament
+    # runs AFTER finalization, so if P does not exist yet the ordering is wrong.
+    prereg_commit = preregistration_commit()
     frozen = json.loads(pathlib.Path(args.file).read_text(encoding="utf-8"))
     winner = frozen.get("winner") or frozen
     prereg = json.loads(PREREG.read_text(encoding="utf-8"))
@@ -369,11 +871,12 @@ def cmd_lock_prompt(args) -> int:
     if on_disk != sha:
         raise SystemExit(f"REFUSED: {path} on disk hashes {on_disk[:12]}, the "
                          f"tournament recorded {sha[:12]}")
-    locks = read_locks()
+    locks = _stamp_locks_header(read_locks(), prereg_commit)
     locks["prompt_winner"] = {"file": path, "sha256": sha, "locked_at": now(),
                               "commit": _git("rev-parse", "HEAD")}
     write_locks(locks)
     print(f"locked prompt winner {path} ({sha[:12]})")
+    print(f"  under P {prereg_commit[:12]}")
     return 0
 
 
@@ -519,59 +1022,210 @@ def verify_checkpoint_lock(locks: dict | None = None, *, cfg: dict | None = None
     return rec
 
 
+def reveal_payload(facts: dict, generate) -> dict:
+    """The receipt. It RECORDS a derivation; it does not release a secret.
+
+    Once L is public the seed is mathematically derivable by anyone, which is the
+    point: the reveal is a receipt saying which L this study's held-out set came
+    from, not a key handed out at a chosen moment.
+    """
+    master = generate.heldout_master_seed(facts["commit"])
+    return {
+        "schema": generate.REVEAL_SCHEMA,
+        "study_id": STUDY_ID,
+        "preregistration_commit": facts["preregistration_commit"],
+        "locks_commit": facts["commit"],
+        "locks_blob_sha256": facts["locks_blob_sha256"],
+        "public_ref": PUBLIC_BRANCH,
+        "public_ref_verified": facts["published_on"],
+        "master_seed_hex": master.hex(),
+        "heldout_release_id": generate.heldout_release_id(master),
+        "derivation_label": generate.HELDOUT_DERIVATION,
+        "generation_protocol": generate.GENERATION_PROTOCOL,
+        "generator_commit": facts["preregistration_commit"],
+        "revealed_at": now(),
+        "timestamps_are_informational": True,
+        "ordering_is_established_by": "git ancestry P < L < R <= E, never timestamps",
+        "note": "The six held-out split seeds and the release id are derived from "
+                "master; none of them is stored here as a value to be trusted. "
+                "A commit sha is author-influenceable, so this is a "
+                "post-lock-derivation receipt, not a randomness beacon.",
+    }
+
+
 def cmd_reveal(args) -> int:
-    locks = read_locks()
-    missing = [k for k in ("prompt_winner", "checkpoint") if k not in locks]
-    if missing:
-        raise SystemExit(f"REFUSED: cannot reveal the held-out seed before "
-                         f"locking {missing}; that ordering IS S18")
+    generate = _generate()
+    P = preregistration_commit()
+    facts = locks_commit(prereg_commit=P)
+    # The checkpoint's BYTES, re-hashed now: a checkpoint mutated after L was
+    # published would otherwise be revealed against.
+    verify_checkpoint_lock(read_locks(), verify_bytes=not args.no_bytes)
+    cfg = generate.load_suite_config(str(ROOT / "configs" / "suite_v1.toml"))
+    data_dir = str(ROOT / cfg["out_dir"])
+    generate.assert_no_stale_heldout(data_dir)
+    payload = reveal_payload(facts, generate)
     if REVEAL.exists():
-        print(f"already revealed: {REVEAL.relative_to(ROOT)}")
+        existing = json.loads(REVEAL.read_text(encoding="utf-8"))
+        for key in ("locks_commit", "master_seed_hex", "heldout_release_id",
+                    "preregistration_commit"):
+            if existing.get(key) != payload[key]:
+                raise SystemExit(
+                    f"REFUSED: {REVEAL_REL} already exists and its {key} is "
+                    f"{existing.get(key)!r}, but this state machine derives "
+                    f"{payload[key]!r}. A second, different reveal for the same "
+                    f"study is a replay: it needs a dated AMENDMENT, not an "
+                    f"overwrite.")
+        print(f"already revealed (identical receipt): {REVEAL_REL}")
         return 0
-    state = verify_finalization()
-    if getattr(args, "require_finalization", False) and (
-            not state["present"] or state["anchor"] != "finalization-marker"):
-        raise SystemExit(
-            "REFUSED: the preregistration is not finalized (or its marker is not "
-            "committed), so the held-out seed would anchor to the OLDEST commit "
-            "that added a preregistration file -- an anchor that every later edit, "
-            "including the whole hardware pivot, left untouched. Run "
-            "`agentic_locks.py finalize-prereg`, commit the marker, then reveal.")
-    if not state["present"]:
-        print("WARNING: not finalized. The anchor is the oldest commit that added "
-              "the preregistration, so forward edits did not change it.")
-    commit = preregistration_commit()
-    payload = {"revealed_at": now(), "preregistration_commit": commit,
-               "heldout_seed": heldout_seed(commit),
-               "anchor": state["anchor"],
-               "finalization": state,
-               "derivation": f"int.from_bytes(SHA256(commit + '{HELDOUT_LABEL}')"
-                             f"[:8], 'big')"}
-    latest = max(locks[k]["locked_at"] for k in ("prompt_winner", "checkpoint"))
-    if payload["revealed_at"] <= latest:
-        # Same-second locking would make the reveal look non-strictly-after.
-        raise SystemExit(f"REFUSED: reveal timestamp {payload['revealed_at']} is "
-                         f"not strictly after the last lock {latest}; wait a "
-                         f"second and retry rather than backdating anything")
     RESULTS.mkdir(parents=True, exist_ok=True)
     REVEAL.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
                       encoding="utf-8")
-    print(f"revealed held-out seed for preregistration commit {commit[:12]}")
+    print(f"revealed the held-out derivation for L {facts['commit'][:12]} "
+          f"(published on {facts['published_on']})")
+    print(f"  P                 {facts['preregistration_commit'][:12]}")
+    print(f"  release id        {payload['heldout_release_id']}")
+    print(f"  derivation        {payload['derivation_label']}")
+    print("\nNEXT, in this order:")
+    print(f"  scripts/generate_suite.py --phase heldout --reveal {REVEAL_REL}")
+    print("  scripts/export_eval_specs.py --splits "
+          + " ".join(generate.PHASES["heldout"]))
+    print("  scripts/generate_suite.py --phase heldout --seal")
+    print("  scripts/validate_suite.py --require-phase heldout")
+    print(f"  git add {REVEAL_REL} {HELDOUT_MANIFEST_REL} {HELDOUT_SUMS_REL}")
+    print('  git commit -m "Reveal the held-out derivation and pin the release"')
+    print("  git push          # R must be published before any evaluation")
+    return 0
+
+
+def heldout_release_state() -> dict:
+    """R: the reveal commit and every condition the evaluation stage requires."""
+    generate = _generate()
+    state: dict = {"reveal_present": REVEAL.exists(), "problems": []}
+    if not REVEAL.exists():
+        state["problems"].append(f"{REVEAL_REL} does not exist: nothing is revealed")
+        return state
+    receipt = generate.load_reveal(str(REVEAL))
+    P = preregistration_commit()
+    facts = locks_commit(prereg_commit=P)
+    L = facts["commit"]
+    problems: list[str] = []
+    if receipt["locks_commit"] != L:
+        problems.append(f"the receipt names L {receipt['locks_commit'][:12]} and the "
+                        f"repository's unique lock commit is {L[:12]}")
+    if receipt["preregistration_commit"] != P:
+        problems.append(f"the receipt names P {receipt['preregistration_commit'][:12]}"
+                        f" and P is {P[:12]}")
+    if receipt["locks_blob_sha256"] != facts["locks_blob_sha256"]:
+        problems.append("the receipt's locks_blob_sha256 is not the committed lock")
+    adds = adding_commits(REVEAL_REL)
+    R = None
+    if not adds:
+        problems.append(f"no commit adds {REVEAL_REL}: R does not exist yet. Commit "
+                        f"the receipt together with the held-out commitments.")
+    elif len(adds) > 1:
+        problems.append(f"{len(adds)} commits add {REVEAL_REL}; R must be unique")
+    else:
+        R = adds[0]
+        changed = set(commit_changed_files(R))
+        must = {REVEAL_REL, HELDOUT_MANIFEST_REL, HELDOUT_SUMS_REL}
+        if not must <= changed:
+            problems.append(
+                f"R adds {sorted(changed)}; it must add the receipt AND the held-out "
+                f"commitments together ({sorted(must)}) -- a reveal without its "
+                f"manifest lets the evaluated bytes be chosen after the fact")
+        stray = sorted(changed - set(R_ALLOWED))
+        if stray:
+            problems.append(f"R also changes {stray}; the reveal commit may not "
+                            f"touch the preregistration, the generator, the prompt, "
+                            f"the lock or the evaluation code")
+        if not is_ancestor(L, R) or L == R:
+            problems.append(f"R ({R[:12]}) is not a strict descendant of L ({L[:12]})")
+        if not ref_exists(PUBLIC_REF):
+            problems.append(f"{PUBLIC_REF} does not exist, so R's publication cannot "
+                            f"be verified")
+        elif not is_ancestor(R, PUBLIC_REF):
+            problems.append(f"R ({R[:12]}) is not published on {PUBLIC_REF}; "
+                            f"evaluation waits until it is")
+        for rel in sorted(must):
+            if blob_sha256(R, rel) != _sha256_file(ROOT / rel):
+                problems.append(f"{rel} on disk is not the bytes R committed")
+    cfg = generate.load_suite_config(str(ROOT / "configs" / "suite_v1.toml"))
+    data_dir = str(ROOT / cfg["out_dir"])
+    manifest = generate.heldout_release(data_dir)
+    if manifest is None:
+        problems.append(f"{HELDOUT_MANIFEST_REL} is absent: the release is not pinned")
+    else:
+        if not manifest.get("sealed"):
+            problems.append("the held-out manifest is UNSEALED: the certspecs the "
+                            "evaluator reads are not pinned by it")
+        if manifest.get("heldout_release_id") != receipt["heldout_release_id"]:
+            problems.append("the manifest's release id is not the receipt's")
+        if manifest.get("locks_commit") != receipt["locks_commit"]:
+            problems.append("the manifest's locks commit is not the receipt's")
+        listed = generate.read_sums(generate.phase_sums_path(data_dir, "heldout"))
+        bad = [rel for rel, digest in sorted(listed.items())
+               if not os.path.exists(os.path.join(data_dir, rel))
+               or generate.file_sha256(os.path.join(data_dir, rel)) != digest]
+        if bad:
+            problems.append(f"{len(bad)} released file(s) do not match "
+                            f"SHA256SUMS.heldout, e.g. {bad[:3]}")
+        stale = generate.stale_heldout_paths(data_dir)
+        if stale:
+            problems.append(f"held-out files outside the release: {stale[:3]}")
+    state.update({"P": P, "L": L, "R": R,
+                  "heldout_release_id": receipt["heldout_release_id"],
+                  "problems": problems})
+    return state
+
+
+def cmd_verify_heldout_release(args) -> int:
+    state = heldout_release_state()
+    if state["problems"]:
+        print("REFUSED: the held-out release is not verified:")
+        for p in state["problems"]:
+            print(f"  - {p}")
+        return 1
+    print(f"held-out release VERIFIED: P {state['P'][:12]} < L {state['L'][:12]} < "
+          f"R {state['R'][:12]}, all published on {PUBLIC_REF}")
+    print(f"  release id {state['heldout_release_id']}")
     return 0
 
 
 def cmd_status(args) -> int:
+    def line(label: str, value: str) -> None:
+        print(f"  {label:<20} {value}")
+
     locks = read_locks()
     state = verify_finalization(strict=False)
-    print(f"  {'preregistration':<14} anchor={state['anchor']}"
-          + (f" commit={state['commit'][:12]}" if state.get("commit") else "")
-          + (f" DRIFTED={state['drifted']}" if state.get("drifted") else ""))
+    try:
+        P = preregistration_commit()
+    except SystemExit as exc:
+        P = None
+        line("P (prereg)", f"-- {exc}")
+    if P:
+        line("P (prereg)", f"{P[:12]}  [{state['anchor']}]"
+             + (f"  DRIFTED={state['drifted']}" if state.get("drifted") else ""))
     for key in ("prompt_winner", "checkpoint"):
         rec = locks.get(key)
-        print(f"  {key:<14} {'-- not locked' if not rec else json.dumps(rec)}")
-    print(f"  {'reveal':<14} "
-          + ("-- not revealed" if not REVEAL.exists()
-             else REVEAL.read_text(encoding='utf-8').strip().replace("\n", " ")))
+        line(key, "-- not locked" if not rec else json.dumps(rec)[:160])
+    if P:
+        try:
+            facts = locks_commit(prereg_commit=P)
+            line("L (locks commit)", f"{facts['commit'][:12]}  published on "
+                                     f"{facts['published_on']}")
+        except SystemExit as exc:
+            line("L (locks commit)", f"-- {str(exc).splitlines()[0]}")
+    line("reveal", "-- not revealed" if not REVEAL.exists()
+         else json.loads(REVEAL.read_text(encoding="utf-8"))["heldout_release_id"])
+    if REVEAL.exists() and P:
+        rstate = heldout_release_state()
+        line("R (reveal commit)",
+             (rstate.get("R") or "-- not committed")
+             + (f"  problems={len(rstate['problems'])}" if rstate["problems"] else "  OK"))
+        for p in rstate["problems"][:6]:
+            print(f"      - {p}")
+    else:
+        line("R (reveal commit)", "-- nothing revealed yet")
     return 0
 
 
@@ -609,9 +1263,14 @@ def main() -> int:
     vp.set_defaults(fn=cmd_verify_prereg)
     rv = sub.add_parser("reveal")
     rv.add_argument("--require-finalization", action="store_true",
-                    help="refuse unless a COMMITTED finalization marker anchors "
-                         "the completed preregistration")
+                    help="accepted and always enforced: P (the committed "
+                         "finalization marker) is now a precondition, not an option")
+    rv.add_argument("--no-bytes", action="store_true",
+                    help="skip re-hashing the checkpoint bytes (diagnostics only; "
+                         "the chain never passes it)")
     rv.set_defaults(fn=cmd_reveal)
+    vh = sub.add_parser("verify-heldout-release")
+    vh.set_defaults(fn=cmd_verify_heldout_release)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     args = ap.parse_args()
     return args.fn(args)

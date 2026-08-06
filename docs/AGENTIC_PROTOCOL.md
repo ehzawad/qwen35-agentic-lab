@@ -3,8 +3,9 @@
 Committed **before** any held-out GPU result exists. After this commit, no
 threshold, margin, sample size, seed, estimand, or interpretation rule below
 may be edited in place. A genuinely broken gate gets a dated **AMENDMENT**
-section appended here plus entirely fresh held-out seeds; the original gate is
-still reported. The machine-readable mirror of this protocol is
+section appended here plus a fresh held-out derivation label (which produces an
+entirely fresh held-out realization from the same lock commit); the original gate
+is still reported. The machine-readable mirror of this protocol is
 [`configs/agentic_preregister.json`](../configs/agentic_preregister.json);
 where prose and JSON could ever disagree, the JSON governs.
 
@@ -313,7 +314,7 @@ scorer decision).
 
 S8 PAIRING · S9 ORACLE · S10 SPLITS · S11 ABSENT-INFO · S12 INJECTION ·
 S13 RECEIPTS · S14 COUNTERFACTUAL · S15 ATTRITION · S16 CONTROL-INTEGRITY ·
-S17 TRACE-SUMMARY · S18 TEST-BLINDNESS · **S19 HARDWARE-INTEGRITY** — semantics
+S17 TRACE-SUMMARY · **S18 POST-LOCK HELDOUT** · **S19 HARDWARE-INTEGRITY** — semantics
 exactly as in the preregistration JSON. **All twelve are MANDATORY**
 (`machine.mandatory_harness_checks`).
 
@@ -360,7 +361,7 @@ launch floor still printed PASS.
 
 **A mandatory check left INCONCLUSIVE means NO VERDICT.** Previously only BUG
 blocked the winner, so a winner could ship while S9 (oracle reachability), S10
-(split isolation), S14 (counterfactual control) or S18 (test-blindness) was
+(split isolation), S14 (counterfactual control) or S18 (post-lock held-out) was
 simply unverified. Missing traces or an underpowered common-clean subset yield
 INCONCLUSIVE — never a favourable interpretation. Outcome states everywhere:
 PASS / FAIL / INCONCLUSIVE / BUG.
@@ -379,33 +380,145 @@ silently selects RS-SFT**: "GRPO was skipped for a reason nobody wrote down" is
 indistinguishable from "GRPO ran and lost the dev comparison", and only one of
 those is a reportable outcome.
 
-S18 uses a self-referential seed commitment: `heldout_seed =
-SHA256(<preregistration commit sha> + ":agentic-heldout-v1")[:8]` as a big-
-endian integer. The commit that introduces this protocol *is* the commitment;
-`results/agentic/locks.json` (checkpoint + prompt winner) must exist before
-`results/agentic/seed_reveal.json` is written.
+### S18 POST-LOCK HELDOUT — the three-commit state machine
 
-> **AMENDMENT 2026-08-05 (pre-run; zero GPU-hours, zero held-out results
-> existed).** As implemented, S18 delivers **test-set commitment, not
-> test-blindness**, and the veto must not be described as the latter until this
-> is closed. The held-out specs, KBs, oracles and answers are absent from the
-> repository and their hashes are pinned, so the set cannot be swapped after the
-> fact — that part holds. But `scripts/generate_suite.py` is committed and the
-> eval generation seed in `configs/suite_v1.toml` is public, and byte-identical
-> regeneration is itself an acceptance criterion, so all 1,200 held-out answers
-> are recoverable from this commit before any lock exists. The `heldout_seed`
-> above is never consumed by the generator.
->
-> The **registered target is real blindness**: derive the held-out *generation*
-> seed from public entropy that exists only after `results/agentic/locks.json` is
-> committed — the locks commit SHA — so the held-out set cannot be generated
-> until the prompt winner and trained checkpoint are already frozen. Under that
-> scheme this push pins train/dev only, and the held-out artifacts are pinned at
-> reveal.
->
-> Until that lands, `finalize-prereg` must not be run and no GPU stage may
-> start. This amendment changes no threshold, margin, sample size or claim
-> definition.
+**Renamed from `TEST-BLINDNESS`.** The veto verifies *positive facts* — commit
+ancestry, seed derivation, lock completeness, checksums, trace binding. It cannot
+verify what a person saw, whether a private cache existed, or whether candidate
+lock commits were ground and discarded. The workflow-level property may be
+described as **workflow-enforced post-lock test blindness**; the machine check is
+named for what it actually checks.
+
+The registered relation is
+
+```text
+P: configs/preregistration_final.json added      (the completed commitment +
+   |                                              the train/dev realization)
+   |  prompt tournament, distillation, SFT — on train/dev only
+L: results/agentic/locks.json added, ALONE       (prompt sha256 + checkpoint BYTE
+   |                                              digest + trainer receipt digest)
+   |  the held-out seed becomes derivable HERE, and not before
+R: seed_reveal.json + manifest.heldout.json + SHA256SUMS.heldout added TOGETHER
+   |
+E: evaluation traces whose git_sha is R or a descendant
+
+P ≺ L ≺ R ≼ E
+```
+
+proved by **git ancestry and artifact hashes, never by timestamps** — a timestamp
+can be backdated by anyone who can write a file, and the receipts now say out
+loud that their timestamps are informational.
+
+**The seed.** The six held-out *generation* seeds are `heldout-master-v2` over
+`L`:
+
+```text
+master        = SHA256("qwen35-agentic-lab\0agentlab-suite-v1\0"
+                       "heldout-master-v2\0" || bytes.fromhex(L))
+split_seed(s) = int(SHA256("agentlab-heldout-split-v2\0" || master
+                          || "\0" || s), "big")
+release_id    = SHA256("agentlab-heldout-release-v2\0" || master)
+```
+
+`configs/suite_v1.toml` carries **no held-out seed** and the loader refuses a
+config that does; there is no `--seed` flag, no environment seed and no fallback.
+`scripts/generate_suite.py` requires an explicit `--phase`, and `--phase heldout`
+refuses without a verified reveal receipt *before it creates a staging directory*,
+so a failed check emits no partial held-out file. Every held-out spec and
+certspec row carries the `heldout_release_id`, because task ids and file names do
+not encode their seed and a stale file otherwise looks valid.
+
+**Two commitments, two acceptance sets.** The retired global `manifest.json` /
+`SHA256SUMS` pair disclosed held-out hashes and claimed the whole suite was pinned
+at a commit where the held-out bytes must not exist. It is replaced by
+`manifest.train-dev.json` + `SHA256SUMS.train-dev` (pinned at `P`, covering the 12
+train/dev source files and their 6 derived certspecs) and
+`manifest.heldout.json` + `SHA256SUMS.heldout` (pinned at `R`, covering the 18
+held-out source files, the 6 evaluation certspec manifests, the merged eval-group
+certspec S10 reads, and the manifest itself). The train/dev manifest may carry the
+registered held-out **plan** — split names, counts, cells, fault allocation,
+derivation labels — and no realized value, seed, hash, census or derangement.
+
+| Phase | Established | Explicitly **not** claimed |
+|---|---|---|
+| `P` | two independent train/dev regenerations agree; bytes match `SHA256SUMS.train-dev`; a **real external** `sha256sum -c` passes; train/dev counts, oracles, dev axis coverage and train-vs-dev isolation pass; the held-out CLI refusal is tested | held-out hashes, cardinalities, the two controls, the core cluster census, train/dev/eval cross-isolation |
+| `L` | complete prompt and checkpoint **content** locks; `P ≺ L`; dedicated, published lock commit; no reveal or held-out commitment inside `L` | any held-out generation or validation |
+| `R` | the seed rederives from `L`; all six held-out splits regenerate byte-identically; `sha256sum -c SHA256SUMS.heldout` passes; checks 1–16 over train + dev + held-out together; every held-out row carries the revealed release id | any model outcome |
+| every eval shard | `R` committed and published; prompt and checkpoint rehash to the locks; spec hash and release id match the held-out manifest | — |
+
+`finalize-prereg` therefore runs **before the prompt tournament**, and refuses
+unless: no held-out byte exists anywhere in the consumed tree; the retired
+whole-suite commitment is gone; nothing has run (no ledger row, no checkpoint
+under the study output root, no lock, no reveal); the held-out generator refuses
+without a receipt and leaves no files; the **observational-equivalence test and
+the tokenizer size census** have passed and the census hash matches the one this
+preregistration pins; and `validate_suite.py --require-phase train-dev` reports
+`train_dev_acceptance: PASS` with `heldout_acceptance:
+DEFERRED_UNTIL_POST_LOCK_REVEAL`. The marker records exactly those two states —
+it never claims that nonexistent held-out bytes passed validation — plus the
+frozen generation closure (generator, loader, family grammars, serialization
+rules, config, exact Python runtime) and the held-out plan digest.
+
+> **AMENDMENT 2026-08-05 (pre-run; zero GPU-hours, zero held-out results, zero
+> optimizer steps existed).** The retired S18 delivered **test-set commitment,
+> not post-lock derivation**: the eval generation seeds were public in
+> `configs/suite_v1.toml`, byte-identical regeneration is itself an acceptance
+> criterion, and the `heldout_seed` the receipt published was never consumed by
+> the generator — so all 1,200 held-out answers were derivable from the
+> preregistration commit before any lock existed. This amendment lands the
+> registered target: the derivation moves to `L`, generation splits into two
+> phases with two commitments, the veto is renamed `S18 POST-LOCK HELDOUT`, and
+> the old-seed held-out bundles and certspecs that existed in the workspace are
+> **invalidated** — quarantined into `out/quarantine/stale-heldout-v1` with a
+> receipt recording every path, size and hash. They were never evaluated, but
+> they did exist and were visible; the new derivation and release id make them
+> fail every receipt, manifest, checksum and per-row check, and the loader
+> refuses any held-out split not covered by a verified release. No threshold,
+> margin, sample size, estimand or launch floor changed.
+
+**What this does *not* claim.** A git commit id is author-influenceable through
+timestamps, parents and commit construction, so `L` is **not a randomness
+beacon**: an operator could construct unpublished candidate lock commits, derive
+each one's held-out set, and publish only the preferred one. Requiring `L` to be
+**published** before the reveal is why publication is a gate, and it makes that
+manoeuvre visible in ordinary use — but defeating it outright would need an
+external beacon round chosen after `L` is public, which would be a protocol
+change and is not claimed here. Nor can any local mechanism prove a negative
+about private storage, a modified private generator, or off-path execution.
+Calling internal `build_split(..., arbitrary_seed, ...)` from edited Python cannot
+be prohibited; the supported CLI and chain refuse it, and that is the stated
+threat-model limit.
+
+### What a reader may conclude
+
+After `P`, `L` and `R` are public and S16/S18 pass, a reader is entitled to
+conclude:
+
+* the preregistered claims, thresholds, generator implementation, train/dev
+  realization and the held-out derivation **rule** were fixed at `P`;
+* the declared prompt winner and the exact checkpoint byte digest were fixed in
+  public commit `L`;
+* the designated held-out realization is a deterministic function of `L`;
+* the exact held-out bytes and evaluator-facing certspecs were pinned at `R`,
+  before claim-bearing evaluation;
+* every accepted trace used that release and the prompt/checkpoint named by `L`;
+* changing the prompt, checkpoint, held-out realization, generator or evaluated
+  spec after reveal produces a mandatory **BUG**, not another winner;
+* under the supported workflow and normal repository-integrity assumptions,
+  held-out values were unavailable to prompt selection and checkpoint selection.
+
+A reader is **not** entitled to conclude:
+
+* that no person ever saw future values through private code, caches or
+  unpublished candidate commits;
+* that the lock commit supplied unbiased or ungrindable randomness;
+* that the operator had no knowledge of the public task grammar, templates or
+  distributions — all of which are, and remain, committed and readable;
+* that the held-out sample establishes validity outside the preregistered
+  synthetic suite.
+
+That is a narrower and more defensible statement than "nobody could possibly have
+seen the test set", and it is the only one this repository's mechanisms support.
 
 ## 8. Launch floors and winner rule
 
@@ -820,7 +933,11 @@ marker absent.
 `finalize-prereg` may not run unless the observational-equivalence test
 (`tests/test_environment_parity.py`, all 12 family/horizon cells × clean + every
 eligible fault class + the ambiguous malformed mutation) passes and the
-tokenizer size census below has been recorded.
+tokenizer size census below has been recorded. Both are **executed** by the P
+gate, not trusted: the registered test path and census hash are read out of
+`configs/agentic_preregister.json`, the test is run, and the census on disk must
+hash to the value the caps were registered against and be committed. See
+**S18 POST-LOCK HELDOUT** for the full list of P-gate refusals.
 
 ### Size census and the caps it moved
 

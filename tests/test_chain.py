@@ -149,24 +149,41 @@ def test_the_heldout_seed_cannot_be_revealed_before_the_locks():
     assert "REFUSED" in (r.stdout + r.stderr)
 
 
-def test_the_heldout_seed_derives_from_the_preregistration_commit():
-    """The commitment is only worth something if it is DERIVED, not supplied."""
-    import importlib.util
+def test_the_heldout_seed_derives_from_the_LOCKS_commit_not_the_prereg_one():
+    """The derivation is what makes the set unavailable EARLY.
 
-    spec = importlib.util.spec_from_file_location("agentic_locks", LOCKS)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    commit = mod.preregistration_commit()
-    assert len(commit) == 40
-    # the commit that introduced the preregistration really does contain it
-    listed = subprocess.run(["git", "show", "--stat", "--format=", commit],
-                            cwd=REPO, capture_output=True, text=True, timeout=30)
-    assert "configs/agentic_preregister.json" in listed.stdout
-    # and the seed is a pure function of that sha, matching the analyzer's check
+    The retired v1 seed hung off the preregistration commit, which exists before
+    any lock -- so the held-out set was derivable in advance. v2 hangs off L, and
+    nothing but a full 40-hex commit id is accepted: a prefix would let two
+    different commits derive the same suite.
+    """
     import hashlib
-    want = int.from_bytes(hashlib.sha256(
-        (commit + ":agentic-heldout-v1").encode()).digest()[:8], "big")
-    assert mod.heldout_seed(commit) == want
+
+    from agentlab.suite.generate import (HELDOUT_MASTER_LABEL_PARTS,
+                                         HELDOUT_SPLIT_LABEL, HELDOUT_SPLITS,
+                                         heldout_master_seed, heldout_release_id,
+                                         heldout_split_seed)
+
+    L = "9" * 40
+    label = "\0".join(HELDOUT_MASTER_LABEL_PARTS) + "\0"
+    want = hashlib.sha256(label.encode() + bytes.fromhex(L)).digest()
+    assert heldout_master_seed(L) == want
+    assert len(want) == 32                      # a full 256-bit master seed
+    seeds = {s: heldout_split_seed(want, s) for s in HELDOUT_SPLITS}
+    assert len(set(seeds.values())) == len(HELDOUT_SPLITS)
+    for split, seed in seeds.items():
+        assert seed == int.from_bytes(hashlib.sha256(
+            (HELDOUT_SPLIT_LABEL + "\0").encode() + want + b"\0"
+            + split.encode()).digest(), "big")
+    # one bit of L moves every split seed and the release id
+    other = heldout_master_seed("8" + "9" * 39)
+    assert other != want
+    assert heldout_release_id(other) != heldout_release_id(want)
+    assert all(heldout_split_seed(other, s) != seeds[s] for s in HELDOUT_SPLITS)
+    # and a shortened or symbolic reference is refused outright
+    for bad in ("9" * 39, "9" * 12, "HEAD", "", None):
+        with pytest.raises(ValueError, match="40-hex"):
+            heldout_master_seed(bad)
 
 
 def _locks_module():
@@ -178,74 +195,107 @@ def _locks_module():
     return mod
 
 
-def test_the_anchor_prefers_a_committed_finalization_marker(tmp_path):
-    """The defect: the anchor was the OLDEST commit that added the prereg file.
-
-    That commit is fixed forever, so every later edit -- including the whole A5000
-    hardware pivot -- left the commitment untouched while the docs claimed the
-    opposite. The fix is a finalization marker whose ADDING commit is the anchor,
-    with no history rewritten.
-    """
-    mod = _locks_module()
+def _tiny_repo(tmp_path):
+    """A repo with the frozen files, and a `git` callable. -> (repo, git)."""
     repo = tmp_path / "repo"
     (repo / "configs").mkdir(parents=True)
     (repo / "configs" / "agentic_preregister.json").write_text('{"v": 1}')
     (repo / "configs" / "multifaceted.yaml").write_text("version: 1\n")
 
     def git(*args):
-        subprocess.run(["git", *args], cwd=repo, check=True,
-                       capture_output=True, text=True, timeout=30)
+        return subprocess.run(["git", *args], cwd=repo, check=True,
+                              capture_output=True, text=True,
+                              timeout=30).stdout.strip()
 
-    git("init", "-q")
+    git("init", "-q", "-b", "main")
     git("config", "user.email", "t@t")
     git("config", "user.name", "t")
     git("add", "-A")
     git("commit", "-q", "-m", "add the preregistration")
-    first = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
-                           capture_output=True, text=True).stdout.strip()
-    # a later edit: under the old rule this changes nothing about the anchor
-    (repo / "configs" / "agentic_preregister.json").write_text('{"v": 2}')
-    git("add", "-A")
-    git("commit", "-q", "-m", "hardware pivot")
+    return repo, git
 
+
+def _point_module_at(mod, repo):
     mod.ROOT = repo
     mod.PREREG = repo / "configs" / "agentic_preregister.json"
     mod.FINAL_MARKER = repo / "configs" / "preregistration_final.json"
     mod.FROZEN_SET = ("configs/agentic_preregister.json", "configs/multifaceted.yaml")
-    mod.RESULTS = repo / "results"
-    mod.REVEAL = repo / "results" / "seed_reveal.json"
+    mod.RESULTS = repo / "results" / "agentic"
+    mod.LOCKS = mod.RESULTS / "locks.json"
+    mod.REVEAL = mod.RESULTS / "seed_reveal.json"
+    return mod
 
-    assert mod.preregistration_commit() == first          # the old, sticky anchor
 
-    mod.cmd_finalize_prereg(argparse.Namespace(force=False))
-    assert mod.FINAL_MARKER.exists()
+def test_P_is_the_unique_marker_commit_with_no_fallback_anchor(tmp_path):
+    """The defect: the anchor was the OLDEST commit that added the prereg file.
+
+    That commit is fixed forever, so every later edit -- including the whole A5000
+    hardware pivot -- left the commitment untouched while the docs claimed the
+    opposite. P is now the commit that adds the FINALIZATION MARKER, it must be
+    unique, and there is no weaker fallback to fall back to: no marker, no P.
+    """
+    mod = _locks_module()
+    repo, git = _tiny_repo(tmp_path)
+    _point_module_at(mod, repo)
+
+    # a later edit to the preregistration: under the retired rule this changed
+    # nothing about the anchor, and under this one there is no anchor at all yet
+    (repo / "configs" / "agentic_preregister.json").write_text('{"v": 2}')
+    git("add", "-A")
+    git("commit", "-q", "-m", "hardware pivot")
+    with pytest.raises(SystemExit, match="no commit adds"):
+        mod.preregistration_commit()
+
+    mod.FINAL_MARKER.write_text(json.dumps({"files": {}}))
     # an UNCOMMITTED marker anchors nothing, and says so
-    state = mod.verify_finalization()
-    assert state["anchor"] == "uncommitted-marker"
-    assert mod.preregistration_commit() == first
+    assert mod.verify_finalization()["anchor"] == "uncommitted-marker"
+    with pytest.raises(SystemExit, match="no commit adds"):
+        mod.preregistration_commit()
 
     git("add", "-A")
     git("commit", "-q", "-m", "finalize the preregistration")
-    marker_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
-                                   capture_output=True, text=True).stdout.strip()
-    assert mod.verify_finalization()["anchor"] == "finalization-marker"
-    assert mod.preregistration_commit() == marker_commit != first
-    # and the seed follows the new anchor
-    assert mod.heldout_seed(marker_commit) != mod.heldout_seed(first)
+    P = git("rev-parse", "HEAD")
+    assert mod.preregistration_commit() == P
+    # an EDITED marker no longer matches the bytes P committed
+    mod.FINAL_MARKER.write_text(json.dumps({"files": {}, "sneak": 1}))
+    with pytest.raises(SystemExit, match="does not match the bytes committed"):
+        mod.preregistration_commit()
 
-    # a forward edit AFTER finalization is now visible instead of ignored
+
+def test_a_forward_edit_after_finalization_is_visible(tmp_path):
+    mod = _locks_module()
+    repo, git = _tiny_repo(tmp_path)
+    _point_module_at(mod, repo)
+    mod.FINAL_MARKER.write_text(json.dumps({"files": mod.frozen_hashes()}))
+    git("add", "-A")
+    git("commit", "-q", "-m", "finalize")
+    assert mod.verify_finalization()["anchor"] == "finalization-marker"
     (repo / "configs" / "agentic_preregister.json").write_text('{"v": 3}')
     with pytest.raises(SystemExit, match="drifted"):
         mod.verify_finalization()
 
 
-def test_finalize_refuses_after_the_seed_is_revealed(tmp_path):
+def test_finalization_refuses_once_anything_has_run(tmp_path):
+    """The P gate: finalization happens BEFORE the tournament, or not at all.
+
+    A reveal, a lock or a ledger row at finalization time means the ordering
+    already went wrong, and the marker would be pinning a commitment the study has
+    partly executed against.
+    """
     mod = _locks_module()
-    mod.REVEAL = tmp_path / "seed_reveal.json"
+    repo, _git = _tiny_repo(tmp_path)
+    _point_module_at(mod, repo)
+    mod.RESULTS.mkdir(parents=True)
+    cfg = {"budget": {"ledger": "results/agentic/gpu_ledger.jsonl"}}
+    assert mod.gate_nothing_has_run(cfg) == []
+
+    mod.LOCKS.write_text("{}")
+    assert any("belongs BEFORE the prompt tournament" in p
+               for p in mod.gate_nothing_has_run(cfg))
     mod.REVEAL.write_text("{}")
-    mod.ROOT = tmp_path
-    with pytest.raises(SystemExit, match="REFUSED"):
-        mod.cmd_finalize_prereg(argparse.Namespace(force=False))
+    assert any("already unblinded" in p for p in mod.gate_nothing_has_run(cfg))
+    (mod.RESULTS / "gpu_ledger.jsonl").write_text('{"gpu_hours": 0.1}\n')
+    assert any("GPU work has run" in p for p in mod.gate_nothing_has_run(cfg))
 
 
 @pytest.mark.parametrize("cmd,args,what", [
@@ -272,53 +322,124 @@ def test_neither_lock_can_be_changed_after_the_seed_is_revealed(tmp_path, cmd,
     assert "AMENDMENT" in str(e.value)
 
 
-def test_a_reveal_that_is_not_strictly_after_the_last_lock_refuses(tmp_path,
-                                                                  monkeypatch):
-    """Same-second locking must not be allowed to read as "revealed after".
-
-    S18 is an ORDERING claim. If a lock and the reveal share a timestamp, the
-    receipt cannot show which came first, and a reader has to take it on trust.
-    The script refuses and says to wait a second rather than accepting an
-    ambiguous receipt or backdating one.
-    """
+def _lock_chain(tmp_path, *, dedicated=True, publish=True, extra_in_L=None):
+    """Build a P -> L repo through the state machine's own rules. -> (mod, repo, L)."""
     mod = _locks_module()
-    mod.ROOT = tmp_path
-    mod.RESULTS = tmp_path
-    mod.LOCKS = tmp_path / "locks.json"
-    mod.REVEAL = tmp_path / "seed_reveal.json"
-    stamp = "2026-08-05T12:00:00Z"
+    repo, git = _tiny_repo(tmp_path)
+    _point_module_at(mod, repo)
+    mod.FINAL_MARKER.write_text(json.dumps({"files": mod.frozen_hashes()}))
+    git("add", "-A")
+    git("commit", "-q", "-m", "finalize")
+    P = git("rev-parse", "HEAD")
+    mod.RESULTS.mkdir(parents=True, exist_ok=True)
     mod.LOCKS.write_text(json.dumps({
-        "prompt_winner": {"file": "p1", "sha256": "0" * 64, "locked_at": stamp},
-        "checkpoint": {"path": "out/x", "stage": "rs_sft", "locked_at": stamp}}))
-    monkeypatch.setattr(mod, "now", lambda: stamp)          # same second, not after
-    monkeypatch.setattr(mod, "verify_finalization",
-                        lambda: {"present": False, "anchor": "oldest-prereg-commit"})
-    monkeypatch.setattr(mod, "preregistration_commit", lambda: "a" * 40)
-    with pytest.raises(SystemExit, match="not strictly after"):
-        mod.cmd_reveal(argparse.Namespace(require_finalization=False))
-    assert not mod.REVEAL.exists()
-    # one second later the same call is accepted, so the refusal is an ORDERING
-    # check and not an unconditional block
-    monkeypatch.setattr(mod, "now", lambda: "2026-08-05T12:00:01Z")
-    assert mod.cmd_reveal(argparse.Namespace(require_finalization=False)) == 0
-    assert json.loads(mod.REVEAL.read_text())["revealed_at"] > stamp
+        "schema": mod.LOCKS_SCHEMA, "study_id": mod.STUDY_ID,
+        "preregistration_commit": P,
+        "prompt_winner": {"file": "prompts/agentic/p8_combined.txt",
+                          "sha256": "a" * 64},
+        "checkpoint": {"path": "out/multiface/rssft-lora", "stage": "rs_sft",
+                       "checkpoint_sha256": "b" * 64,
+                       "checkpoint_files": {"adapter_model.safetensors":
+                                            {"sha256": "c" * 64, "bytes": 1}}},
+        "selection": {"kind": "sole_candidate"},
+    }, indent=2, sort_keys=True) + "\n")
+    if extra_in_L:
+        (repo / extra_in_L).parent.mkdir(parents=True, exist_ok=True)
+        (repo / extra_in_L).write_text("x\n")
+    if dedicated:
+        git("add", mod.LOCKS_REL)
+        if extra_in_L:
+            git("add", extra_in_L)
+    else:
+        git("add", "-A")
+    git("commit", "-q", "-m", "lock")
+    L = git("rev-parse", "HEAD")
+    if publish:
+        git("update-ref", "refs/remotes/origin/main", L)
+    return mod, repo, L
 
 
-def test_reveal_can_be_required_to_anchor_on_the_finalized_prereg():
-    """The chain's lock stage passes --require-finalization."""
+def test_L_must_be_unique_dedicated_published_and_a_descendant_of_P(tmp_path):
+    """Every condition on L, each one refused by name.
+
+    Order comes from ancestry, not from timestamps: nothing in this test writes a
+    timestamp, and the state machine never reads one.
+    """
+    mod, repo, L = _lock_chain(tmp_path)
+    facts = mod.locks_commit()
+    assert facts["commit"] == L
+    assert facts["changed_files"] == [mod.LOCKS_REL]
+    assert mod.is_ancestor(facts["preregistration_commit"], L)
+
+    # an edit to the lock AFTER the commit: the published lock is not the tree's
+    mod.LOCKS.write_text(mod.LOCKS.read_text().replace('"rs_sft"', '"grpo"'))
+    with pytest.raises(SystemExit, match="on disk hashes"):
+        mod.locks_commit()
+
+
+def test_an_undedicated_lock_commit_is_refused(tmp_path):
+    mod, repo, L = _lock_chain(tmp_path, extra_in_L="configs/extra.txt")
+    with pytest.raises(SystemExit, match="DEDICATED commit"):
+        mod.locks_commit()
+
+
+def test_an_unpublished_lock_commit_is_refused(tmp_path):
+    """Publication is a gate, and an ABSENT public ref is refused, not assumed."""
+    mod, repo, L = _lock_chain(tmp_path, publish=False)
+    with pytest.raises(SystemExit, match="publication cannot be verified"):
+        mod.locks_commit()
+    # a public ref that exists but does not contain L is the other half
+    subprocess.run(["git", "update-ref", mod.PUBLIC_REF, f"{L}^"], cwd=repo,
+                   check=True, capture_output=True, timeout=30)
+    with pytest.raises(SystemExit, match="not published"):
+        mod.locks_commit()
+
+
+def test_an_incomplete_lock_cannot_be_a_lock_commit(tmp_path):
+    """A lock on a mutable PATH pins nothing the seed can be a function of."""
+    mod, repo, L = _lock_chain(tmp_path)
+    locks = json.loads(mod.LOCKS.read_text())
+    locks["checkpoint"] = {"path": "out/multiface/rssft-lora", "stage": "rs_sft"}
+    mod.LOCKS.write_text(json.dumps(locks, indent=2, sort_keys=True) + "\n")
+    with pytest.raises(SystemExit, match="INCOMPLETE"):
+        mod.locks_commit()
+
+
+def test_reveal_always_requires_a_committed_P(tmp_path):
+    """The chain's lock stage passes --require-finalization; P is unconditional."""
     chain_text = CHAIN.read_text(encoding="utf-8")
     assert "reveal --require-finalization" in chain_text
     src = LOCKS.read_text(encoding="utf-8")
-    assert "require_finalization" in src
+    assert "--require-finalization" in src
+    mod = _locks_module()
+    repo, git = _tiny_repo(tmp_path)
+    _point_module_at(mod, repo)
+    mod.RESULTS.mkdir(parents=True)
+    mod.LOCKS.write_text("{}")
+    with pytest.raises(SystemExit, match="no commit adds"):
+        mod.cmd_reveal(argparse.Namespace(require_finalization=False, no_bytes=True))
+    assert not mod.REVEAL.exists()
 
 
-def test_lock_prompt_refuses_a_prompt_outside_the_preregistered_eight(tmp_path):
+def test_lock_prompt_refuses_before_P_exists(tmp_path):
+    """A prompt lock is a post-finalization act: no P, no tournament, no lock."""
     bogus = tmp_path / "frozen.json"
     bogus.write_text(json.dumps({"winner": {"candidate": "p8_combined.txt",
                                             "sha256": "0" * 64}}))
     r = locks_cmd("lock-prompt", "--file", str(bogus))
     assert r.returncode != 0
-    assert "not one of the eight preregistered candidates" in (r.stdout + r.stderr)
+    assert "no commit adds configs/preregistration_final.json" in (r.stdout + r.stderr)
+
+
+def test_lock_prompt_refuses_a_prompt_outside_the_preregistered_eight(tmp_path,
+                                                                     monkeypatch):
+    mod = _locks_module()
+    monkeypatch.setattr(mod, "preregistration_commit", lambda: "f" * 40)
+    bogus = tmp_path / "frozen.json"
+    bogus.write_text(json.dumps({"winner": {"candidate": "p8_combined.txt",
+                                            "sha256": "0" * 64}}))
+    with pytest.raises(SystemExit, match="not one of the eight preregistered"):
+        mod.cmd_lock_prompt(argparse.Namespace(file=str(bogus)))
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +452,10 @@ def test_split_leakage_veto_passes_on_the_group_manifests_not_the_split_ones():
     The three training splits deliberately share template ids 0-7, and eval shares
     10-11 with eval_stress, so handing S10 one manifest per split reports template
     overlap as a harness BUG. The veto is about the train/dev/eval GROUPS.
+
+    Before the reveal only the TRAIN and DEV group manifests exist -- the eval group
+    is exported at R, from the released held-out bytes -- so this checks what is
+    present rather than pretending the held-out group is there.
     """
     from agentlab.analyze import _load_jsonl, veto_s10_splits
 
@@ -338,7 +463,10 @@ def test_split_leakage_veto_passes_on_the_group_manifests_not_the_split_ones():
     if not groups_dir.exists():
         pytest.skip("run scripts/export_eval_specs.py first")
     groups = {p.stem: _load_jsonl(p) for p in sorted(groups_dir.glob("*.jsonl"))}
-    assert set(groups) == {"train", "dev", "eval"}
+    assert {"train", "dev"} <= set(groups)
+    if "eval" not in groups:
+        # the pre-reveal state: no held-out certspec may exist yet
+        assert not (groups_dir.parent / "eval.jsonl").exists()
     assert veto_s10_splits(groups)["status"] == "OK"
 
     per_split = {p.stem: _load_jsonl(p) for p in

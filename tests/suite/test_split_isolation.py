@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from agentlab.suite.generate import (SPLIT_KIND, SPLIT_SEED_KEY, SPLITS,
+from agentlab.suite.generate import (SPLIT_KIND, SPLITS,
                                      build_split)
 from agentlab.suite.schema import TEMPLATE_RANGES
 from agentlab.suite.splits import check_split_leakage
 
-from .conftest import SEEDS, SUITE
+from .conftest import SUITE, seed_for
 
 # The group of every split comes from SPLIT_KIND, not from a second table: a
 # copied mapping is how a newly added claim split silently ends up ungrouped and
@@ -20,7 +20,7 @@ def _tiny_groups():
     answers = {g: {"token": set(), "integer": set(), "token_list": []}
                for g in groups}
     for split in SPLITS:
-        result = build_split(SUITE, split, SEEDS[SPLIT_SEED_KEY[split]], 2)
+        result = build_split(SUITE, split, seed_for(split), 2)
         for b in result["bundles"]:
             group = _GROUP[split]
             groups[group].append({"task_id": b.spec.task_id,

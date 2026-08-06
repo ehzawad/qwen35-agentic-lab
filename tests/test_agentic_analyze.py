@@ -20,6 +20,7 @@ import copy
 import hashlib
 import json
 import pathlib
+import subprocess
 
 import pytest
 from agentic_helpers import (SECRET, Guesser, ScriptedOracle, chain_spec,
@@ -87,21 +88,118 @@ def _write_disposition(results_dir: pathlib.Path, **overrides):
         json.dumps(_disposition_artifact(**overrides)))
 
 
-def _locks_and_reveal(results_dir: pathlib.Path):
-    locks = {"checkpoint": {"path": LOCKED_ADAPTER, "stage": "rs_sft",
-                            "locked_at": "2026-08-05T00:00:00Z", "commit": "aaa111"},
-             "prompt_winner": {"file": "prompts/agentic/p8_combined.txt",
-                               "sha256": P8_SHA,
-                               "locked_at": "2026-08-05T00:00:00Z", "commit": "aaa111"}}
-    seed = int.from_bytes(hashlib.sha256(
-        b"deadbeef:agentic-heldout-v1").digest()[:8], "big")
-    reveal = {"revealed_at": "2026-08-05T01:00:00Z",
-              "preregistration_commit": "deadbeef", "heldout_seed": seed}
-    (results_dir / "locks.json").write_text(json.dumps(locks))
-    (results_dir / "seed_reveal.json").write_text(json.dumps(reveal))
+def _git(repo: pathlib.Path, *args: str) -> str:
+    r = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True,
+                       timeout=60, check=True)
+    return r.stdout.strip()
+
+
+def _locks_and_reveal(results_dir: pathlib.Path) -> tuple[str, str]:
+    """Build the REAL P -> L -> R chain S18 verifies. -> (R sha, release id).
+
+    S18 POST-LOCK HELDOUT is an ancestry claim, so a fixture cannot fake it with
+    two JSON files and a pair of timestamps any more: it has to be a git repository
+    in which P adds the finalization marker, L adds the complete lock ALONE, R adds
+    the reveal receipt together with the held-out manifest and checksums, and both
+    L and R are published on the designated public ref. That is exactly what the
+    production state machine (`scripts/agentic_locks.py`) constructs.
+    """
+    from agentlab.suite.generate import (GENERATION_PROTOCOL, HELDOUT_DERIVATION,
+                                         REVEAL_SCHEMA, heldout_master_seed,
+                                         heldout_release_id)
+
+    repo = results_dir
+    results_dir.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "configs").mkdir(exist_ok=True)
+    (repo / "configs" / "seed.txt").write_text("base\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+
+    # P: the finalization marker, alone.
+    (repo / "configs" / "preregistration_final.json").write_text(json.dumps({
+        "train_dev_acceptance": "PASS",
+        "heldout_acceptance": "DEFERRED_UNTIL_POST_LOCK_REVEAL"}))
+    _git(repo, "add", "configs/preregistration_final.json")
+    _git(repo, "commit", "-q", "-m", "Finalize the preregistration")
+    P = _git(repo, "rev-parse", "HEAD")
+
+    # L: the complete lock, in a dedicated commit that changes nothing else. The
+    # checkpoint lock pins BYTES, not a mutable path.
+    locks = {
+        "schema": "agentic-locks-v2", "study_id": "agentic-v1",
+        "preregistration_commit": P,
+        "prompt_winner": {"file": "prompts/agentic/p8_combined.txt",
+                          "sha256": P8_SHA, "locked_at": "2026-08-05T00:00:00Z"},
+        "checkpoint": {"path": LOCKED_ADAPTER, "stage": "rs_sft",
+                       "locked_at": "2026-08-05T00:00:00Z",
+                       "checkpoint_sha256": "c" * 64,
+                       "checkpoint_files": {"adapter_model.safetensors":
+                                            {"sha256": "d" * 64, "bytes": 17}}},
+        "selection": {"kind": "sole_candidate",
+                      "why": "GRPO is registered hardware-infeasible"},
+    }
+    (results_dir / "locks.json").write_text(json.dumps(locks, indent=2,
+                                                      sort_keys=True) + "\n")
+    _git(repo, "add", "locks.json")
+    _git(repo, "commit", "-q", "-m", "Lock the prompt winner and the checkpoint")
+    L = _git(repo, "rev-parse", "HEAD")
+
+    # R: the receipt AND the held-out commitments, together.
+    master = heldout_master_seed(L)
+    release = heldout_release_id(master)
+    reveal = {"schema": REVEAL_SCHEMA, "study_id": "agentic-v1",
+              "preregistration_commit": P, "locks_commit": L,
+              "locks_blob_sha256": hashlib.sha256(
+                  (results_dir / "locks.json").read_bytes()).hexdigest(),
+              "public_ref": "refs/heads/main",
+              "master_seed_hex": master.hex(),
+              "heldout_release_id": release,
+              "derivation_label": HELDOUT_DERIVATION,
+              "generation_protocol": GENERATION_PROTOCOL,
+              "generator_commit": P, "revealed_at": "2026-08-05T01:00:00Z",
+              "timestamps_are_informational": True}
+    (results_dir / "seed_reveal.json").write_text(json.dumps(reveal, indent=2,
+                                                             sort_keys=True) + "\n")
+    suite = repo / "data" / "suite" / "v1"
+    suite.mkdir(parents=True, exist_ok=True)
+    (suite / "manifest.heldout.json").write_text(json.dumps({
+        "phase": "heldout", "sealed": True, "heldout_release_id": release,
+        "locks_commit": L, "master_seed_hex": master.hex()}))
+    (suite / "SHA256SUMS.heldout").write_text("")
+    _git(repo, "add", "seed_reveal.json", "data/suite/v1/manifest.heldout.json",
+         "data/suite/v1/SHA256SUMS.heldout")
+    _git(repo, "commit", "-q", "-m", "Reveal the held-out derivation")
+    R = _git(repo, "rev-parse", "HEAD")
+    # published on the designated public ref
+    _git(repo, "update-ref", "refs/remotes/origin/main", R)
     # RS-SFT is the sole trained candidate only because GRPO is registered as
     # hardware-infeasible; the analyzer requires that receipt beside the lock.
     _write_disposition(results_dir)
+    return R, release
+
+
+def _bind_to_release(rows: list, git_sha: str, release: str) -> list:
+    """Stamp E: the traces ran at R, on that release.
+
+    ---- SEAM (frozen contract, owed by the evaluator) -------------------------
+    S18 requires every claim-bearing trace's `provenance.git_sha` to be R or a
+    descendant, and any trace that names a held-out release to name THIS one. The
+    evaluator supplies both through `run_meta`, exactly as it already supplies the
+    S19 hardware fingerprint; this fixture does the same thing to rows it built
+    before the repository existed.
+    """
+    out = []
+    for row in rows:
+        row = dict(row)
+        prov = dict(row.get("provenance") or {})
+        prov["git_sha"] = git_sha
+        prov["heldout_release_id"] = release
+        row["provenance"] = prov
+        out.append(row)
+    return out
 
 
 def core_specs(n_per_group=N_PER_GROUP):
@@ -192,16 +290,20 @@ def registered_run(tmp_path_factory):
                       ("matched", {"BP": 50, "TP": 50})):
         d = root / name
         traces = d / "traces"
+        # The P -> L -> R chain first: the traces then declare that they ran at R,
+        # on the release L determines, which is what S18 checks.
+        R, release = _locks_and_reveal(d)
         for arm in ("BP", "TP"):
             for fname, rows in shared[arm].items():
-                _write(traces / fname, rows)
+                _write(traces / fname, _bind_to_release(rows, R, release))
             _write(traces / f"{arm}.faulted.none.jsonl",
-                   [run(s, make_arm_policy(arm, s, recover_pct=pct), arm=arm,
-                        condition="faulted", prompt_sha=P8_SHA) for s in specs])
+                   _bind_to_release(
+                       [run(s, make_arm_policy(arm, s, recover_pct=pct), arm=arm,
+                            condition="faulted", prompt_sha=P8_SHA) for s in specs],
+                       R, release))
         secret_path = d / "secret.hex"
         secret_path.parent.mkdir(parents=True, exist_ok=True)
         secret_path.write_text(SECRET.hex())
-        _locks_and_reveal(d)
         verdicts[name] = agentic_verdict(
             str(traces), str(PREREG), str(secret_path), specs_path=str(specs_path),
             split_manifests={"train": str(train_path), "dev": str(dev_path),
@@ -530,7 +632,13 @@ FORBIDDEN_LITERALS = {500, 900, 600, 400, 300, 240, 80, 20, 2000, 1152,
                       120.0, 7800, 25282805760, 0.80, 0.8, 8192, 5.651, 8.455}
 # Structurally innocent numbers: list/byte slices, `n // 2`, string padding,
 # truth-table rank ids, and the 0.0/1.0 identities of a probability.
-ALLOWED_LITERALS = {0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 0.0, 1.0}
+#
+# S18 POST-LOCK HELDOUT adds four more, and none of them is a threshold: 12 is the
+# abbreviated-sha display width in its messages, 40 is the length of a full git
+# commit id (a shortened prefix is refused, which is the point), 64 is the length
+# of a SHA-256 hex digest, and 60 is the subprocess timeout in seconds for a git
+# query. A gate number would still fail: FORBIDDEN_LITERALS is checked first.
+ALLOWED_LITERALS = {0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 0.0, 1.0, 12, 40, 60, 64}
 
 
 def _agentic_numeric_literals():
@@ -943,22 +1051,124 @@ def test_s16_requires_exactly_one_locked_checkpoint_mapping_to_tp(tmp_path):
         assert res["status"] == "BUG", (bad, res)
 
 
-def test_s18_reveal_before_lock_is_a_bug(tmp_path):
+# ---------------------------------------------------------------------------
+# S18 POST-LOCK HELDOUT: the three-commit state machine, by ancestry
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def s18_run(tmp_path):
+    """A minimal run whose traces really do descend from R. -> (verdict fn, R, id)."""
     traces = tmp_path / "traces"
     specs = [chain_spec(i, horizon=2) for i in range(4)]
-    for arm in ("BP", "TP"):
-        _write(traces / f"{arm}.clean.none.jsonl",
-               [run(s, ScriptedOracle(s), arm=arm, condition="clean",
-                    prompt_sha=P8_SHA) for s in specs])
+    R, release = _locks_and_reveal(tmp_path)
+    rows = {arm: [run(s, ScriptedOracle(s), arm=arm, condition="clean",
+                      prompt_sha=P8_SHA) for s in specs]
+            for arm in ("BP", "TP")}
+
+    def write(git_sha=R, rel=release):
+        for arm, arm_rows in rows.items():
+            _write(traces / f"{arm}.clean.none.jsonl",
+                   _bind_to_release(arm_rows, git_sha, rel))
+
+    write()
     secret_path = tmp_path / "secret.hex"
     secret_path.write_text(SECRET.hex())
-    _locks_and_reveal(tmp_path)
-    reveal = json.loads((tmp_path / "seed_reveal.json").read_text())
-    reveal["revealed_at"] = "2025-01-01T00:00:00Z"  # before the locks
-    (tmp_path / "seed_reveal.json").write_text(json.dumps(reveal))
-    v = agentic_verdict(str(traces), str(PREREG), str(secret_path),
-                        results_dir=str(tmp_path))
-    assert v["vetoes"]["S18"]["status"] == "BUG"
+
+    def s18():
+        return agentic_verdict(str(traces), str(PREREG), str(secret_path),
+                               results_dir=str(tmp_path))["vetoes"]["S18"]
+
+    return s18, R, release, tmp_path, write
+
+
+def test_s18_is_ok_on_a_real_three_commit_chain(s18_run):
+    s18, R, release, _root, _write_rows = s18_run
+    res = s18()
+    assert res["status"] == "OK", res
+    # and it says what it verified, without claiming what a person saw
+    assert "post-lock derivation" in res["detail"]
+    assert "blind" not in res["detail"].replace("post-lock derivation", "")
+
+
+def test_s18_ignores_timestamps_entirely(s18_run):
+    """Backdating cannot bypass an ancestry relation, so it changes nothing.
+
+    Under the retired implementation, `revealed_at` decided the veto -- which meant
+    a one-line edit to a JSON file decided it.
+    """
+    s18, R, release, root, _write_rows = s18_run
+    reveal = json.loads((root / "seed_reveal.json").read_text())
+    reveal["revealed_at"] = "2025-01-01T00:00:00Z"
+    locks = json.loads((root / "locks.json").read_text())
+    (root / "seed_reveal.json").write_text(json.dumps(reveal, indent=2,
+                                                      sort_keys=True) + "\n")
+    res = s18()
+    # the receipt no longer hashes to the lock blob only if the LOCK changed; the
+    # reveal's own timestamp is informational, so the verdict is unmoved
+    assert res["status"] == "OK", res
+    assert locks == json.loads((root / "locks.json").read_text())
+
+
+def test_s18_a_seed_that_does_not_rederive_from_L_is_a_bug(s18_run):
+    s18, R, release, root, _write_rows = s18_run
+    reveal = json.loads((root / "seed_reveal.json").read_text())
+    reveal["master_seed_hex"] = "e" * 64
+    (root / "seed_reveal.json").write_text(json.dumps(reveal))
+    res = s18()
+    assert res["status"] == "BUG" and "rederive" in res["detail"]
+
+
+def test_s18_a_retired_v1_receipt_is_a_bug_not_an_ok(s18_run):
+    """The old shape must not pass: it anchored on the PREREGISTRATION commit."""
+    s18, R, release, root, _write_rows = s18_run
+    (root / "seed_reveal.json").write_text(json.dumps({
+        "revealed_at": "2026-08-05T01:00:00Z",
+        "preregistration_commit": "deadbeef", "heldout_seed": 12345}))
+    res = s18()
+    assert res["status"] == "BUG" and "schema" in res["detail"]
+
+
+def test_s18_a_lock_on_a_mutable_path_is_a_bug(s18_run):
+    s18, R, release, root, _write_rows = s18_run
+    locks = json.loads((root / "locks.json").read_text())
+    locks["checkpoint"] = {"path": LOCKED_ADAPTER, "stage": "rs_sft"}
+    (root / "locks.json").write_text(json.dumps(locks))
+    res = s18()
+    assert res["status"] == "BUG"
+    assert "BYTE digest" in res["detail"] or "locks_blob_sha256" in res["detail"]
+
+
+def test_s18_a_trace_from_before_the_reveal_is_a_bug(s18_run):
+    """E >= R. A trace produced at L ran before the held-out bytes were pinned."""
+    s18, R, release, root, write_rows = s18_run
+    L = json.loads((root / "seed_reveal.json").read_text())["locks_commit"]
+    write_rows(git_sha=L)
+    res = s18()
+    assert res["status"] == "BUG" and "descendant" in res["detail"]
+
+
+def test_s18_a_trace_naming_another_release_is_a_bug(s18_run):
+    s18, R, release, root, write_rows = s18_run
+    write_rows(rel="f" * 64)
+    res = s18()
+    assert res["status"] == "BUG" and "another held-out release" in res["detail"]
+
+
+def test_s18_traces_that_cannot_be_placed_in_history_are_inconclusive(s18_run):
+    """Missing evidence is never favourable, and never a BUG either."""
+    s18, R, release, root, write_rows = s18_run
+    write_rows(git_sha="test")
+    res = s18()
+    assert res["status"] == "INCONCLUSIVE" and "E >= R" in res["detail"]
+
+
+def test_s18_an_unpublished_reveal_commit_is_a_bug(s18_run):
+    s18, R, release, root, _write_rows = s18_run
+    L = json.loads((root / "seed_reveal.json").read_text())["locks_commit"]
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", L], cwd=root,
+                   check=True, capture_output=True, timeout=60)
+    res = s18()
+    assert res["status"] == "BUG" and "not published" in res["detail"]
 
 
 # ---------------------------------------------------------------------------
