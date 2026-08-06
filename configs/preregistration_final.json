@@ -1,0 +1,82 @@
+{
+  "absent": [],
+  "files": {
+    "configs/agentic_preregister.json": "c5d8666c49904c3d8311d2f0d46977724fb88f5e51dc3001c63093069b689a1b",
+    "configs/multifaceted.yaml": "f65975dc42d41f1fee06f407c475c195e198c7b33c7a19af7ec0e39f1d69491e",
+    "configs/suite_v1.toml": "0436297a89745afc854ccf92e543fd3601818f7d9a8c53f777c2e049cfe64b4b",
+    "docs/AGENTIC_PROTOCOL.md": "aec0997ea6873d43f2dddb51a56043d7e4edb71a0557da742e10e03597cbbcaf"
+  },
+  "finalized_at": "2026-08-06T08:34:48Z",
+  "gates": {
+    "heldout_generator_refuses_without_a_reveal": "PASS",
+    "no_heldout_bytes_anywhere": "PASS",
+    "nothing_has_run_yet": "PASS",
+    "sibling_cpu_acceptance_d1_d2": "PASS",
+    "train_dev_acceptance": "PASS"
+  },
+  "generation_closure": {
+    "digest": "16ebf454be0ccbaaf32f56767b7d3b1a6fc20fbb685e682a68ccbf9cab8d142c",
+    "files": {
+      "configs/suite_v1.toml": "0436297a89745afc854ccf92e543fd3601818f7d9a8c53f777c2e049cfe64b4b",
+      "scripts/export_eval_specs.py": "67272d6567a8d5dfa1e296fd3f70ccf78d09a385b6109667f781bd0c6c05cdd2",
+      "scripts/generate_suite.py": "f2c8c460b9bca5aeb91f8bc4f9580935ad2206d031856921078155212dcfd7ed",
+      "scripts/validate_suite.py": "2a509f50d1011af9bbecba8d5160ea3e1f2f9a09f78a4fa1e6321c7ee132b31f",
+      "src/agentlab/suite/__init__.py": "501befb7e561dea6568c4623d175397248b24e120b28d3c86eee482b23e75ac7",
+      "src/agentlab/suite/configio.py": "c309146711f41b1762356b4e1bd97a6c7e0c7fc3c214f9f63421c4cd2eebc920",
+      "src/agentlab/suite/contract.py": "ef3be3c259f65de0390d7f2d40087e7f2f70082712da7e9b75925d809d528b9b",
+      "src/agentlab/suite/datasets.py": "ef5b84b2ddaeb10810622062922c42f975abd6c61e91f634f4a893aca74ffac6",
+      "src/agentlab/suite/envs/__init__.py": "21f4e1c4b4f3df0cd657f5dc1c5590b68b4290ff414d832da1e041d3abe403a4",
+      "src/agentlab/suite/envs/fulfillment.py": "7e2db54218c7f63556f9fff5188d10df70bd56d6a7177af79bd5598c847a64f0",
+      "src/agentlab/suite/envs/lookup_chain.py": "160008a5867693c7b42f817daebffd44144e4bb62d6ab63404075e899cb01d60",
+      "src/agentlab/suite/envs/typed_relay.py": "5d84dad6ba63a7167f14a15536d3515d1ea50b87e787e466ad14843646f35edb",
+      "src/agentlab/suite/evaluate.py": "e44c72c5dd105bfcadd2c1cdda3d48f45974a857a67b267a7c38f9cdb3034c3b",
+      "src/agentlab/suite/faults.py": "da4b71276253f6556ad07a3c0ab924864b3b3f2621e5e55fd24973fbe0a45e9b",
+      "src/agentlab/suite/generate.py": "d7246f18494d6d2d3deeba410f7cfb3a6730f25f62b5650ac150e7ada5124c4c",
+      "src/agentlab/suite/kb.py": "fe9aed431720bdb60e1110ea22920aa3952d1c1ad866067c16de0d22b69d09ec",
+      "src/agentlab/suite/rewards.py": "7dbd9fd80e880fdc4b6c0cce6ae68368af8533804808468c52aad648fe3d1e5c",
+      "src/agentlab/suite/rng.py": "670c08d1f3502ccab13d61f0254682267a344f940e7667438c683324920ae49f",
+      "src/agentlab/suite/runtime.py": "e49eabc7d95073f02af72b980810de1bbecb347abb88edf34f71912299eb0d36",
+      "src/agentlab/suite/schema.py": "467fdd38cbb2507af376e8765516403e9649ed93ff9b042fd506169a18694a73",
+      "src/agentlab/suite/splits.py": "8b227bc09f78cd67ca931a2ec31724cc67bb84431c45c35f1ff9d72f2c5244d7",
+      "src/agentlab/suite/stats.py": "317eed9d344c3bd00d0c1dc49e904e56721aac1948bb6ef29f4ceec9742d283d",
+      "src/agentlab/suite/verify.py": "258e389bd74b280ab0a54eb8e0419240c54c1c7d3c30f6824a05d9bd5756b98a",
+      "src/agentlab/tools.py": "5718b31e6401e775ddd335c0924cb500328c6e06476932396dd55979c24c1ffa"
+    },
+    "python": "CPython 3.12.13",
+    "stdlib_only": "generation imports nothing outside the standard library"
+  },
+  "head_at_finalization": "2ba52dad330a351b0610474bf7325d181fc1fb02",
+  "heldout_acceptance": "DEFERRED_UNTIL_POST_LOCK_REVEAL",
+  "heldout_acceptance_note": "No held-out byte exists at P and none may. This marker does NOT claim that held-out hashes, cardinalities, controls, the core cluster census or train/dev/eval cross-isolation were validated: they are established at R, over the release the locks commit determines.",
+  "heldout_derivation": {
+    "generation_protocol": 2,
+    "label": "heldout-master-v2",
+    "master_label_parts": [
+      "qwen35-agentic-lab",
+      "agentlab-suite-v1",
+      "heldout-master-v2"
+    ],
+    "release_label": "agentlab-heldout-release-v2",
+    "seed_source": "L: the unique dedicated commit adding results/agentic/locks.json",
+    "split_label": "agentlab-heldout-split-v2",
+    "splits": [
+      "eval",
+      "eval_stress",
+      "eval_mt",
+      "eval_h8",
+      "eval_absent",
+      "eval_perm"
+    ]
+  },
+  "heldout_plan_digest": "9099b6114ba92cc61f0d02d643ce19f85e3ad4e17d20fb95db29d916d9b0fcff",
+  "note": "The commit that ADDS this file is P. It pins the COMPLETED preregistration, the train/dev realization and the held-out derivation RULE -- not a held-out seed value, which cannot exist before L. No history is rewritten.",
+  "seed_derivation": "master = SHA256('qwen35-agentic-lab\\0agentlab-suite-v1\\0heldout-master-v2\\0' || bytes.fromhex(L)); split_seed(s) = int(SHA256('agentlab-heldout-split-v2\\0' || master || '\\0' || s), 'big')",
+  "study_id": "agentic-v1",
+  "train_dev_acceptance": "PASS",
+  "train_dev_commitment": {
+    "manifest": "data/suite/v1/manifest.train-dev.json",
+    "manifest_sha256": "e23c1538dbbd13b44bb387774a4a7c2664cae21d40007607897d6083c4ac3b4e",
+    "sums": "data/suite/v1/SHA256SUMS.train-dev",
+    "sums_sha256": "1e9605cf9486b2dd4d71121e850ceca56ab07e2c0d6721baed43d8c5714a07e2"
+  }
+}

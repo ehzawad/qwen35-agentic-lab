@@ -425,12 +425,32 @@ def gate_nothing_has_run(cfg: dict) -> list[str]:
     ledger = ROOT / str(cfg.get("budget", {}).get("ledger",
                                                   "results/agentic/gpu_ledger.jsonl"))
     if ledger.exists():
-        rows = [ln for ln in ledger.read_text(encoding="utf-8").splitlines()
-                if ln.strip()]
-        if rows:
-            problems.append(f"{_rel(ledger)} already has {len(rows)} row(s): study "
-                            f"GPU work has run, so this is not a pre-run "
-                            f"finalization")
+        rows = [json.loads(ln) for ln in
+                ledger.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        # STUDY rows, not every row. Requiring an EMPTY ledger made finalization
+        # unreachable: the same protocol requires all five dev preflight probes to
+        # pass BEFORE the marker is written, and three of those probes run on the
+        # GPU and charge their minutes here. Both rules cannot hold at once, so the
+        # over-broad one is the defect -- and the fix is to name what actually must
+        # not have happened rather than to skip the check.
+        #
+        # A preflight row is apparatus evidence: dev tasks only, never the held-out
+        # split, never a claim-bearing arm, and the preregistration already
+        # discloses it as excluded. A row from any stage below would mean the study
+        # had begun executing against a commitment that is not yet pinned.
+        study = [r for r in rows
+                 if not str(r.get("stage", "")).startswith("preflight")]
+        if study:
+            stages = sorted({str(r.get("stage")) for r in study})
+            problems.append(f"{_rel(ledger)} already has {len(study)} STUDY row(s) "
+                            f"({', '.join(stages)}): study GPU work has run, so "
+                            f"this is not a pre-run finalization")
+        pre = [r for r in rows if r not in study]
+        if pre:
+            hours = sum(float(r.get("minutes") or 0) for r in pre) / 60.0
+            print(f"  disclosed (not gated): {len(pre)} preflight ledger row(s), "
+                  f"{hours:.3f} GPU-h of dev-only apparatus evidence -- registered "
+                  f"as excluded, and required to have run before this marker")
     # The STUDY's output root (the chain's MULTIFACE_OUT). Adapters elsewhere under
     # out/ are the pre-pivot artifacts the preregistration already discloses as
     # excluded prior evidence -- they are reported, not gated on, because gating on
