@@ -22,7 +22,8 @@ import copy
 import json
 
 import pytest
-from rollout_helpers import OraclePolicy, run_engine, token_counter_stub
+from rollout_helpers import (TEST_SECRET, BlindRetryPolicy, OraclePolicy,
+                             run_engine, token_counter_stub)
 
 from agentlab import provenance
 from agentlab.suite import runtime as rt_mod
@@ -134,10 +135,10 @@ def rollouts():
     return {b.spec.task_id: b for b in bundles}, {r["task_id"]: r for r in records}
 
 
-def test_the_scripted_oracle_reaches_strict_success_everywhere(rollouts):
+def test_the_scripted_oracle_reaches_certified_success_everywhere(rollouts):
     bundles, records = rollouts
     failures = {tid: rec["verdict"]["reasons"] for tid, rec in records.items()
-                if not rec["verdict"]["strict_success"]}
+                if not rec["verdict"]["certified_success"]}
     assert failures == {}, failures
     # and the fault arms really did fire and really were recovered
     for tid, rec in records.items():
@@ -153,7 +154,7 @@ def test_every_trajectory_replays_to_identical_digests(rollouts):
 
     bundles, records = rollouts
     for tid, rec in records.items():
-        ok, why = replay_record(rec, bundles[tid])
+        ok, why = replay_record(rec, bundles[tid], secret=TEST_SECRET)
         assert ok, f"{tid}: {why}"
 
 
@@ -162,7 +163,7 @@ def test_replayed_progress_and_digests_are_recomputed_not_copied(rollouts):
     for tid, rec in records.items():
         bundle = bundles[tid]
         runtime, report = rt_mod.replay_trace(bundle.spec, bundle.kb, bundle.nodes,
-                                              rec["calls"])
+                                              rec["calls"], secret=TEST_SECRET)
         assert report["observations"] == rec["parity"]["observations"]
         assert report["progress"] == rec["parity"]["progress"]
         assert report["episode"] == rec["parity"]["episode"]
@@ -172,7 +173,8 @@ def test_replayed_progress_and_digests_are_recomputed_not_copied(rollouts):
         decisions = list(progress.values())
         assert decisions == sorted(decisions)
         assert len(set(decisions)) == len(decisions), "two nodes in one decision"
-        assert runtime.verify(rec["final"]).to_row() == rec["verdict"]
+        assert runtime.verify(rec["final"], transcript=rec["messages"],
+                              termination_reason="answered").to_row() == rec["verdict"]
 
 
 def test_accepted_records_pass_the_full_acceptance_pass(rollouts):
@@ -180,7 +182,7 @@ def test_accepted_records_pass_the_full_acceptance_pass(rollouts):
 
     bundles, records = rollouts
     for tid, rec in records.items():
-        ok, why = accept_record(rec, CFG, bundles)
+        ok, why = accept_record(rec, CFG, bundles, secret=TEST_SECRET)
         assert ok, f"{tid}: {why}"
 
 
@@ -211,9 +213,9 @@ def test_a_tampered_trajectory_is_rejected(rollouts, mutation):
     elif mutation == "progress":
         rec["parity"]["progress"] = {k: 1 for k in rec["parity"]["progress"]}
 
-    ok, why = replay_record(rec, bundle)
+    ok, why = replay_record(rec, bundle, secret=TEST_SECRET)
     assert not ok and why.startswith("replay_"), why
-    accepted, reason = accept_record(rec, CFG, bundles)
+    accepted, reason = accept_record(rec, CFG, bundles, secret=TEST_SECRET)
     assert not accepted, reason
 
 
@@ -224,7 +226,7 @@ def test_a_consumer_cannot_be_handed_the_wrong_task(rollouts):
     tid = next(t for t, r in records.items() if r["family"] == "lookup_chain")
     other = next(b for t, b in bundles.items()
                  if t != tid and b.spec.family == "lookup_chain")
-    ok, why = replay_record(records[tid], other)
+    ok, why = replay_record(records[tid], other, secret=TEST_SECRET)
     assert not ok and "replay_wrong_bundle" in why
 
 
@@ -238,12 +240,12 @@ def test_a_missing_oracle_node_is_never_accepted():
     bundle = _bundle("lookup_chain", 4, None, index=77)
     records = run_engine([bundle], policy=OraclePolicy([bundle], skip_node=2), cfg=CFG)
     rec = records[0]
-    assert not rec["verdict"]["strict_success"]
-    ok, why = accept_record(rec, CFG, {bundle.spec.task_id: bundle})
+    assert not rec["verdict"]["certified_success"]
+    ok, why = accept_record(rec, CFG, {bundle.spec.task_id: bundle}, secret=TEST_SECRET)
     assert not ok and why == "verifier_rejected"
 
 
-def test_a_correct_answer_without_a_recovered_fault_is_not_strict_success():
+def test_a_correct_answer_without_a_recovered_fault_is_not_certified():
     """Mental arithmetic must never masquerade as recovery."""
     from agentlab.multidistill import accept_record
 
@@ -254,8 +256,8 @@ def test_a_correct_answer_without_a_recovered_fault_is_not_strict_success():
                           terminal_text=f"I know it: \\boxed{{{answer}}}")
     rec = run_engine([bundle], policy=policy, cfg=CFG)[0]
     assert rec["verdict"]["answer_ok"] is True
-    assert rec["verdict"]["strict_success"] is False
-    ok, why = accept_record(rec, CFG, {bundle.spec.task_id: bundle})
+    assert rec["verdict"]["certified_success"] is False
+    ok, why = accept_record(rec, CFG, {bundle.spec.task_id: bundle}, secret=TEST_SECRET)
     assert not ok and why == "verifier_rejected"
 
 
@@ -266,12 +268,12 @@ def test_harmless_extra_read_only_calls_earn_nothing_but_stay_acceptable():
     policy = OraclePolicy([bundle], extra_call=(1, "calculator",
                                                 {"expression": "2+2"}))
     rec = run_engine([bundle], policy=policy, cfg=CFG)[0]
-    assert rec["verdict"]["strict_success"]
+    assert rec["verdict"]["certified_success"]
     assert rec["verdict"]["calls"] == bundle.spec.horizon + 1
     assert rec["verdict"]["unique_valid_nodes"] == bundle.spec.horizon
-    ok, why = replay_record(rec, bundle)
+    ok, why = replay_record(rec, bundle, secret=TEST_SECRET)
     assert ok, why
-    ok, why = accept_record(rec, CFG, {bundle.spec.task_id: bundle})
+    ok, why = accept_record(rec, CFG, {bundle.spec.task_id: bundle}, secret=TEST_SECRET)
     assert ok, why
 
 
@@ -281,7 +283,7 @@ def test_a_missing_committed_answer_is_rejected_before_the_verifier():
     bundle = _bundle("lookup_chain", 2, None, index=80)
     policy = OraclePolicy([bundle], terminal_text="the code is right here")
     rec = run_engine([bundle], policy=policy, cfg=CFG)[0]
-    ok, why = accept_record(rec, CFG, {bundle.spec.task_id: bundle})
+    ok, why = accept_record(rec, CFG, {bundle.spec.task_id: bundle}, secret=TEST_SECRET)
     assert not ok and why == "no_box"
 
 
@@ -399,7 +401,7 @@ def test_views_are_single_assistant_completions_from_the_real_transcript():
 
     bundle = _bundle("typed_relay", 8, [("transient", False)], index=81)
     rec = run_engine([bundle], cfg=CFG)[0]
-    assert rec["verdict"]["strict_success"]
+    assert rec["verdict"]["certified_success"]
     plan = select_views(rec, CFG)
     kinds = {item["view"] for item in plan}
     assert "terminal" in kinds and "recovery" in kinds and "pivot" in kinds

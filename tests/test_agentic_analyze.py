@@ -23,7 +23,8 @@ import pathlib
 
 import pytest
 from agentic_helpers import (SECRET, Guesser, ScriptedOracle, chain_spec,
-                             engine_fingerprint, make_arm_policy, relay_spec, run)
+                             engine_fingerprint, faulted_variant, make_arm_policy,
+                             relay_spec, run)
 
 from agentlab import provenance
 from agentlab.analyze import (agentic_verdict, load_preregister,
@@ -129,8 +130,12 @@ def _run_arm_traces(specs, arm, out_dir, *, recover_pct=None):
     for spec in specs:
         clean_rows.append(run(spec, ScriptedOracle(spec), arm=arm,
                               condition="clean", prompt_sha=P8_SHA))
-        fault_rows.append(run(spec, make_arm_policy(arm, spec,
-                                                    recover_pct=recover_pct),
+        # The faulted arm runs a spec that COMMITS a fault: the evaluator refuses
+        # to invent one, because a fault the generator never committed is a fault
+        # the training path can never see.
+        faulted = faulted_variant(spec)
+        fault_rows.append(run(faulted, make_arm_policy(arm, faulted,
+                                                       recover_pct=recover_pct),
                               arm=arm, condition="faulted", prompt_sha=P8_SHA))
     _write(out_dir / f"{arm}.clean.none.jsonl", clean_rows)
     _write(out_dir / f"{arm}.faulted.none.jsonl", fault_rows)
@@ -686,8 +691,9 @@ def _mini(tmp_path, mutate=None, arms=("BP", "TP"), n=12):
             run(s, ScriptedOracle(s), arm=arm, condition="clean",
                 prompt_sha=P8_SHA) for s in specs]
         rows_by_file[f"{arm}.faulted.none.jsonl"] = [
-            run(s, ScriptedOracle(s), arm=arm, condition="faulted",
-                prompt_sha=P8_SHA) for s in specs]
+            run(f, ScriptedOracle(f), arm=arm, condition="faulted",
+                prompt_sha=P8_SHA)
+            for f in (faulted_variant(s) for s in specs)]
     if mutate:
         mutate(rows_by_file, specs)
     for name, rows in rows_by_file.items():
@@ -847,10 +853,13 @@ def test_a_real_fail_outranks_missing_evidence_in_a_claim(tmp_path):
     specs = [chain_spec(i, horizon=2, n_clusters=40) for i in range(120)]
     for arm in ("BP", "TP"):
         for condition in ("clean", "faulted"):
+            # A faulted episode needs a spec that COMMITS a fault.
+            pool = specs if condition == "clean" else [faulted_variant(s)
+                                                      for s in specs]
             rows = [run(s,
                         ScriptedOracle(s) if arm == "BP" else Guesser("wrong"),
                         arm=arm, condition=condition, prompt_sha=P8_SHA)
-                    for s in specs]
+                    for s in pool]
             _write(traces / f"{arm}.{condition}.none.jsonl", rows)
     secret_path = tmp_path / "secret.hex"
     secret_path.write_text(SECRET.hex())

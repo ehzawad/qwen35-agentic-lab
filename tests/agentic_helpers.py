@@ -1,9 +1,19 @@
 """Shared fixtures for the agentic evaluation tests.
 
-Builds synthetic task specs matching the frozen spec contract, and scripted
-policies that drive `evaluate.run_episode` without any model or server, so
-the whole measurement stack (runtime, faults, receipts, certification,
-analyzer) is exercised end to end on CPU.
+Builds synthetic CERTIFICATION specs and scripted policies that drive
+`evaluate.run_episode` without any model or server, so the whole measurement
+stack (the one canonical runtime, faults, receipts, certification, analyzer) is
+exercised end to end on CPU.
+
+A certification spec now has to carry the CANONICAL runtime inputs -- the
+serialized `TaskSpec` (`spec_row`) and every `OracleNode.to_row()` with its
+`expect` payload and its semantic `match` -- because `evaluate.run_episode` builds
+a real `EpisodeRuntime` from them instead of a private `SpecRuntime`. These
+fixtures therefore build real `OracleNode`s with real matchers. That is fixture
+construction, not a parallel environment: the matcher KINDS are the canonical
+ones `suite.runtime._match_node` interprets, the payloads come from
+`suite.runtime.canonical_payload`, and nothing here decides what a call means or
+whether a fault recovered.
 """
 
 from __future__ import annotations
@@ -12,7 +22,9 @@ import json
 import pathlib
 
 from agentlab import provenance
-from agentlab.suite import evaluate, faults as faults_mod, rng
+from agentlab.suite import contract, evaluate, faults as faults_mod, rng
+from agentlab.suite.schema import (FaultSpec, OracleNode, TaskSpec, call_budget,
+                                   decision_budget)
 
 SECRET = bytes.fromhex("aa" * 32)
 
@@ -113,7 +125,77 @@ def chain_spec(i: int, *, horizon: int = 4, split: str = "eval", ns: str = "eval
         "counterfactual_sensitive": True,
     }
     _assign_fault(spec, fault_class)
-    return spec
+    return _canonicalize(spec)
+
+
+def _matcher(tool: str, args: dict) -> dict:
+    """The canonical matcher for one fixture node.
+
+    Matcher KINDS are exactly the ones `suite.runtime._match_node` interprets
+    (`kb`, `convert`, `calc`); nothing here decides semantics, it only states the
+    node's own arguments in the canonical matcher shape the generator would have
+    committed.
+    """
+    if tool == "kb_lookup":
+        return {"kind": "kb", "key": str(args["key"])}
+    if tool == "unit_convert":
+        return {"kind": "convert", "value": float(args["value"]),
+                "from": str(args["from_unit"]).lower(),
+                "to": str(args["to_unit"]).lower()}
+    if tool == "calculator":
+        from agentlab.suite.runtime import _calc_terms
+
+        ok, result, consts = _calc_terms(args["expression"])
+        assert ok, f"fixture calculator expression is invalid: {args['expression']!r}"
+        return {"kind": "calc", "result": result, "required": sorted(consts)}
+    raise AssertionError(f"fixture has no matcher for tool {tool!r}")
+
+
+def _canonicalize(spec: dict) -> dict:
+    """Add the canonical runtime inputs and the environment-contract stamp.
+
+    The oracle path is replayed once through `provenance.execute_oracle` (the
+    shared canonical semantics), so `expect` is never hand-written and the
+    fixtures cannot drift from the runtime's idea of a payload. Args are the
+    RESOLVED ones, exactly as the production generator commits them.
+    """
+    replay = provenance.execute_oracle(spec)
+    assert replay["ok"], (spec["task_id"], replay.get("error"))
+    nodes, faults = [], []
+    positions = {}
+    for i, got in enumerate(replay["nodes"]):
+        node_id = got["node"]
+        positions[node_id] = i
+        nodes.append(OracleNode(node_id=node_id, tool=got["tool"],
+                                args=dict(got["args"]), expect=got["envelope"],
+                                match=_matcher(got["tool"], got["args"])))
+    assigned = spec.get("faults") or ([spec["fault"]] if spec.get("fault") else [])
+    for sched in assigned:
+        node = nodes[sched["node_index"]]
+        params = dict(sched.get("params") or {})
+        if sched["class"] == "wrong_unit" and "wrong_unit" not in params:
+            # The trap unit is COMMITTED at generation time, never re-derived at
+            # dispatch: that re-derivation was half of the wrong-unit drift.
+            params["wrong_unit"] = faults_mod.wrong_unit_candidates(
+                str(node.args["to_unit"]))[0]
+        if sched["class"] == "rate_limit":
+            params.setdefault("retry_after_turns", 1)
+        faults.append(FaultSpec(fault_type=sched["class"],
+                                target_node=node.node_id, params=params))
+        sched["node"] = node.node_id
+        sched["params"] = params
+    horizon = int(spec["horizon"])
+    task = TaskSpec(
+        task_id=spec["task_id"], suite="agentlab-suite-v1", split=spec["split"],
+        family=spec["family"], horizon=horizon, template_id=0,
+        prompt=spec["prompt"], answer=str(spec["answer"]),
+        answer_kind=spec["answer_kind"], start={}, env=spec.get("env"),
+        faults=faults, max_decisions=decision_budget(horizon, len(faults)),
+        max_calls=call_budget(horizon), secret_tokens=[],
+        template_cluster_id=str(spec.get("template_cluster_id") or ""))
+    spec["spec_row"] = task.to_row()
+    spec["oracle_nodes"] = [n.to_row() for n in nodes]
+    return contract.stamp(spec)
 
 
 def _assign_fault(spec: dict, fault_class: str | None) -> None:
@@ -134,6 +216,28 @@ def _assign_fault(spec: dict, fault_class: str | None) -> None:
         raise AssertionError(f"{spec['task_id']}: no eligible node for "
                              f"fault class {fault_class!r}")
     spec["fault"] = sched
+
+
+def faulted_variant(spec: dict, fault_class: str | None = None) -> dict:
+    """The paired FAULTED arm of a spec: exactly one COMMITTED fault.
+
+    A `faulted` condition is satisfied only from committed faults. The evaluator
+    no longer invents one when the spec carries none -- `SpecRuntime` used to fall
+    back to `schedule_fault` at dispatch time, which meant the evaluated episode
+    could carry a fault the generator never committed and the training path could
+    therefore never see. Production dev/eval specs each carry one; a fixture that
+    wants the faulted arm asks for it here.
+    """
+    if spec.get("fault") or spec.get("faults"):
+        return spec
+    new = json.loads(json.dumps(spec))
+    new.pop("spec_row", None)
+    new.pop("oracle_nodes", None)
+    sched = faults_mod.schedule_fault(new["task_id"], new["oracle"], 0xA61E0007,
+                                      fault_class=fault_class)
+    assert sched is not None, (new["task_id"], fault_class)
+    new["fault"] = sched
+    return _canonicalize(new)
 
 
 def relay_spec(i: int, *, split: str = "eval", ns: str = "eval-b",
@@ -174,7 +278,7 @@ def relay_spec(i: int, *, split: str = "eval", ns: str = "eval-b",
         "counterfactual_sensitive": True,
     }
     _assign_fault(spec, fault_class)
-    return spec
+    return _canonicalize(spec)
 
 
 # ---------------------------------------------------------------------------

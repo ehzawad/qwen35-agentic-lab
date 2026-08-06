@@ -30,7 +30,7 @@ def _rec(*, success, milestone=1.0, calls=4, horizon=4, family="typed_relay",
         "task_id": task_id, "family": family, "horizon": horizon,
         "fault_types": list(faults), "final": final, "truncated": truncated,
         "exhausted": exhausted, "milestone_fraction": milestone,
-        "verdict": {"strict_success": success, "recovery_success": recovery,
+        "verdict": {"certified_success": success, "recovery_success": recovery,
                     "calls": calls, "unsafe_mutation": unsafe,
                     "consistent": consistent},
     }

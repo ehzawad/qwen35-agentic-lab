@@ -167,8 +167,46 @@ def normalize_args(args: dict) -> dict:
     return {k: normalize_number(v) for k, v in args.items()}
 
 
+# The declared argument types of the five tools. They live with the data contract
+# because CALL IDENTITY depends on them: a model that sends `{"value": "2000"}`
+# and an oracle node that committed `{"value": 2000}` are the same call, and the
+# node-identity digest has to say so. `suite.runtime` coerces dispatched
+# arguments with exactly this table, and `call_args_digest` below applies it too
+# -- when it did not, the certification layer's node digest and the runtime's
+# disagreed on any KB-sourced numeric string, which is what made S12 report "the
+# fault fired at the wrong node" for every typed-relay conversion.
+ARG_TYPES = {
+    "calculator": {"expression": str},
+    "unit_convert": {"value": float, "from_unit": str, "to_unit": str},
+    "kb_lookup": {"key": str},
+    "warehouse_query": {"resource": str, "token": str, "quantity": int,
+                        "mass_kg": float},
+    "warehouse_update": {"action": str, "token": str, "quantity": int},
+}
+
+
+def coerce_tool_args(tool: str, raw: dict) -> dict:
+    """Cast string arguments to declared types; uncastable values pass through."""
+    types = ARG_TYPES.get(tool, {})
+    out = {}
+    for k, v in (raw or {}).items():
+        want = types.get(k)
+        if want in (int, float) and isinstance(v, str):
+            try:
+                out[k] = want(v.strip())
+                continue
+            except ValueError:
+                pass
+        if want is int and isinstance(v, float) and v.is_integer():
+            out[k] = int(v)
+            continue
+        out[k] = v.strip() if isinstance(v, str) else v
+    return out
+
+
 def call_args_digest(tool: str, args: dict) -> str:
-    return digest({"tool": tool, "args": normalize_args(args)})
+    """THE node-identity digest: coerced to declared types, then normalized."""
+    return digest({"tool": tool, "args": normalize_args(coerce_tool_args(tool, args))})
 
 
 # ---------------------------------------------------------------------------

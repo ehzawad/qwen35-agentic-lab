@@ -26,7 +26,7 @@ from agentlab.suite.generate import (CLEAN_SPLITS, EVAL_FAULT_GROUPS,
 from agentlab.suite.runtime import run_oracle
 from agentlab.suite.schema import template_cluster_id, tool_pattern
 
-from .conftest import SEEDS, SUITE
+from .conftest import SECRET, SEEDS, SUITE
 
 
 def _split(split: str, per_cell: int | None = None):
@@ -122,14 +122,20 @@ def test_mt_later_calls_consume_earlier_results():
     matched the way `provenance.certify_orchestration` matches them -- an exposed
     number appearing inside a later argument, on a word boundary.
     """
-    import json
     import re
+
+    from agentlab.suite.runtime import parse_observation
 
     for b in _split("eval_mt", 4)["bundles"]:
         front = observation_frontier(b)
         assert front["broke_at"] is None, b.spec.task_id
         for i in range(1, len(b.nodes)):
-            prior = json.loads(front["exposed"][i - 1])
+            # The model-visible observation is the registered form -- envelope
+            # plus a receipt line -- so it is read with the canonical reader
+            # rather than parsed as a single JSON document.
+            parsed = parse_observation(front["exposed"][i - 1])
+            assert parsed["receipt"], (b.spec.task_id, i)
+            prior = parsed["objects"][0]
             produced = []
             if "value" in prior:
                 produced.append(str(prior["value"]))
@@ -165,10 +171,10 @@ def test_the_mt_ceiling_holds_over_the_registered_gated_stratum():
     assert census["mt_stratum_max_per_cluster"] <= MT_MAX_PER_CLUSTER
 
 
-def test_every_mt_oracle_replays_to_strict_success():
+def test_every_mt_oracle_replays_to_certified_success():
     for b in _split("eval_mt", 4)["bundles"]:
-        _rt, verdict = run_oracle(b.spec, b.kb, b.nodes)
-        assert verdict.strict_success, (b.spec.task_id, verdict.reasons[:2])
+        _rt, verdict = run_oracle(b.spec, b.kb, b.nodes, secret=SECRET)
+        assert verdict.certified_success, (b.spec.task_id, verdict.reasons[:2])
 
 
 # ---------------------------------------------------------------------------
@@ -285,8 +291,8 @@ def test_permutation_is_exactly_one_hundred_and_a_derangement():
 def test_permuted_task_scores_against_the_returned_value_not_the_original():
     for b in _split("eval_perm", 6)["bundles"]:
         meta = b.spec.control_meta
-        rt, verdict = run_oracle(b.spec, b.kb, b.nodes)
-        assert verdict.strict_success, b.spec.task_id
+        rt, verdict = run_oracle(b.spec, b.kb, b.nodes, secret=SECRET)
+        assert verdict.certified_success, b.spec.task_id
         front = observation_frontier(b)
         assert any(meta["permuted_answer"] in p for p in front["exposed"])
         assert all(meta["original_answer"] not in p for p in front["exposed"])

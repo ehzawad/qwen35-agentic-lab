@@ -647,11 +647,27 @@ def recompute_canonical_verdict(rec: dict, specs_by_id: dict | None,
     from agentlab.suite import runtime as rt_mod
     from agentlab.suite.schema import OracleNode, TaskSpec
 
+    from agentlab import provenance
+
     spec = (specs_by_id or {}).get(rec.get("task_id"))
     if not spec or not spec.get("spec_row") or not spec.get("oracle_nodes"):
         return None
     if not contract_mod.is_current(spec) or not contract_mod.is_current(rec):
         return None
+    # A CONTROL episode was run against a transformed spec, so replaying it
+    # against the untransformed manifest row would compare two different tasks.
+    # Redaction is deterministic from one spec and is reconstructed; the
+    # counterfactual permutation is not (it needs the permutation seed and the
+    # whole eligible pool), so a permuted episode is replayable only when the
+    # manifest supplied is itself the committed permuted split. Anything else
+    # declines to replay rather than replaying the wrong task.
+    control = rec.get("control", "none")
+    spec_control = spec.get("control") or "none"
+    if control != spec_control:
+        if control == "redacted" and spec_control == "none":
+            spec = provenance.redact_spec(spec)
+        else:
+            return None
     task = contract_mod.spec_for_condition(TaskSpec.from_row(spec["spec_row"]),
                                           rec.get("condition", "clean"))
     nodes = [OracleNode.from_row(n) for n in spec["oracle_nodes"]]

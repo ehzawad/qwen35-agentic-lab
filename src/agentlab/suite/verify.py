@@ -201,32 +201,33 @@ def _qualifying_recovery(fault, fire, events) -> tuple[object | None, bool, bool
                      if e.tool == "unit_convert"
                      and e.requested_unit == want_unit
                      and e.decision_id > fire.decision_id]
-        canonical_later = [e for e in later
-                           if e.oracle_node == fault.target_node
-                           and e.exposed_canonical]
-        qualifying = [e for e in attempted if e.exposed_canonical
-                      and e.oracle_node == fault.target_node]
-        return ((qualifying[0] if qualifying else None), bool(canonical_later),
-                bool(attempted))
+        establishing = next((e for e in later
+                             if e.oracle_node == fault.target_node
+                             and e.exposed_canonical), None)
+    else:
+        # Token-bearing contract.
+        same_call = [e for e in later if e.canonical_args_digest == node_identity]
+        canonical = [e for e in same_call if e.exposed_canonical]
+        if ambiguous:
+            # The mutation already happened and was credited; the registered
+            # repair is an IDEMPOTENT replay of the same call. A status query may
+            # establish operational state but is not certified remediation: it
+            # neither reissues the same call nor echoes the token.
+            canonical = [e for e in canonical if e.replay]
+        attempted = [e for e in same_call
+                     if token is not None and e.token_provided == token]
+        if req["later_decision_required"]:
+            attempted = [e for e in attempted if e.decision_id > fire.decision_id]
+        establishing = canonical[0] if canonical else None
 
-    # Token-bearing contract. The SAME event must carry the exact token AND
-    # expose the canonical observation, so a blind retry cannot be laundered by a
-    # decorative token echo afterwards.
-    same_call = [e for e in later if e.canonical_args_digest == node_identity]
-    canonical_later = [e for e in same_call if e.exposed_canonical]
-    attempted = [e for e in same_call
-                 if token is not None and e.token_provided == token]
-    if req["later_decision_required"]:
-        attempted = [e for e in attempted if e.decision_id > fire.decision_id]
-    if ambiguous:
-        # The mutation already happened and was credited; the registered repair is
-        # a token-bearing IDEMPOTENT replay of the same call. A status query may
-        # establish operational state but is not certified remediation: it neither
-        # reissues the same call nor echoes the token.
-        canonical_later = [e for e in canonical_later if e.replay]
-    qualifying = [e for e in attempted if e.exposed_canonical
-                  and (not ambiguous or e.replay)]
-    return ((qualifying[0] if qualifying else None), bool(canonical_later),
+    # THE ESTABLISHING EVENT IS THE ONE THAT MUST QUALIFY. Taking the FIRST
+    # post-fault canonical observation, rather than any qualifying event anywhere
+    # later, is what closes the laundering hole: a blind retry obtains the value
+    # and a decorative token echo on the next decision would otherwise certify a
+    # recovery the agent never earned.
+    earned = (establishing is not None
+              and establishing.call_id in {e.call_id for e in attempted})
+    return ((establishing if earned else None), establishing is not None,
             bool(attempted))
 
 
@@ -251,10 +252,13 @@ def _fault_report(fault, events) -> dict:
         rep["reason"] = "ok"
         rep["recovery_call_id"] = event.call_id
         rep["recovery_decision"] = event.decision_id
+    elif canonical_result:
+        # The value arrived without being earned. This outranks
+        # `no_post_fault_result` even when a token was echoed afterwards: the
+        # question is what ESTABLISHED the result, and a decorative echo did not.
+        rep["reason"] = "blind_retry"
     elif attempted:
         rep["reason"] = "no_post_fault_result"
-    elif canonical_result:
-        rep["reason"] = "blind_retry"
     else:
         rep["reason"] = "no_remediation"
     return rep

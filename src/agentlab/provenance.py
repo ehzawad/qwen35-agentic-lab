@@ -301,8 +301,18 @@ def redact_spec(spec: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def call_digest(tool: str, args: dict) -> str:
-    """Normalized call identity; the recovery token never changes identity."""
-    return rng.digest({"tool": tool, "args": faults_mod.strip_token(args)})
+    """Normalized call identity; the recovery token never changes identity.
+
+    ONE node-identity digest: this delegates to `schema.call_args_digest`, the
+    function `EpisodeRuntime` stamps on every dispatch event. It used to compute
+    its own (`strip_token` but no numeric normalization), so the certification
+    layer's idea of "the same call" and the runtime's could differ on `2` versus
+    `2.0` -- and S12's "did the fault fire at the registered node" check compared
+    two different digest schemes.
+    """
+    from agentlab.suite.schema import call_args_digest
+
+    return call_args_digest(tool, faults_mod.strip_token(args))
 
 
 def _numeric(s):

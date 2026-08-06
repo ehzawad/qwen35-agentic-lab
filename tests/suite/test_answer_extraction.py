@@ -238,8 +238,31 @@ def test_the_one_genuine_failure_is_still_a_failure():
 
 @pytest.mark.skipif(not (TRACE.exists() and SECRET.exists()),
                     reason="verify-a5000 run artifacts are not in the tree (out/ is not committed)")
-def test_full_trace_certification_rescore():
-    """certify_episode is CPU-only and a pure function of trace + run secret."""
+def test_the_verify_a5000_dev_run_is_invalidated_by_the_unified_contract():
+    """Those twelve episodes were produced under the RETIRED environment.
+
+    They are excluded, clean-only apparatus evidence: they carried no
+    fault-recovery outcomes and never entered the study trace set. What they DO
+    still document is the drift this reconciliation closed, visibly, in real
+    bytes:
+
+      * no `environment_contract_sha256`, so the invalidation rule refuses them;
+      * the retired event format (`exposed_digest` / `decision` /
+        `fault_emitted`) instead of the canonical `TraceEvent` fields;
+      * an EMPTY assistant message where the offline rollout carried a structured
+        tool-call object, and a tool result with no `name` -- the transcript-shape
+        drift the model can condition on;
+      * no canonical verdict at all, so oracle-node completion, the final state,
+        capability-token provenance and the call budget were never checked.
+
+    The answer-grammar rescore this module exists for is preserved in
+    `REGRESSION_ROWS` above, which is the discriminating evidence and needs no
+    GPU. Certifying these rows through the current certifier is refused rather
+    than emulated: a legacy-format compatibility path is exactly how a retired
+    environment gets pooled back into a claim.
+    """
+    from agentlab.suite import contract
+
     secret = bytes.fromhex(SECRET.read_text().strip())
     rows = [json.loads(line) for line in
             TRACE.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -248,19 +271,50 @@ def test_full_trace_certification_rescore():
     inlined = {tid: final for tid, _ans, final in REGRESSION_ROWS}
     assert {r["task_id"] for r in rows} == set(inlined)
 
-    recorded_raw, now_raw, now_certified, now_hallucinated = 0, 0, 0, 0
     for row in rows:
-        final = provenance._final_assistant_text(row)
         # the inlined fixture is the real thing, byte for byte
-        assert final == inlined[row["task_id"]]
-        recorded_raw += bool(row["score"]["raw_success"])
+        assert provenance._final_assistant_text(row) == inlined[row["task_id"]]
+        # (1) the invalidation rule refuses the row
+        assert not contract.is_current(row)
+        with pytest.raises(SystemExit):
+            contract.require_current(row, "the verify-a5000 dev trace")
+        # (2) the retired event format, and therefore no valid receipt chain
+        #     under the canonical field names
+        event = row["events"][0]
+        assert "exposed_digest" in event and "exposed_result_digest" not in event
+        assert "decision" in event and "decision_id" not in event
         rep = provenance.certify_episode(row, secret)
-        assert rep["receipts_ok"], row["task_id"]
-        now_raw += bool(rep["raw_success"])
-        now_certified += bool(rep["certified_success"])
-        now_hallucinated += bool(rep["hallucination"]["hallucinated"])
+        assert not rep["receipts_ok"]
+        assert not rep["certified_success"]
+        # (3) no canonical verdict was ever recorded
+        assert not rep["verdict_present"]
+        # (4) the transcript-shape drift, in the real trace
+        assistants = [m for m in row["messages"] if m.get("role") == "assistant"]
+        assert any(m.get("content") == "" and "tool_calls" not in m
+                   for m in assistants), "the empty-assistant-turn drift"
+        assert all("name" not in m for m in row["messages"]
+                   if m.get("role") == "tool"), "the nameless-tool-result drift"
 
-    assert recorded_raw == 4          # what the defective grammar committed
-    assert now_raw == 11
-    assert now_certified == 11
-    assert now_hallucinated == 0      # seven false hallucination labels cleared
+
+def test_the_unified_contract_emits_the_shape_that_run_was_missing():
+    """The same two drifts, asserted positively on a current episode."""
+    from agentlab.chat import assistant_tool_message
+    from agentlab.suite import runtime as rt_mod
+    from agentlab.suite.generate import build_task
+
+    bundle = build_task("agentlab-suite-v1", 0xA61E0005, "eval", "lookup_chain", 2,
+                        0, None)
+    msg = assistant_tool_message("thinking out loud",
+                                 [{"name": "kb_lookup", "arguments": {"key": "K1"}}])
+    assert msg["role"] == "assistant"
+    assert msg["tool_calls"][0]["function"]["name"] == "kb_lookup"
+    assert msg["content"] == "thinking out loud"
+
+    rt = rt_mod.EpisodeRuntime(bundle.spec, bundle.kb, bundle.nodes,
+                               secret=bytes.fromhex("5c" * 32))
+    rt.begin_decision()
+    text = rt.dispatch(bundle.nodes[0].tool, dict(bundle.nodes[0].args))
+    tool_msg = {"role": "tool", "name": bundle.nodes[0].tool, "content": text}
+    assert tool_msg["name"] == "kb_lookup"
+    assert rt_mod.parse_observation(text)["receipt"]
+    assert verify.RUNAWAY_TERMINATIONS  # the module is the one that owns runaway

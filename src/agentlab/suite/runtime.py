@@ -61,21 +61,17 @@ from . import faults as _faults
 from .faults import (MALFORMED_LITERAL, TOKEN_ARG, TOKEN_PROPERTY, FaultEngine,
                      parse_token_from_args, strip_token)
 from .kb import KBView
-from .schema import (TaskSpec, TraceEvent, call_args_digest, canon, digest,
-                     digest_text, normalize_number)
+from .schema import (ARG_TYPES, TaskSpec, TraceEvent, call_args_digest, canon,
+                     coerce_tool_args, digest, digest_text, normalize_number)
 
 READ_ONLY_TOOLS = ("calculator", "unit_convert", "kb_lookup", "warehouse_query")
 
 RECEIPT_LINE_PREFIX = "receipt: "
 
-_ARG_TYPES = {
-    "calculator": {"expression": str},
-    "unit_convert": {"value": float, "from_unit": str, "to_unit": str},
-    "kb_lookup": {"key": str},
-    "warehouse_query": {"resource": str, "token": str, "quantity": int,
-                        "mass_kg": float},
-    "warehouse_update": {"action": str, "token": str, "quantity": int},
-}
+# The declared argument types live in `suite.schema` (ARG_TYPES), with the data
+# contract, because call IDENTITY depends on them and `call_args_digest` has to
+# apply the same coercion this dispatcher does.
+_ARG_TYPES = ARG_TYPES
 
 
 def tool_schemas_for_family(family: str) -> list[dict]:
@@ -125,22 +121,8 @@ def tool_names_for_family(family: str) -> list[str]:
 
 
 def _coerce(name: str, raw: dict) -> dict:
-    """Cast string arguments to declared types; uncastable values pass through."""
-    types = _ARG_TYPES.get(name, {})
-    out = {}
-    for k, v in (raw or {}).items():
-        want = types.get(k)
-        if want in (int, float) and isinstance(v, str):
-            try:
-                out[k] = want(v.strip())
-                continue
-            except ValueError:
-                pass
-        if want is int and isinstance(v, float) and v.is_integer():
-            out[k] = int(v)
-            continue
-        out[k] = v.strip() if isinstance(v, str) else v
-    return out
+    """ONE coercion, shared with `schema.call_args_digest`."""
+    return coerce_tool_args(name, raw)
 
 
 def _num_eq(a, b, tol: float = 1e-9) -> bool:

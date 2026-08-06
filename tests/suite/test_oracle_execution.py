@@ -7,14 +7,14 @@ import pytest
 from agentlab.suite.runtime import run_oracle
 from agentlab.suite.schema import CELLS
 
-from .conftest import mk_bundle
+from .conftest import SECRET, mk_bundle
 
 
 @pytest.mark.parametrize("family,horizon", CELLS)
 def test_clean_oracle_succeeds(family, horizon):
     b = mk_bundle(family, horizon)
-    _, verdict = run_oracle(b.spec, b.kb, b.nodes)
-    assert verdict.strict_success
+    _, verdict = run_oracle(b.spec, b.kb, b.nodes, secret=SECRET)
+    assert verdict.certified_success
     assert verdict.unique_valid_nodes == horizon
     assert verdict.excess_calls == 0
     assert verdict.fault_assigned == 0
@@ -36,8 +36,8 @@ def test_clean_oracle_succeeds(family, horizon):
 ])
 def test_faulted_oracle_recovers(family, horizon, entries):
     b = mk_bundle(family, horizon, entries)
-    _, verdict = run_oracle(b.spec, b.kb, b.nodes)
-    assert verdict.strict_success
+    _, verdict = run_oracle(b.spec, b.kb, b.nodes, secret=SECRET)
+    assert verdict.certified_success
     assert verdict.faults_triggered == len(entries)
     assert verdict.recovered
     assert verdict.recovery_success
@@ -51,8 +51,8 @@ def test_faulted_oracle_recovers(family, horizon, entries):
 ])
 def test_two_fault_stress_oracle(family, horizon, entries):
     b = mk_bundle(family, horizon, entries, split="eval_stress")
-    _, verdict = run_oracle(b.spec, b.kb, b.nodes)
-    assert verdict.strict_success
+    _, verdict = run_oracle(b.spec, b.kb, b.nodes, secret=SECRET)
+    assert verdict.certified_success
     assert verdict.faults_triggered == 2
     assert verdict.excess_calls == 2
 
@@ -63,6 +63,6 @@ def test_clean_arm_of_faulted_spec():
     clean = b.spec.without_faults()
     assert clean.faults == []
     assert clean.max_decisions == 8 + 3
-    _, verdict = run_oracle(clean, b.kb, b.nodes)
-    assert verdict.strict_success
+    _, verdict = run_oracle(clean, b.kb, b.nodes, secret=SECRET)
+    assert verdict.certified_success
     assert verdict.fault_assigned == 0

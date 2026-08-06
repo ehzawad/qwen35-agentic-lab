@@ -394,9 +394,11 @@ def replay_record(rec: dict, bundle, *, secret: bytes) -> tuple[bool, str]:
     if len(runtime.events) != len(calls):
         return False, f"replay_call_count:{len(runtime.events)}!={len(calls)}"
     for i, (event, call) in enumerate(zip(runtime.events, calls)):
-        # The exposed digest is SHA-256 of the exact bytes the replay produced,
-        # so this IS a byte comparison against what the model was shown.
-        if digest_text(call.get("exposed", "")) != event.exposed_result_digest:
+        # `model_visible_digest` is SHA-256 of the WHOLE tool message the model
+        # read -- envelope plus receipt line -- so this IS a byte comparison
+        # against what the model was shown, receipt included. Comparing only the
+        # envelope would let receipt drift through unnoticed.
+        if digest_text(call.get("exposed", "")) != event.model_visible_digest:
             return False, f"replay_observation_bytes@{i}"
     verdict = runtime.verify(rec["final"], transcript=rec["messages"],
                               termination_reason=_termination_reason(rec)).to_row()

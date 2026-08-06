@@ -9,6 +9,10 @@ import os
 from agentlab.suite.generate import build_task, load_suite_config
 
 SUITE = "agentlab-suite-v1"
+# The run secret every suite test uses. Recovery tokens and receipts are keyed
+# with it, so it is part of the model-visible observation bytes: a fixture
+# without one could not mint the tokens the registered predicate requires.
+SECRET = bytes.fromhex("5c" * 32)
 SEED = 0xA61E0005  # the committed eval seed; tests never depend on GPU state
 
 CONFIG_PATH = os.path.join(
