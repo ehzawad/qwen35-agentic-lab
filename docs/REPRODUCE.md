@@ -183,7 +183,9 @@ Known pre-existing failure as of 2026-08-06:
 checkout because it asserts a refusal message that only appears while P does not
 exist — and P now does. It is a test-isolation defect (council Priority 1), not
 an apparatus defect, and it is untouched here. Everything else passes:
-**890 passed, 1 failed, 6 skipped**.
+**912 passed, 1 failed, 6 skipped** on the tree at this commit — the 890 that
+passed before the apparatus records landed, plus the 22 in
+`tests/test_apparatus_records.py`, with the same single failure before and after.
 
 ## Step 5 — the suite payload (deterministic, CPU, ~3 s)
 
